@@ -1220,6 +1220,21 @@ impl Game {
         self.snd.push(Snd::Roll);
     }
 
+    // instant attack used while replaying a reconnect backlog
+    fn net_apply_attack_fast(&mut self, a: usize, d: usize, ra: u32, rd: u32, captured: bool) {
+        if a >= self.terrs.len() || d >= self.terrs.len() {
+            return;
+        }
+        if self.recording {
+            self.events.push(RepEvent::Attack { a, d, ra, rd, captured });
+        }
+        if captured {
+            self.terrs[d].owner = self.terrs[a].owner;
+            self.terrs[d].dice = self.terrs[a].dice.saturating_sub(1).max(1);
+        }
+        self.terrs[a].dice = 1;
+    }
+
     fn net_apply_reinforce(&mut self, player: usize, lands: Vec<usize>) {
         // mirror the host's stock arithmetic so displays stay in sync
         let n = self.largest_region(player) + self.reserve[player];
@@ -2353,14 +2368,22 @@ fn send_net_line(stream: &mut std::net::TcpStream, line: &str) {
     let _ = stream.write_all(b"\n");
 }
 
-// read one newline-terminated line with a hard length cap
+// read one newline-terminated line with a hard length cap; transient
+// errors (interrupted syscalls, spurious timeouts on Windows) are retried
+// rather than treated as a dead connection
 fn read_net_line(r: &mut std::io::BufReader<std::net::TcpStream>, cap: usize) -> Option<String> {
     use std::io::Read;
     let mut buf = Vec::new();
     loop {
         let mut byte = [0u8; 1];
         match r.read(&mut byte) {
-            Ok(0) | Err(_) => return None,
+            Ok(0) => return None,
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut => continue,
+                _ => return None,
+            },
             Ok(_) => {
                 if byte[0] == b'\n' {
                     return String::from_utf8(buf).ok();
@@ -2376,12 +2399,15 @@ fn read_net_line(r: &mut std::io::BufReader<std::net::TcpStream>, cap: usize) ->
 
 enum HostMsg {
     Joined(#[allow(dead_code)] usize),
+    Rejoined(usize), // lobby seat that reattached mid-game
     Left(usize),
     Intent(usize, String),
 }
 
 struct HostShared {
-    seats: Vec<Option<std::net::TcpStream>>, // index = guest seat - 1
+    seats: Vec<Option<std::net::TcpStream>>, // index = lobby seat - 1
+    gens: Vec<u64>, // bumped on every (re)attach; guards stale cleanup
+    tokens: HashMap<String, usize>, // reconnect token -> lobby seat
     banned: HashSet<std::net::IpAddr>,
     attempts: HashMap<std::net::IpAddr, u32>,
     last_try: HashMap<std::net::IpAddr, std::time::Instant>,
@@ -2475,6 +2501,8 @@ impl HostNet {
         let (tx, rx) = std::sync::mpsc::channel();
         let shared = std::sync::Arc::new(std::sync::Mutex::new(HostShared {
             seats: (0..guests).map(|_| None).collect(),
+            gens: vec![0; guests],
+            tokens: HashMap::new(),
             banned: HashSet::new(),
             attempts: HashMap::new(),
             last_try: HashMap::new(),
@@ -2557,6 +2585,45 @@ impl HostNet {
         humans
     }
 
+    // resend everything a reattached guest missed, then mark it synced
+    fn send_resume(&mut self, lobby_seat: usize, g: &Game, seed: u64, diff: Difficulty) {
+        use std::io::Write;
+        let mut sh = self.shared.lock().unwrap();
+        let Some(&game_seat) = self.remap.get(&lobby_seat) else {
+            return;
+        };
+        if let Some(s) = sh.seats[lobby_seat - 1].as_mut() {
+            let _ = writeln!(
+                s,
+                "RESUME {} {} {} {} {} {}",
+                seed,
+                g.players,
+                g.humans,
+                diff_idx(diff),
+                game_seat,
+                HUMAN_COLOR.load(Ordering::Relaxed)
+            );
+            for ev in &g.events {
+                let line = match ev {
+                    RepEvent::Attack {
+                        a,
+                        d,
+                        ra,
+                        rd,
+                        captured,
+                    } => format!("ATK {} {} {} {} {}", a, d, ra, rd, *captured as u8),
+                    RepEvent::Reinforce { player, lands } => {
+                        let ls: Vec<String> =
+                            lands.iter().map(|t| t.to_string()).collect();
+                        format!("REINF {} {}", player, ls.join(","))
+                    }
+                };
+                let _ = writeln!(s, "{}", line);
+            }
+            let _ = writeln!(s, "SYNCED");
+        }
+    }
+
     // send any newly recorded game events to all guests
     fn flush_events(&mut self, g: &Game) {
         while self.sent < g.events.len() {
@@ -2595,11 +2662,30 @@ fn host_handle_client(
         Err(_) => return release(&shared),
     };
     let mut w = stream;
-    // auth: first line must be JOIN <code>
+    // auth: JOIN <code> for a fresh seat, REJOIN <code> <token> to reclaim one
+    let mut rejoin_seat: Option<usize> = None;
     let ok = match read_net_line(&mut reader, NET_MAX_LINE) {
         Some(l) => {
             let mut it = l.split_whitespace();
-            it.next() == Some("JOIN") && it.next() == Some(code.as_str())
+            match it.next() {
+                Some("JOIN") => it.next() == Some(code.as_str()),
+                Some("REJOIN") => {
+                    if it.next() == Some(code.as_str()) {
+                        if let Some(tok) = it.next() {
+                            let mut sh = shared.lock().unwrap();
+                            if let Some(&slot_seat) = sh.tokens.get(tok) {
+                                if let Ok(clone) = w.try_clone() {
+                                    sh.seats[slot_seat - 1] = Some(clone);
+                                    sh.gens[slot_seat - 1] += 1;
+                                    rejoin_seat = Some(slot_seat);
+                                }
+                            }
+                        }
+                    }
+                    rejoin_seat.is_some()
+                }
+                _ => false,
+            }
         }
         None => false,
     };
@@ -2616,49 +2702,182 @@ fn host_handle_client(
         send_net_line(&mut w, "BYE wrong code");
         return;
     }
-    let seat = {
+    let seat = if let Some(s) = rejoin_seat {
+        Some(s)
+    } else {
         let mut sh = shared.lock().unwrap();
         if sh.started {
             None
         } else {
-        match sh.seats.iter().position(|s| s.is_none()) {
-            Some(i) => match w.try_clone() {
-                Ok(clone) => {
-                    sh.seats[i] = Some(clone);
-                    Some(i + 1)
-                }
-                Err(_) => None,
-            },
-            None => None,
-        }
+            match sh.seats.iter().position(|s| s.is_none()) {
+                Some(i) => match w.try_clone() {
+                    Ok(clone) => {
+                        sh.seats[i] = Some(clone);
+                        sh.gens[i] += 1;
+                        Some(i + 1)
+                    }
+                    Err(_) => None,
+                },
+                None => None,
+            }
         }
     };
     let Some(seat) = seat else {
         send_net_line(&mut w, "BYE full");
         return release(&shared);
     };
-    send_net_line(&mut w, &format!("WELCOME {}", seat));
+    let my_gen = shared.lock().unwrap().gens[seat - 1];
     let _ = reader.get_ref().set_read_timeout(None);
-    let _ = tx.send(HostMsg::Joined(seat));
-    while let Some(l) = read_net_line(&mut reader, NET_MAX_LINE) {
-        let _ = tx.send(HostMsg::Intent(seat, l));
+    if rejoin_seat.is_some() {
+        let _ = tx.send(HostMsg::Rejoined(seat));
+    } else {
+        // fresh join: issue the reconnect token
+        let token = {
+            let t = format!(
+                "{:08x}{:08x}",
+                gen_range(0u32, u32::MAX),
+                gen_range(0u32, u32::MAX)
+            );
+            let mut sh = shared.lock().unwrap();
+            sh.tokens.insert(t.clone(), seat);
+            t
+        };
+        send_net_line(&mut w, &format!("WELCOME {} {}", seat, token));
+        let _ = tx.send(HostMsg::Joined(seat));
+    }
+    loop {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut dead = None;
+        loop {
+            let mut byte = [0u8; 1];
+            match reader.read(&mut byte) {
+                Ok(0) => {
+                    dead = Some("EOF".to_string());
+                    break;
+                }
+                Err(e) => match e.kind() {
+                    std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::TimedOut => continue,
+                    k => {
+                        dead = Some(format!("ERR {:?} {}", k, e));
+                        break;
+                    }
+                },
+                Ok(_) => {
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                    if buf.len() >= NET_MAX_LINE {
+                        dead = Some("LINE TOO LONG".to_string());
+                        break;
+                    }
+                    buf.push(byte[0]);
+                }
+            }
+        }
+        if let Some(why) = dead {
+            eprintln!("CLIENT_READ_END seat {} reason {}", seat, why);
+            break;
+        }
+        if let Ok(l) = String::from_utf8(buf) {
+            let _ = tx.send(HostMsg::Intent(seat, l));
+        }
     }
     {
         let mut sh = shared.lock().unwrap();
-        sh.seats[seat - 1] = None;
         sh.conns -= 1;
+        if sh.gens[seat - 1] != my_gen {
+            return; // the seat was reclaimed by a reconnect; don't touch it
+        }
+        sh.seats[seat - 1] = None;
     }
     let _ = tx.send(HostMsg::Left(seat));
 }
+
+type NetParts = (
+    std::net::TcpStream,
+    std::sync::mpsc::Receiver<String>,
+);
 
 struct GuestNet {
     stream: std::net::TcpStream, // write half
     rx: std::sync::mpsc::Receiver<String>,
     seat: usize,
     pending: std::collections::VecDeque<RepEvent>,
+    addr: String,
+    code: String,
+    token: String,
+    catching_up: bool, // replaying the backlog after a reconnect
+    rec_rx: Option<std::sync::mpsc::Receiver<Result<NetParts, String>>>,
+}
+
+// spawn a reader thread over a connected socket, yielding its line channel
+fn spawn_reader(
+    stream: &std::net::TcpStream,
+) -> Result<std::sync::mpsc::Receiver<String>, String> {
+    let mut reader = std::io::BufReader::new(
+        stream.try_clone().map_err(|_| "Socket error".to_string())?,
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || loop {
+        match read_net_line(&mut reader, NET_MAX_HOST_LINE) {
+            Some(l) => {
+                if tx.send(l).is_err() {
+                    break;
+                }
+            }
+            None => {
+                let _ = tx.send("LOST".to_string());
+                break;
+            }
+        }
+    });
+    Ok(rx)
+}
+
+// background auto-reconnect: keep trying to reclaim our seat with the token
+fn spawn_reconnect(
+    addr: String,
+    code: String,
+    token: String,
+) -> std::sync::mpsc::Receiver<Result<NetParts, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let full = if addr.contains(':') {
+            addr.clone()
+        } else {
+            format!("{}:{}", addr, net_port())
+        };
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let Ok(sock) = full.parse::<std::net::SocketAddr>() else {
+                break;
+            };
+            if let Ok(stream) = std::net::TcpStream::connect_timeout(
+                &sock,
+                std::time::Duration::from_secs(3),
+            ) {
+                let mut w = match stream.try_clone() {
+                    Ok(w) => w,
+                    Err(_) => continue,
+                };
+                send_net_line(&mut w, &format!("REJOIN {} {}", code, token));
+                if let Ok(lines) = spawn_reader(&stream) {
+                    let _ = tx.send(Ok((w, lines)));
+                    return;
+                }
+            }
+        }
+        let _ = tx.send(Err("Could not reconnect".to_string()));
+    });
+    rx
 }
 
 fn guest_connect(addr: &str, code: &str) -> Result<GuestNet, String> {
+    let addr_owned = addr.to_string();
+    let code_owned = code.to_string();
     let full = if addr.contains(':') {
         addr.to_string()
     } else {
@@ -2687,26 +2906,20 @@ fn guest_connect(addr: &str, code: &str) -> Result<GuestNet, String> {
         .next()
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| "Bad reply".to_string())?;
+    let token = it.next().unwrap_or("").to_string();
     let _ = stream.set_read_timeout(None);
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || loop {
-        match read_net_line(&mut reader, NET_MAX_HOST_LINE) {
-            Some(l) => {
-                if tx.send(l).is_err() {
-                    break;
-                }
-            }
-            None => {
-                let _ = tx.send("BYE connection lost".to_string());
-                break;
-            }
-        }
-    });
+    drop(reader);
+    let rx = spawn_reader(&stream)?;
     Ok(GuestNet {
         stream: w,
         rx,
         seat,
         pending: std::collections::VecDeque::new(),
+        addr: addr_owned,
+        code: code_owned,
+        token,
+        catching_up: false,
+        rec_rx: None,
     })
 }
 
@@ -4143,6 +4356,8 @@ async fn main() {
     let mut guest: Option<GuestNet> = None;
     let mut join = JoinUi::default();
     let mut menu_time = 0.0f32;
+    let mut net_ping_t = 0.0f32;
+    let mut awaiting: HashMap<usize, f32> = HashMap::new(); // game seat -> grace timer
     let mut copied_t = 0.0f32;
     let mut confirm: Option<Confirm> = None;
     let mut snd_queue: Vec<Snd> = Vec::new();
@@ -4154,10 +4369,13 @@ async fn main() {
 
     // automation hooks for testing the network path
     if std::env::var("DW_TEST_HOST").is_ok() {
-        if let Ok(h) = HostNet::start(menu.players - 1) {
-            eprintln!("HOSTCODE {}", h.code);
-            host = Some(h);
-            screen = Screen::HostLobby;
+        match HostNet::start(menu.players - 1) {
+            Ok(h) => {
+                eprintln!("HOSTCODE {}", h.code);
+                host = Some(h);
+                screen = Screen::HostLobby;
+            }
+            Err(e) => eprintln!("HOSTFAIL {}", e),
         }
     }
     if let Ok(spec) = std::env::var("DW_TEST_JOIN") {
@@ -4241,8 +4459,17 @@ async fn main() {
                 if autoend && g.current == 0 && g.battle.is_none() && g.over.is_none() {
                     g.end_turn(); // test hook: the host seat passes instantly
                 }
+                // ---- heartbeats: keep idle connections alive through NATs
+                net_ping_t += dt;
+                let do_ping = net_ping_t >= 2.0;
+                if do_ping {
+                    net_ping_t = 0.0;
+                }
                 // ---- hosting: apply guest intents, broadcast new events
                 if let Some(h) = host.as_mut() {
+                    if do_ping {
+                        h.broadcast("PING");
+                    }
                     while let Ok(msg) = h.rx.try_recv() {
                         match msg {
                             HostMsg::Intent(lobby_seat, line) => {
@@ -4280,20 +4507,73 @@ async fn main() {
                                     continue;
                                 };
                                 if g.over.is_none() {
-                                    let msg = format!("{} disconnected", HUMAN_LABELS[seat]);
-                                    g.over = Some(msg.clone());
-                                    g.banner_t = 0.0;
-                                    h.broadcast(&format!("OVER {}", msg));
+                                    // hold the seat and give them time to come back
+                                    awaiting.insert(seat, 45.0);
+                                    g.push_log(format!(
+                                        "{} lost connection — waiting for them to reconnect...",
+                                        HUMAN_LABELS[seat]
+                                    ));
+                                }
+                            }
+                            HostMsg::Rejoined(lobby_seat) => {
+                                h.send_resume(lobby_seat, g, menu.seed, menu.difficulty);
+                                if let Some(&seat) = h.remap.get(&lobby_seat) {
+                                    awaiting.remove(&seat);
+                                    g.push_log(format!(
+                                        "{} reconnected!",
+                                        HUMAN_LABELS[seat]
+                                    ));
                                 }
                             }
                             HostMsg::Joined(_) => {}
                         }
                     }
                     h.flush_events(g);
+                    // grace timers: give up on seats that never came back
+                    let mut expired: Vec<usize> = Vec::new();
+                    for (seat, t) in awaiting.iter_mut() {
+                        *t -= dt;
+                        if *t <= 0.0 {
+                            expired.push(*seat);
+                        }
+                    }
+                    for seat in expired {
+                        awaiting.remove(&seat);
+                        if g.over.is_none() {
+                            let msg = format!("{} disconnected", HUMAN_LABELS[seat]);
+                            g.over = Some(msg.clone());
+                            g.banner_t = 0.0;
+                            h.broadcast(&format!("OVER {}", msg));
+                        }
+                    }
                 }
 
                 // ---- joined: apply the host's events, queue our own intents
                 if let Some(gn) = guest.as_mut() {
+                    if do_ping && gn.rec_rx.is_none() {
+                        send_net_line(&mut gn.stream, "PING");
+                    }
+                    // reconnect attempt finished?
+                    if let Some(rr) = &gn.rec_rx {
+                        if let Ok(result) = rr.try_recv() {
+                            match result {
+                                Ok((w, rx)) => {
+                                    gn.stream = w;
+                                    gn.rx = rx;
+                                    gn.rec_rx = None;
+                                    gn.catching_up = true;
+                                    gn.pending.clear();
+                                }
+                                Err(e) => {
+                                    gn.rec_rx = None;
+                                    if g.over.is_none() {
+                                        g.over = Some(e);
+                                        g.banner_t = 0.0;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     while let Ok(l) = gn.rx.try_recv() {
                         let mut it = l.split_whitespace();
                         match it.next() {
@@ -4323,6 +4603,49 @@ async fn main() {
                                     .unwrap_or_default();
                                 gn.pending.push_back(RepEvent::Reinforce { player, lands });
                             }
+                            Some("PING") => {}
+                            Some("RESUME") => {
+                                // rebuild the match and fast-forward the backlog
+                                let seed: u64 =
+                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                                let players: usize =
+                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
+                                let humans: usize =
+                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
+                                let di: usize =
+                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+                                let seat: usize =
+                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(gn.seat);
+                                if let Some(c) =
+                                    it.next().and_then(|v| v.parse::<usize>().ok())
+                                {
+                                    HUMAN_COLOR.store(c % MAX_PLAYERS, Ordering::Relaxed);
+                                }
+                                gn.seat = seat;
+                                let mut ng =
+                                    gen_map(seed, players.clamp(2, 8), humans, idx_diff(di));
+                                ng.net_guest = true;
+                                ng.my_seat = seat;
+                                *g = ng;
+                                gn.catching_up = true;
+                            }
+                            Some("SYNCED") => {
+                                gn.catching_up = false;
+                                g.push_log("Reconnected!".to_string());
+                            }
+                            Some("LOST") => {
+                                // connection dropped: hold the game and retry quietly
+                                if g.over.is_none() && gn.rec_rx.is_none() {
+                                    gn.rec_rx = Some(spawn_reconnect(
+                                        gn.addr.clone(),
+                                        gn.code.clone(),
+                                        gn.token.clone(),
+                                    ));
+                                    g.push_log(
+                                        "Connection lost — reconnecting...".to_string(),
+                                    );
+                                }
+                            }
                             Some("OVER") | Some("BYE") => {
                                 if g.over.is_none() {
                                     let rest: Vec<&str> = it.collect();
@@ -4335,6 +4658,19 @@ async fn main() {
                                 }
                             }
                             _ => {}
+                        }
+                        // while catching up, apply events instantly
+                        if gn.catching_up {
+                            while let Some(ev) = gn.pending.pop_front() {
+                                match ev {
+                                    RepEvent::Attack { a, d, ra, rd, captured } => {
+                                        g.net_apply_attack_fast(a, d, ra, rd, captured)
+                                    }
+                                    RepEvent::Reinforce { player, lands } => {
+                                        g.net_apply_reinforce(player, lands)
+                                    }
+                                }
+                            }
                         }
                     }
                     if g.battle.is_none() && g.over.is_none() {
@@ -4407,7 +4743,7 @@ async fn main() {
                     }
                 } else if g.battle.is_none() && g.over.is_none() {
                     let my_turn = if let Some(gn) = &guest {
-                        g.current == gn.seat
+                        g.current == gn.seat && gn.rec_rx.is_none() && !gn.catching_up
                     } else if host.is_some() {
                         g.current == 0
                     } else {
@@ -4428,6 +4764,23 @@ async fn main() {
                     }
                 }
                 draw_game(g, &ui, &settings);
+                if let Some(gn) = &guest {
+                    if gn.rec_rx.is_some() && g.over.is_none() {
+                        let txt = "Connection lost — reconnecting...";
+                        let w = ui.width(txt, 22.0) + 56.0;
+                        draw_round_frame(
+                            (WIN_W - w) * 0.5,
+                            270.0,
+                            w,
+                            56.0,
+                            16.0,
+                            2.5,
+                            SRF(),
+                            BORDER(),
+                        );
+                        ui.text_centered(txt, WIN_W * 0.5, 306.0, 22.0, INK());
+                    }
+                }
                 if let Some(kind) = confirm {
                     draw_confirm(kind, &ui);
                 }
@@ -4436,6 +4789,7 @@ async fn main() {
                     confirm = None;
                     host = None;
                     guest = None;
+                    awaiting.clear();
                     HUMAN_COLOR.store(settings.color, Ordering::Relaxed);
                     screen = Screen::Menu;
                     menu.regen();
