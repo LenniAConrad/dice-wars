@@ -1,24 +1,24 @@
-# Dice Wars v1.0.0
+# Dice Wars v1.0.1
 
-A pastel Dice Wars–style territory conquest game written in Rust. First release!
+Multiplayer stability release.
 
-## Highlights
+## Fixed
 
-- **Hex-map conquest**: seeded, deterministic maps you can bookmark and share — same seed, same map.
-- **2–8 players**: play solo against AI bots with hidden personalities and three difficulty levels, or battle friends.
-- **Online multiplayer**: host a lobby with a 4-digit room code (LAN/VPN out of the box); the server validates every move and rolls all dice, so nobody can cheat.
-- **Battle showcase**: every attack pops up both sides' dice with running totals over a dimmed board.
-- **Replays & GIF export**: rewatch any finished game or save it as a looping timelapse GIF — encoder built in, no external tools.
-- **Accessibility**: colorblind-safe palette mode with per-player shape badges, win-probability hints, adjustable game speed, dark mode.
-- **Procedural audio**: every sound effect is synthesized at startup — no asset files.
+- **Guests no longer lose the connection mid-game.** The network protocol capped
+  messages at 200 bytes as an anti-flood measure, but late-game reinforcement
+  broadcasts legitimately exceed that — the guest treated the long line as a dead
+  socket and dropped ("Connection lost"). Host-to-guest messages now allow 4 KB,
+  while the strict cap remains on untrusted guest input.
+- **Hosting again after a match always works.** The lobby port is now opened once
+  and reused for every lobby, so re-hosting can no longer fail silently on a port
+  stuck in TIME_WAIT. If the port is genuinely unavailable, the menu says so.
+- Wrong-code bans now trigger after five attempts instead of three, and the join
+  screen explains likely firewall causes when a connection fails.
+- Installing over a running game no longer fails with "Text file busy."
+- The window/taskbar now shows the die icon on Linux (engine updated to
+  macroquad 0.4.15), instead of the generic placeholder.
 
 ## Downloads
 
-- **Linux**: `dice-wars-v1.0.0-linux-x86_64.tar.gz` — unpack and run `./dice-wars`
-- **Windows**: `dice-wars-v1.0.0-windows-x86_64.zip` — unpack and run `DiceWars.exe`
-
-Or build from source: `./run.sh` (Linux/macOS) or `scripts\build.bat` (Windows). The build scripts install the Rust toolchain automatically if it's missing.
-
-## How to play
-
-Click one of your territories (2+ dice), then an adjacent enemy territory to attack. Both sides roll all their dice — higher total wins, ties defend. END TURN reinforces you with one die per territory in your largest connected region. Conquer the whole map!
+- **Linux**: `dice-wars-v1.0.1-linux-x86_64.tar.gz` — unpack and run `./dice-wars`
+- **Windows**: `dice-wars-v1.0.1-windows-x86_64.zip` — unpack and run `DiceWars.exe`

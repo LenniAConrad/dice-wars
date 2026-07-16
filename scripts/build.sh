@@ -2,6 +2,8 @@
 # Build Dice Wars from scratch — installs the Rust toolchain if missing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# prefer the rustup toolchain over any distro rust
+export PATH="$HOME/.cargo/bin:$PATH"
 
 if ! command -v cargo >/dev/null 2>&1; then
     echo "Rust toolchain not found — installing via rustup..."

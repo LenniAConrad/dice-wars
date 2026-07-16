@@ -6,7 +6,7 @@
 
 Hex maps · isometric dice · hidden AI personalities · seeded & bookmarkable maps · replays with GIF export · procedural sound
 
-![Rust](https://img.shields.io/badge/rust-1.75+-b7410e) ![License](https://img.shields.io/badge/license-MIT-3c5a99) ![macroquad](https://img.shields.io/badge/engine-macroquad-6a5acd)
+![Rust](https://img.shields.io/badge/rust-1.82+-b7410e) ![License](https://img.shields.io/badge/license-MIT-3c5a99) ![macroquad](https://img.shields.io/badge/engine-macroquad-6a5acd)
 
 <img src="assets/screenshot-game.png" alt="Dice Wars gameplay" width="720">
 

@@ -1421,11 +1421,16 @@ fn quad(a: Vec2, b: Vec2, c: Vec2, d: Vec2, col: Color) {
 
 // a quad with per-corner colors: real gradients for the die faces
 fn grad_quad(p: [Vec2; 4], c: [Color; 4]) {
-    use macroquad::models::Vertex;
     let v = |p: Vec2, c: Color| Vertex {
         position: vec3(p.x, p.y, 0.0),
         uv: vec2(0.0, 0.0),
-        color: c,
+        color: [
+            (c.r * 255.0) as u8,
+            (c.g * 255.0) as u8,
+            (c.b * 255.0) as u8,
+            (c.a * 255.0) as u8,
+        ],
+        normal: vec4(0.0, 0.0, 0.0, 0.0),
     };
     draw_mesh(&Mesh {
         vertices: vec![v(p[0], c[0]), v(p[1], c[1]), v(p[2], c[2]), v(p[3], c[3])],
@@ -2314,8 +2319,17 @@ fn draw_game(game: &Game, ui: &Ui, settings: &Settings) {
 // Host-authoritative: guests send intents, the host validates, rolls, and
 // broadcasts the resulting events (the same RepEvents replays use).
 
-const NET_PORT: u16 = 7777;
-const NET_MAX_LINE: usize = 200;
+const NET_PORT_DEFAULT: u16 = 7777;
+
+// DW_PORT overrides the port (used by the automated tests)
+fn net_port() -> u16 {
+    std::env::var("DW_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(NET_PORT_DEFAULT)
+}
+const NET_MAX_LINE: usize = 200; // guest -> host intents are tiny
+const NET_MAX_HOST_LINE: usize = 4096; // host -> guest events can be long (REINF lists)
 
 fn diff_idx(d: Difficulty) -> usize {
     match d {
@@ -2340,7 +2354,7 @@ fn send_net_line(stream: &mut std::net::TcpStream, line: &str) {
 }
 
 // read one newline-terminated line with a hard length cap
-fn read_net_line(r: &mut std::io::BufReader<std::net::TcpStream>) -> Option<String> {
+fn read_net_line(r: &mut std::io::BufReader<std::net::TcpStream>, cap: usize) -> Option<String> {
     use std::io::Read;
     let mut buf = Vec::new();
     loop {
@@ -2351,7 +2365,7 @@ fn read_net_line(r: &mut std::io::BufReader<std::net::TcpStream>) -> Option<Stri
                 if byte[0] == b'\n' {
                     return String::from_utf8(buf).ok();
                 }
-                if buf.len() >= NET_MAX_LINE {
+                if buf.len() >= cap {
                     return None;
                 }
                 buf.push(byte[0]);
@@ -2361,7 +2375,7 @@ fn read_net_line(r: &mut std::io::BufReader<std::net::TcpStream>) -> Option<Stri
 }
 
 enum HostMsg {
-    Joined(usize),
+    Joined(#[allow(dead_code)] usize),
     Left(usize),
     Intent(usize, String),
 }
@@ -2413,7 +2427,7 @@ impl HostNet {
         // bind the port exactly once; afterwards every lobby reuses it,
         // avoiding TIME_WAIT rebind failures when hosting again
         if !LISTENING.load(Ordering::Relaxed) {
-            let listener = std::net::TcpListener::bind(("0.0.0.0", NET_PORT))?;
+            let listener = std::net::TcpListener::bind(("0.0.0.0", net_port()))?;
             listener.set_nonblocking(true)?;
             LISTENING.store(true, Ordering::Relaxed);
             let slot = host_slot();
@@ -2582,7 +2596,7 @@ fn host_handle_client(
     };
     let mut w = stream;
     // auth: first line must be JOIN <code>
-    let ok = match read_net_line(&mut reader) {
+    let ok = match read_net_line(&mut reader, NET_MAX_LINE) {
         Some(l) => {
             let mut it = l.split_whitespace();
             it.next() == Some("JOIN") && it.next() == Some(code.as_str())
@@ -2626,7 +2640,7 @@ fn host_handle_client(
     send_net_line(&mut w, &format!("WELCOME {}", seat));
     let _ = reader.get_ref().set_read_timeout(None);
     let _ = tx.send(HostMsg::Joined(seat));
-    while let Some(l) = read_net_line(&mut reader) {
+    while let Some(l) = read_net_line(&mut reader, NET_MAX_LINE) {
         let _ = tx.send(HostMsg::Intent(seat, l));
     }
     {
@@ -2648,7 +2662,7 @@ fn guest_connect(addr: &str, code: &str) -> Result<GuestNet, String> {
     let full = if addr.contains(':') {
         addr.to_string()
     } else {
-        format!("{}:{}", addr, NET_PORT)
+        format!("{}:{}", addr, net_port())
     };
     let sock: std::net::SocketAddr = full.parse().map_err(|_| "Bad address".to_string())?;
     let stream = std::net::TcpStream::connect_timeout(&sock, std::time::Duration::from_secs(5))
@@ -2658,7 +2672,7 @@ fn guest_connect(addr: &str, code: &str) -> Result<GuestNet, String> {
     send_net_line(&mut w, &format!("JOIN {}", code));
     let mut reader =
         std::io::BufReader::new(stream.try_clone().map_err(|_| "Socket error".to_string())?);
-    let hello = read_net_line(&mut reader).ok_or_else(|| {
+    let hello = read_net_line(&mut reader, NET_MAX_HOST_LINE).ok_or_else(|| {
         "Host unreachable — check the code, and the host's firewall (port 7777)".to_string()
     })?;
     let mut it = hello.split_whitespace();
@@ -2676,7 +2690,7 @@ fn guest_connect(addr: &str, code: &str) -> Result<GuestNet, String> {
     let _ = stream.set_read_timeout(None);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || loop {
-        match read_net_line(&mut reader) {
+        match read_net_line(&mut reader, NET_MAX_HOST_LINE) {
             Some(l) => {
                 if tx.send(l).is_err() {
                     break;
@@ -3058,18 +3072,9 @@ fn draw_battle_overlay(game: &Game, ui: &Ui) {
     let x = (WIN_W - w) * 0.5;
     let y = (624.0 - h) * 0.5; // centered on the board
     let ap = ease_out((b.t / 0.2).min(1.0));
-    // dim the whole board so the duel takes the stage
-    draw_rectangle(0.0, 0.0, WIN_W, 624.0, with_alpha(SRF(), 0.55 * ap));
-    draw_round_frame(
-        x,
-        y,
-        w,
-        h,
-        18.0,
-        2.5,
-        with_alpha(SRF(), 0.95 * ap),
-        with_alpha(BORDER(), ap),
-    );
+    // one surface: the veil dims the board and carries the duel directly
+    draw_rectangle(0.0, 0.0, WIN_W, 624.0, with_alpha(SRF(), 0.82 * ap));
+    let _ = h;
     let reveal = b.t - T_SHAKE * 0.6;
     for (row, (player, dice)) in [(atk, &b.ad), (def, &b.dd)].into_iter().enumerate() {
         let ry = y + 44.0 + row as f32 * 66.0;
@@ -3105,7 +3110,7 @@ fn draw_battle_overlay(game: &Game, ui: &Ui) {
         } else {
             (30.0, with_alpha(INK(), ap))
         };
-        ui.text_centered(&format!("{}", shown), x + w - 52.0, ry + 11.0, size, col);
+        ui.text_centered(&format!("{}", shown), x + w - 172.0, ry + 11.0, size, col);
     }
 }
 
@@ -3933,7 +3938,7 @@ fn draw_host_lobby(h: &HostNet, menu: &Menu, ui: &Ui, time: f32, copied_t: f32) 
     ui.text_centered("ROOM CODE", COL_R, 152.0, 13.0, with_alpha(INK(), 0.55));
     ui.text_centered(&h.code, COL_R, 214.0, 58.0, INK());
     ui.text(
-        &format!("{}:{}", local_ip(), NET_PORT),
+        &format!("{}:{}", local_ip(), net_port()),
         COL_R - 160.0,
         270.0,
         17.0,
@@ -4450,7 +4455,7 @@ async fn main() {
                 let click2 = is_mouse_button_pressed(MouseButton::Left);
                 let m2 = mouse_virtual();
                 if click2 && r_lobby_copy().contains(m2) {
-                    copy_to_clipboard(&format!("{}:{}", local_ip(), NET_PORT));
+                    copy_to_clipboard(&format!("{}:{}", local_ip(), net_port()));
                     copied_t = 1.5;
                     snd_queue.push(Snd::Click);
                 }

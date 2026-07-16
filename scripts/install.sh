@@ -3,6 +3,8 @@
 # desktop entry. Installs the Rust toolchain first if it is missing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# prefer the rustup toolchain over any distro rust
+export PATH="$HOME/.cargo/bin:$PATH"
 
 ./scripts/build.sh
 
