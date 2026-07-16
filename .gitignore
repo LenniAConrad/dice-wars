@@ -1,0 +1,12 @@
+# build artifacts
+/target/
+
+# per-user saved data
+bookmarks.txt
+settings.txt
+
+# exported replays
+replay-*.gif
+
+# release artifacts
+dist/
