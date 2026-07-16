@@ -23,13 +23,18 @@ jobs:
           cp README.md LICENSE assets/icon.png stage/
           tar -czf dice-wars-${{ github.ref_name }}-linux-x86_64.tar.gz -C stage dice-wars README.md LICENSE icon.png
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
-        with:
-          body_path: RELEASE_NOTES.md
-          files: dice-wars-${{ github.ref_name }}-linux-x86_64.tar.gz
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # drop any stray draft with our name, then create-or-reuse the release
+          for id in $(gh api "repos/${{ github.repository }}/releases" --jq '.[] | select(.draft) | .id'); do
+            gh api -X DELETE "repos/${{ github.repository }}/releases/$id" || true
+          done
+          gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" --notes-file RELEASE_NOTES.md || true
+          gh release upload "${{ github.ref_name }}" "dice-wars-${{ github.ref_name }}-linux-x86_64.tar.gz" --clobber
 
   windows:
-    needs: linux # serialize: both jobs upload to the same release
+    needs: linux
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +48,8 @@ jobs:
           Copy-Item README.md,LICENSE,assets/icon.ico stage/
           Compress-Archive -Path stage/* -DestinationPath "dice-wars-${{ github.ref_name }}-windows-x86_64.zip"
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
-        with:
-          body_path: RELEASE_NOTES.md
-          files: dice-wars-${{ github.ref_name }}-windows-x86_64.zip
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.ref_name }}" "dice-wars-${{ github.ref_name }}-windows-x86_64.zip" --clobber
