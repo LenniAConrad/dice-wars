@@ -4888,6 +4888,33 @@ async fn main() {
                     menu.regen();
                     snd_queue.push(Snd::Click);
                 }
+                // hold-to-repeat, identical to the menu's seed arrows
+                let held_dir: i64 = if is_mouse_button_down(MouseButton::Left) {
+                    if r_lobby_prev().contains(m2) {
+                        -1
+                    } else if r_lobby_next().contains(m2) {
+                        1
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                if held_dir != 0 {
+                    menu.hold_t += dt;
+                    if menu.hold_t > 0.4 {
+                        menu.hold_next -= dt;
+                        if menu.hold_next <= 0.0 {
+                            menu.hold_next = 0.08;
+                            menu.seed =
+                                (menu.seed as i64 + held_dir).rem_euclid(SEED_MOD as i64) as u64;
+                            menu.regen();
+                        }
+                    }
+                } else {
+                    menu.hold_t = 0.0;
+                    menu.hold_next = 0.0;
+                }
                 if click2 && r_lobby_new().contains(m2) {
                     menu.seed = random_seed();
                     menu.regen();
