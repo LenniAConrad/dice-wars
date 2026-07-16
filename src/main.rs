@@ -2375,10 +2375,28 @@ struct HostShared {
     started: bool,
 }
 
+// the active lobby's routing info; the accept thread reads this so the
+// port only ever needs to be bound once per process
+struct HostSession {
+    code: String,
+    shared: std::sync::Arc<std::sync::Mutex<HostShared>>,
+    tx: std::sync::mpsc::Sender<HostMsg>,
+}
+
+static HOST_SLOT: std::sync::OnceLock<
+    std::sync::Arc<std::sync::Mutex<Option<HostSession>>>,
+> = std::sync::OnceLock::new();
+static LISTENING: AtomicBool = AtomicBool::new(false);
+
+fn host_slot() -> std::sync::Arc<std::sync::Mutex<Option<HostSession>>> {
+    HOST_SLOT
+        .get_or_init(|| std::sync::Arc::new(std::sync::Mutex::new(None)))
+        .clone()
+}
+
 struct HostNet {
     rx: std::sync::mpsc::Receiver<HostMsg>,
     shared: std::sync::Arc<std::sync::Mutex<HostShared>>,
-    closed: std::sync::Arc<AtomicBool>,
     code: String,
     remap: HashMap<usize, usize>, // lobby seat -> game seat, set at start
     sent: usize, // events broadcast so far
@@ -2386,14 +2404,59 @@ struct HostNet {
 
 impl Drop for HostNet {
     fn drop(&mut self) {
-        self.closed.store(true, Ordering::Relaxed);
+        *host_slot().lock().unwrap() = None; // lobby gone; listener stays
     }
 }
 
 impl HostNet {
     fn start(guests: usize) -> std::io::Result<HostNet> {
-        let listener = std::net::TcpListener::bind(("0.0.0.0", NET_PORT))?;
-        listener.set_nonblocking(true)?;
+        // bind the port exactly once; afterwards every lobby reuses it,
+        // avoiding TIME_WAIT rebind failures when hosting again
+        if !LISTENING.load(Ordering::Relaxed) {
+            let listener = std::net::TcpListener::bind(("0.0.0.0", NET_PORT))?;
+            listener.set_nonblocking(true)?;
+            LISTENING.store(true, Ordering::Relaxed);
+            let slot = host_slot();
+            std::thread::spawn(move || loop {
+                match listener.accept() {
+                    Ok((stream, peer)) => {
+                        let ip = peer.ip();
+                        let session = {
+                            let guard = slot.lock().unwrap();
+                            match guard.as_ref() {
+                                Some(s) => {
+                                    (s.code.clone(), s.shared.clone(), s.tx.clone())
+                                }
+                                None => continue, // no lobby: drop the connection
+                            }
+                        };
+                        let (code, shared, tx) = session;
+                        {
+                            let mut sh = shared.lock().unwrap();
+                            // bans, connection cap, 1/sec per-IP rate limit
+                            let too_fast = sh.last_try.get(&ip).map_or(false, |t| {
+                                t.elapsed() < std::time::Duration::from_secs(1)
+                            });
+                            if sh.banned.contains(&ip) || sh.conns >= 8 || too_fast {
+                                continue;
+                            }
+                            sh.last_try.insert(ip, std::time::Instant::now());
+                            sh.conns += 1;
+                        }
+                        let _ = stream.set_nonblocking(false);
+                        std::thread::spawn(move || {
+                            host_handle_client(stream, ip, code, shared, tx)
+                        });
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                }
+            });
+        }
         let code = format!("{:04}", gen_range(0, 10000));
         let (tx, rx) = std::sync::mpsc::channel();
         let shared = std::sync::Arc::new(std::sync::Mutex::new(HostShared {
@@ -2404,42 +2467,14 @@ impl HostNet {
             conns: 0,
             started: false,
         }));
-        let closed = std::sync::Arc::new(AtomicBool::new(false));
-        let (code2, shared2, closed2) = (code.clone(), shared.clone(), closed.clone());
-        std::thread::spawn(move || loop {
-            if closed2.load(Ordering::Relaxed) {
-                break;
-            }
-            match listener.accept() {
-                Ok((stream, peer)) => {
-                    let ip = peer.ip();
-                    {
-                        let mut sh = shared2.lock().unwrap();
-                        // banned IPs, connection cap, and a 1/sec per-IP rate limit
-                        let too_fast = sh
-                            .last_try
-                            .get(&ip)
-                            .map_or(false, |t| t.elapsed() < std::time::Duration::from_secs(1));
-                        if sh.banned.contains(&ip) || sh.conns >= 8 || too_fast {
-                            continue;
-                        }
-                        sh.last_try.insert(ip, std::time::Instant::now());
-                        sh.conns += 1;
-                    }
-                    let _ = stream.set_nonblocking(false);
-                    let (tx3, sh3, code3) = (tx.clone(), shared2.clone(), code2.clone());
-                    std::thread::spawn(move || host_handle_client(stream, ip, code3, sh3, tx3));
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-                Err(_) => break,
-            }
+        *host_slot().lock().unwrap() = Some(HostSession {
+            code: code.clone(),
+            shared: shared.clone(),
+            tx,
         });
         Ok(HostNet {
             rx,
             shared,
-            closed,
             code,
             remap: HashMap::new(),
             sent: 0,
@@ -3110,6 +3145,7 @@ struct Menu {
     hold_t: f32,    // how long < or > has been held
     hold_next: f32, // countdown to the next auto-repeat step
     bm_scroll: f32, // bookmark list scroll offset, in rows
+    host_err: f32,  // countdown showing the hosting-failed message
 }
 
 fn load_bookmarks() -> Vec<(u64, usize)> {
@@ -3204,6 +3240,7 @@ impl Menu {
             hold_t: 0.0,
             hold_next: 0.0,
             bm_scroll: 0.0,
+            host_err: 0.0,
         }
     }
 
@@ -3277,6 +3314,7 @@ const BM_SHOWN: usize = 4;
 
 // returns true when the game should start
 fn update_menu(menu: &mut Menu, settings: &mut Settings, snd: &mut Vec<Snd>, dt: f32) -> MenuAction {
+    menu.host_err = (menu.host_err - dt).max(0.0);
     // holding < or > cycles through seeds after a short delay
     let held_dir: i64 = if is_mouse_button_down(MouseButton::Left) && !menu.editing {
         let m = mouse_virtual();
@@ -3733,6 +3771,16 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     // the same icon toolbar as in-game (sound, chances, colorblind, speed)
     draw_icon_bar(settings, ui, m);
 
+    if menu.host_err > 0.0 {
+        ui.text_centered(
+            "Could not open port 7777 — is another instance hosting?",
+            COL_L,
+            790.0,
+            15.0,
+            palette(2).dark,
+        );
+    }
+
     // start button
     let st = r_start();
     menu_button(st, palette(HUMAN).mid, BORDER(), st.contains(m));
@@ -4148,7 +4196,7 @@ async fn main() {
                             host = Some(h);
                             screen = Screen::HostLobby;
                         }
-                        Err(_) => {}
+                        Err(_) => menu.host_err = 4.0,
                     },
                     MenuAction::Join => {
                         join = JoinUi::default();
