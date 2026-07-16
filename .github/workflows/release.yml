@@ -76,4 +76,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ github.ref_name }}" "dice-wars-${{ github.ref_name }}-windows-x86_64.zip" --clobber
+          for i in 1 2 3 4 5; do
+            if gh release upload "${{ github.ref_name }}" "dice-wars-${{ github.ref_name }}-windows-x86_64.zip" --clobber; then
+              exit 0
+            fi
+            echo "upload attempt $i failed; retrying" >&2
+            sleep 15
+          done
+          exit 1
