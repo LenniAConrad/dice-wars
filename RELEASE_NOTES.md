@@ -1,26 +1,31 @@
-# Dice Wars v1.0.2
+# Dice Wars v1.1.0
 
-Multiplayer resilience release. Both players should update.
+Balance release. Online players must both update (older versions are told so).
 
-## New
+## Fairness
 
-- **Automatic reconnection.** If a player's connection drops mid-game, the host
-  holds their seat for 45 seconds ("P2 lost connection — waiting...") while their
-  game quietly reconnects, re-authenticates with a per-player token, replays the
-  missed moves, and resumes — usually without anyone else noticing. Stolen seats
-  are impossible: reconnecting requires the secret token issued at join.
+- **The starting deal is fair now.** Maps are dealt so every player's biggest
+  connected cluster is comparable — no more winning the game at map generation.
+- **Equal territory counts.** Extra regions become lakes so the map always
+  divides evenly among the players; the host no longer gets a spare territory.
+- **Random first player.** Who moves first is decided by the map seed, not by
+  who hosts.
 
-## Fixed
+## Smarter bots
 
-- **Idle games no longer drop.** Both sides now exchange heartbeats every two
-  seconds, so a match where nobody has acted yet can't be reaped by routers,
-  hotspots, or NAT tables that kill silent connections (the "P2 disconnected
-  after 5 seconds" bug on mixed Linux/Windows games).
-- Transient socket errors (common on Windows) are retried instead of being
-  treated as a disconnect.
-- Connection problems on the host side now log a diagnostic reason.
+- All bots (except Easy) now lean on whoever is running away with the game,
+  harder the more of the map the leader holds — games stay contested longer.
+- Bots consider what they leave behind: no more emptying a territory next to a
+  big enemy stack for a marginal capture, and they prefer conquests that knit
+  their territory together.
+- Normal bots also reinforce their frontlines now (previously Hard only).
+
+## Map
+
+- Bigger playfield (30x22 cells, ~50 territories) with more lakes and more
+  ragged coastlines.
 
 ## Downloads
 
-- **Linux**: `dice-wars-v1.0.2-linux-x86_64.tar.gz` — unpack and run `./dice-wars`
-- **Windows**: `dice-wars-v1.0.2-windows-x86_64.zip` — unpack and run `DiceWars.exe`
+- **Linux**: `dice-wars-v1.1.0-linux-x86_64.tar.gz`
+- **Windows**: `dice-wars-v1.1.0-windows-x86_64.zip`

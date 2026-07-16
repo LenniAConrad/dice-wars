@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------- constants
 
-const COLS: usize = 28;
-const ROWS: usize = 20;
-const HEX: f32 = 17.0;
+const COLS: usize = 30;
+const ROWS: usize = 22;
+const HEX: f32 = 16.0;
 const OFF_X: f32 = 48.0;
-const OFF_Y: f32 = 100.0;
+const OFF_Y: f32 = 96.0;
 const SQRT3: f32 = 1.732_050_8;
 
 // virtual canvas; scaled to the real window with letterboxing
@@ -19,8 +19,8 @@ const WIN_W: f32 = 930.0;
 const WIN_H: f32 = 820.0;
 
 const MAX_PLAYERS: usize = 8;
-const N_SEEDS: usize = 44; // regions grown on the grid
-const N_HOLES: usize = 4; // regions removed to make the map irregular
+const N_SEEDS: usize = 60; // regions grown on the grid
+const N_HOLES: usize = 9; // regions removed for lakes and ragged coasts
 const MAX_DICE: u32 = 8;
 const HUMAN: usize = 0;
 const AI_STEP: f32 = 0.35; // pause between AI actions (on top of battle time)
@@ -823,12 +823,17 @@ impl Game {
                 frontier.push(n);
             }
 
-            // Delete a few regions so the map gets an irregular outline and holes.
+            // Delete a few regions so the map gets an irregular outline and
+            // holes — removing extras until every player gets the same count
+            let mut holes_n = N_HOLES;
+            while (N_SEEDS - holes_n) % players != 0 {
+                holes_n += 1;
+            }
             let mut ids: Vec<i32> = (0..N_SEEDS as i32).collect();
             shuffle(&mut ids);
-            let holes: HashSet<i32> = ids[..N_HOLES].iter().copied().collect();
+            let holes: HashSet<i32> = ids[..holes_n].iter().copied().collect();
             let mut remap = vec![-1i32; N_SEEDS];
-            for (new_id, &old) in ids[N_HOLES..].iter().enumerate() {
+            for (new_id, &old) in ids[holes_n..].iter().enumerate() {
                 remap[old as usize] = new_id as i32;
             }
             for t in cell_terr.iter_mut() {
@@ -838,7 +843,7 @@ impl Game {
                     -1
                 };
             }
-            let n_terr = N_SEEDS - N_HOLES;
+            let n_terr = N_SEEDS - holes_n;
 
             let mut cells: Vec<Vec<usize>> = vec![Vec::new(); n_terr];
             for (i, &t) in cell_terr.iter().enumerate() {
@@ -906,11 +911,53 @@ impl Game {
                 })
                 .collect();
 
-            // Deal territories round-robin, then sprinkle extra dice per player.
+            // Deal territories so every player's biggest starting cluster is
+            // comparable — the deal lottery used to decide games at generation
             let mut order: Vec<usize> = (0..n_terr).collect();
-            shuffle(&mut order);
-            for (i, &t) in order.iter().enumerate() {
-                terrs[t].owner = i % players;
+            let mut best_assign: Vec<usize> = Vec::new();
+            let mut best_spread = usize::MAX;
+            for _ in 0..300 {
+                shuffle(&mut order);
+                let mut owner_of = vec![0usize; n_terr];
+                for (i, &t) in order.iter().enumerate() {
+                    owner_of[t] = i % players;
+                }
+                let (mut mn, mut mx) = (usize::MAX, 0usize);
+                for p in 0..players {
+                    let mut seen = vec![false; n_terr];
+                    let mut best = 0usize;
+                    for s in 0..n_terr {
+                        if owner_of[s] != p || seen[s] {
+                            continue;
+                        }
+                        let mut stack = vec![s];
+                        seen[s] = true;
+                        let mut size = 0usize;
+                        while let Some(t) = stack.pop() {
+                            size += 1;
+                            for &nb in &neigh[t] {
+                                if !seen[nb] && owner_of[nb] == p {
+                                    seen[nb] = true;
+                                    stack.push(nb);
+                                }
+                            }
+                        }
+                        best = best.max(size);
+                    }
+                    mn = mn.min(best);
+                    mx = mx.max(best);
+                }
+                let spread = mx - mn;
+                if spread < best_spread {
+                    best_spread = spread;
+                    best_assign = owner_of.clone();
+                    if spread <= 1 {
+                        break;
+                    }
+                }
+            }
+            for (t, owner) in best_assign.iter().enumerate() {
+                terrs[t].owner = *owner;
             }
             for p in 0..players {
                 let own: Vec<usize> = (0..n_terr).filter(|&t| terrs[t].owner == p).collect();
@@ -938,6 +985,9 @@ impl Game {
                 })
                 .collect();
 
+            // rotate who moves first: it's decided by the seed, not the host
+            let first = gen_range(0, players);
+
             return Game {
                 players,
                 humans,
@@ -952,7 +1002,7 @@ impl Game {
                 cell_terr,
                 fx: vec![TerrFx::default(); terrs.len()],
                 terrs,
-                current: HUMAN,
+                current: first,
                 selected: None,
                 log: vec!["A new war begins!".to_string()],
                 hint: String::new(),
@@ -962,7 +1012,11 @@ impl Game {
                 over_t: 0.0,
                 battle: None,
                 floats: Vec::new(),
-                banner: "Your turn".to_string(),
+                banner: if first == HUMAN && humans == 1 {
+                    "Your turn".to_string()
+                } else {
+                    format!("{}'s turn", player_name(first))
+                },
                 banner_t: 1.6,
                 time: 0.0,
                 snd: Vec::new(),
@@ -1112,8 +1166,8 @@ impl Game {
             if cand.is_empty() {
                 break;
             }
-            // hard bots stack their borders instead of scattering dice inland
-            if self.difficulty == Difficulty::Hard && p >= self.humans {
+            // bots stack their borders instead of scattering dice inland
+            if self.difficulty != Difficulty::Easy && p >= self.humans {
                 let front: Vec<usize> = cand
                     .iter()
                     .copied()
@@ -2335,6 +2389,7 @@ fn draw_game(game: &Game, ui: &Ui, settings: &Settings) {
 // broadcasts the resulting events (the same RepEvents replays use).
 
 const NET_PORT_DEFAULT: u16 = 7777;
+const NET_PROTO: &str = "2"; // bumped whenever map generation or messages change
 
 // DW_PORT overrides the port (used by the automated tests)
 fn net_port() -> u16 {
@@ -2668,7 +2723,17 @@ fn host_handle_client(
         Some(l) => {
             let mut it = l.split_whitespace();
             match it.next() {
-                Some("JOIN") => it.next() == Some(code.as_str()),
+                Some("JOIN") => {
+                    if it.next() != Some(code.as_str()) {
+                        false
+                    } else if it.next() != Some(NET_PROTO) {
+                        send_net_line(&mut w, "BYE version mismatch - download the latest release");
+                        release(&shared);
+                        return;
+                    } else {
+                        true
+                    }
+                }
                 Some("REJOIN") => {
                     if it.next() == Some(code.as_str()) {
                         if let Some(tok) = it.next() {
@@ -2888,7 +2953,7 @@ fn guest_connect(addr: &str, code: &str) -> Result<GuestNet, String> {
         .map_err(|_| "Could not connect — wrong address, or firewall blocking port 7777".to_string())?;
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(8)));
     let mut w = stream.try_clone().map_err(|_| "Socket error".to_string())?;
-    send_net_line(&mut w, &format!("JOIN {}", code));
+    send_net_line(&mut w, &format!("JOIN {} {}", code, NET_PROTO));
     let mut reader =
         std::io::BufReader::new(stream.try_clone().map_err(|_| "Socket error".to_string())?);
     let hello = read_net_line(&mut reader, NET_MAX_HOST_LINE).ok_or_else(|| {
@@ -3721,7 +3786,7 @@ fn update_menu(menu: &mut Menu, settings: &mut Settings, snd: &mut Vec<Snd>, dt:
 fn draw_map_mini(game: &Game, area: Rect) {
     // virtual-canvas map bounds, padded above for dice towers and below
     // for their shadows so nothing pokes out of the preview frame
-    let (bx, by, bw, bh) = (30.0, 13.0, 845.0, 598.0);
+    let (bx, by, bw, bh) = (30.0, 9.0, 845.0, 615.0);
     let k = (area.w / bw).min(area.h / bh);
     let ox = area.x + (area.w - bw * k) * 0.5 - bx * k;
     let oy = area.y + (area.h - bh * k) * 0.5 - by * k;
