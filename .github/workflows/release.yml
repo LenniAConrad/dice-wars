@@ -29,6 +29,7 @@ jobs:
           files: dice-wars-${{ github.ref_name }}-linux-x86_64.tar.gz
 
   windows:
+    needs: linux # serialize: both jobs upload to the same release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
