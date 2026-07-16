@@ -22,16 +22,40 @@ jobs:
           cp target/release/dicegame stage/dice-wars
           cp README.md LICENSE assets/icon.png stage/
           tar -czf dice-wars-${{ github.ref_name }}-linux-x86_64.tar.gz -C stage dice-wars README.md LICENSE icon.png
-      - name: Upload to release
+      - name: Clean stray drafts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # drop any stray draft with our name, then create-or-reuse the release
           for id in $(gh api "repos/${{ github.repository }}/releases" --jq '.[] | select(.draft) | .id'); do
             gh api -X DELETE "repos/${{ github.repository }}/releases/$id" || true
           done
-          gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" --notes-file RELEASE_NOTES.md || true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ github.ref_name }}" >/dev/null 2>&1 || \
+            gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" --notes-file RELEASE_NOTES.md
+      - name: Upload asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
           gh release upload "${{ github.ref_name }}" "dice-wars-${{ github.ref_name }}-linux-x86_64.tar.gz" --clobber
+      - name: Report error
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "== view"; gh release view "${{ github.ref_name }}" 2>&1 || true
+            echo "== create verbose"; gh release create "${{ github.ref_name }}" --title "dbg" --notes "dbg" 2>&1 || true
+            echo "== releases"; gh api "repos/${{ github.repository }}/releases" 2>&1 | head -60 || true
+          } > ci-error.txt
+          git config user.name ci
+          git config user.email ci@localhost
+          git checkout -B ci-debug
+          git add ci-error.txt
+          git commit -m "ci debug output"
+          git push -f origin ci-debug
 
   windows:
     needs: linux
