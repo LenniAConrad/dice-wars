@@ -8,6 +8,7 @@ cd "$(dirname "$0")/.."
 
 BIN_DIR="$HOME/.local/bin"
 mkdir -p "$BIN_DIR"
+rm -f "$BIN_DIR/dice-wars"
 cp target/release/dicegame "$BIN_DIR/dice-wars"
 echo "Installed binary: $BIN_DIR/dice-wars"
 
