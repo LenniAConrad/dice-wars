@@ -3348,10 +3348,10 @@ fn draw_battle_overlay(game: &Game, ui: &Ui) {
     let w = 560.0;
     let h = 152.0;
     let x = (WIN_W - w) * 0.5;
-    let y = (624.0 - h) * 0.5; // centered on the board
+    let y = 34.0; // tucked along the top edge, out of the board's way
     let ap = ease_out((b.t / 0.2).min(1.0));
-    // one surface: the veil dims the board and carries the duel directly
-    draw_rectangle(0.0, 0.0, WIN_W, 624.0, with_alpha(SRF(), 0.82 * ap));
+    // the veil dims the board lightly; the showcase lives at the top edge
+    draw_rectangle(0.0, 0.0, WIN_W, 624.0, with_alpha(SRF(), 0.72 * ap));
     let _ = h;
     let reveal = b.t - T_SHAKE * 0.6;
     for (row, (player, dice)) in [(atk, &b.ad), (def, &b.dd)].into_iter().enumerate() {
