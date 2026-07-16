@@ -2559,8 +2559,8 @@ fn host_handle_client(
             let mut sh = shared.lock().unwrap();
             let n = sh.attempts.entry(ip).or_insert(0);
             *n += 1;
-            if *n >= 3 {
-                sh.banned.insert(ip); // three strikes: ignored for the session
+            if *n >= 5 {
+                sh.banned.insert(ip); // five strikes: ignored for the session
             }
             sh.conns -= 1;
         }
@@ -2617,13 +2617,15 @@ fn guest_connect(addr: &str, code: &str) -> Result<GuestNet, String> {
     };
     let sock: std::net::SocketAddr = full.parse().map_err(|_| "Bad address".to_string())?;
     let stream = std::net::TcpStream::connect_timeout(&sock, std::time::Duration::from_secs(5))
-        .map_err(|_| "Could not connect".to_string())?;
+        .map_err(|_| "Could not connect — wrong address, or firewall blocking port 7777".to_string())?;
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(8)));
     let mut w = stream.try_clone().map_err(|_| "Socket error".to_string())?;
     send_net_line(&mut w, &format!("JOIN {}", code));
     let mut reader =
         std::io::BufReader::new(stream.try_clone().map_err(|_| "Socket error".to_string())?);
-    let hello = read_net_line(&mut reader).ok_or_else(|| "Connection closed".to_string())?;
+    let hello = read_net_line(&mut reader).ok_or_else(|| {
+        "Host unreachable — check the code, and the host's firewall (port 7777)".to_string()
+    })?;
     let mut it = hello.split_whitespace();
     match it.next() {
         Some("WELCOME") => {}
