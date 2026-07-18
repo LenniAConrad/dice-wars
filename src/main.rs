@@ -101,6 +101,14 @@ fn resolve_colors(players: usize, humans: usize, picks: &[Option<usize>]) -> Vec
             }
         }
     }
+    // like the solo menu: everyone else keeps their own color, and only the
+    // seat whose color was taken swaps onto the freed slot
+    for (p, slot) in out.iter_mut().enumerate() {
+        if *slot == usize::MAX && !used[p] {
+            *slot = p;
+            used[p] = true;
+        }
+    }
     for slot in out.iter_mut() {
         if *slot == usize::MAX {
             let c = (0..MAX_PLAYERS).find(|&c| !used[c]).unwrap_or(0);
