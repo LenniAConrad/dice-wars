@@ -3502,15 +3502,20 @@ fn paste_from_clipboard() -> Option<String> {
     None
 }
 
-// figure out the LAN address to show in the host lobby
+// figure out the LAN address to show in the host lobby; cached because it
+// is drawn every frame and the socket probe can be slow on some networks
 fn local_ip() -> String {
-    std::net::UdpSocket::bind("0.0.0.0:0")
-        .and_then(|s| {
-            s.connect("8.8.8.8:80")?;
-            s.local_addr()
-        })
-        .map(|a| a.ip().to_string())
-        .unwrap_or_else(|_| "?".to_string())
+    static IP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    IP.get_or_init(|| {
+        std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|s| {
+                s.connect("8.8.8.8:80")?;
+                s.local_addr()
+            })
+            .map(|a| a.ip().to_string())
+            .unwrap_or_else(|_| "?".to_string())
+    })
+    .clone()
 }
 
 // ---------------------------------------------------------------- replay & gif
@@ -6220,19 +6225,16 @@ async fn main() {
                     }
                     if r_lobby_prev().contains(m2) {
                         menu.seed = (menu.seed + SEED_MOD - 1) % SEED_MOD;
-                        menu.regen();
                         dirty = true;
                         snd_queue.push(Snd::Click);
                     }
                     if r_lobby_next().contains(m2) {
                         menu.seed = (menu.seed + 1) % SEED_MOD;
-                        menu.regen();
                         dirty = true;
                         snd_queue.push(Snd::Click);
                     }
                     if r_lobby_new().contains(m2) {
                         menu.seed = random_seed();
-                        menu.regen();
                         dirty = true;
                         snd_queue.push(Snd::Click);
                     }
@@ -6240,7 +6242,6 @@ async fn main() {
                         if r_lobby_player(k).contains(m2) {
                             let n = h.resize_guests(k + 1);
                             menu.players = n + 1;
-                            menu.regen();
                             dirty = true;
                             snd_queue.push(Snd::Click);
                         }
@@ -6335,7 +6336,6 @@ async fn main() {
                             menu.hold_next = 0.08;
                             menu.seed =
                                 (menu.seed as i64 + held_dir).rem_euclid(SEED_MOD as i64) as u64;
-                            menu.regen();
                             dirty = true;
                         }
                     }
