@@ -1,8 +1,8 @@
-# Dice Wars v1.3.5
+# Dice Wars v1.3.6
 
 Multiplayer lobby release. Online players must both update (older versions are told so).
 
-## v1.3.5 fixes
+## v1.3.6 fixes
 
 - Color picks select your map position everywhere — solo AND hosted games: each player takes over the territories of the color they chose, and the map itself never re-shuffles. Protocol bumped to 5.
 - The menu map preview no longer changes scale with the dealt dice heights.
@@ -24,9 +24,9 @@ Multiplayer lobby release. Online players must both update (older versions are t
 ## Solo
 
 - Picking a color now means playing that map position: the previewed map keeps its look and you take over that color's territories and dice.
-- AI tuning: Easy is easier, Hard is harder, and bot personalities are milder leans instead of extremes.
+- AI tuning: Easy is easier, Hard is harder, personalities are milder leans — and in team mode bots track the strongest enemy team, so trailing teams gang up on the leader together.
 
 ## Downloads
 
-- **Linux**: `dice-wars-v1.3.5-linux-x86_64.tar.gz`
-- **Windows**: `dice-wars-v1.3.5-windows-x86_64.zip`
+- **Linux**: `dice-wars-v1.3.6-linux-x86_64.tar.gz`
+- **Windows**: `dice-wars-v1.3.6-windows-x86_64.zip`

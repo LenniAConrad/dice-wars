@@ -1605,15 +1605,40 @@ impl Game {
             min_adv = (min_adv - 1).max(0);
         }
 
-        // who is currently winning (for the schemer and the shared instinct);
-        // in team mode only the enemy team counts as a threat
-        let leader = (0..self.players)
-            .filter(|&p| !self.is_ally(cur, p) && self.count(p) > 0)
-            .max_by_key(|&p| self.count(p));
-        // how dominant the leader is, 0..1 of the whole map
-        let threat = leader
-            .map(|p| self.count(p) as f32 / self.terrs.len() as f32)
-            .unwrap_or(0.0);
+        // who is currently winning (for the schemer and the shared instinct):
+        // in team mode the threat is the strongest enemy TEAM, so weaker
+        // teams naturally gang up on whoever is running away with the game
+        let mut leader: Option<usize> = None;
+        let mut lead_team: Option<usize> = None;
+        let threat;
+        if self.teams.on {
+            let mut size = [0usize; MAX_TEAMS];
+            for p in 0..self.players {
+                size[self.team_of(p) % MAX_TEAMS] += self.count(p);
+            }
+            let my = self.team_of(cur) % MAX_TEAMS;
+            lead_team = (0..MAX_TEAMS)
+                .filter(|&t| t != my && size[t] > 0)
+                .max_by_key(|&t| size[t]);
+            threat = lead_team
+                .map(|t| size[t] as f32 / self.terrs.len() as f32)
+                .unwrap_or(0.0);
+        } else {
+            leader = (0..self.players)
+                .filter(|&p| p != cur && self.count(p) > 0)
+                .max_by_key(|&p| self.count(p));
+            threat = leader
+                .map(|p| self.count(p) as f32 / self.terrs.len() as f32)
+                .unwrap_or(0.0);
+        }
+        // is this owner part of the leading side?
+        let is_lead = |o: usize| {
+            if self.teams.on {
+                lead_team == Some(self.team_of(o))
+            } else {
+                leader == Some(o)
+            }
+        };
         // how strongly this bot coordinates against a runaway leader
         let coord = match self.difficulty {
             Difficulty::Easy => 0.15,
@@ -1646,7 +1671,7 @@ impl Game {
                 // when one player is running away with the game, stop wearing
                 // each other down and turn on the leader instead
                 if threat > 0.45
-                    && Some(td.owner) != leader
+                    && !is_lead(td.owner)
                     && adv < 2
                     && self.difficulty != Difficulty::Easy
                 {
@@ -1654,7 +1679,7 @@ impl Game {
                 }
                 let mut score = adv as f32 * 10.0 + ta.dice as f32;
                 if threat > 0.34 {
-                    if Some(td.owner) == leader {
+                    if is_lead(td.owner) {
                         score += (threat - 0.3) * 90.0 * coord;
                     } else {
                         score -= (threat - 0.3) * 60.0 * coord;
@@ -1693,7 +1718,7 @@ impl Game {
                         score += friends as f32 * 6.0;
                     }
                     Persona::Balancer => {
-                        if Some(td.owner) == leader {
+                        if is_lead(td.owner) {
                             score += 15.0;
                         }
                     }
