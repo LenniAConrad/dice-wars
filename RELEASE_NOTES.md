@@ -1,8 +1,8 @@
-# Dice Wars v1.3.8
+# Dice Wars v1.3.9
 
 Multiplayer lobby release. Online players must both update (older versions are told so).
 
-## v1.3.8 fixes
+## v1.3.9 fixes
 
 - Color picks select your map position everywhere — solo AND hosted games: each player takes over the territories of the color they chose, and the map itself never re-shuffles. Protocol bumped to 5.
 - The menu map preview no longer changes scale with the dealt dice heights.
@@ -19,7 +19,7 @@ Multiplayer lobby release. Online players must both update (older versions are t
 
 ## Playing online
 
-- **No more stalemates**: bots with full stacks (or an overflowing reserve) now attack at even odds instead of freezing when every territory hits 8 dice — verified by a full-game simulation test.
+- **Real odds-based AI**: bots now decide attacks from the exact win probabilities (like the % hints) with per-difficulty thresholds — Easy needs 65%, Normal 50%, Hard attacks from 42% — and saturated boards accept even odds, so full-stack games never stall. Verified by a full-game simulation test.
 
 - **60s turn timer** in games with 2+ humans: idle turns auto-pass; any attack resets the clock (countdown shown by the turn pill).
 - **Disconnects no longer end the game**: after a grace period a bot takes the seat over; reconnecting players (auto-retry plus a manual retry) take it back.
@@ -32,5 +32,5 @@ Multiplayer lobby release. Online players must both update (older versions are t
 
 ## Downloads
 
-- **Linux**: `dice-wars-v1.3.8-linux-x86_64.tar.gz`
-- **Windows**: `dice-wars-v1.3.8-windows-x86_64.zip`
+- **Linux**: `dice-wars-v1.3.9-linux-x86_64.tar.gz`
+- **Windows**: `dice-wars-v1.3.9-windows-x86_64.zip`

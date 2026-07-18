@@ -937,6 +937,21 @@ fn win_chance(a: u32, d: u32) -> f32 {
     p as f32
 }
 
+// exact odds, precomputed once: the AI reads these like a player reads
+// the % hints
+fn win_chance_cached(a: u32, d: u32) -> f32 {
+    static T: std::sync::OnceLock<[[f32; 9]; 9]> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        let mut t = [[0.0f32; 9]; 9];
+        for a in 1..=8usize {
+            for d in 1..=8usize {
+                t[a][d] = win_chance(a as u32, d as u32);
+            }
+        }
+        t
+    })[a.clamp(1, 8) as usize][d.clamp(1, 8) as usize]
+}
+
 fn random_seed() -> u64 {
     let t = (macroquad::miniquad::date::now() * 1000.0) as u64;
     (t ^ ((macroquad::rand::rand() as u64) << 16)) % SEED_MOD
@@ -1673,26 +1688,11 @@ impl Game {
             return None;
         }
 
-        let mut min_adv: i32 = match persona {
-            Persona::Aggressive => 0,
-            Persona::Defensive => 2,
-            _ => 1,
-        };
-        if self.difficulty == Difficulty::Easy {
-            min_adv += 2;
-        }
-        if self.difficulty == Difficulty::Hard {
-            // hard bots keep the pressure up regardless of temperament
-            min_adv = (min_adv - 1).max(0);
-        }
         // a saturated board must never stall: with every stack full (or a
         // reserve overflowing) the bot attacks even at even odds
         let stuck = self.reserve[cur] >= 8
             || (0..self.terrs.len())
                 .all(|t| self.terrs[t].owner != cur || self.terrs[t].dice == MAX_DICE);
-        if stuck {
-            min_adv = min_adv.min(0);
-        }
 
         // who is currently winning (for the schemer and the shared instinct):
         // in team mode the threat is the strongest enemy TEAM, so weaker
@@ -1747,29 +1747,35 @@ impl Game {
                 if self.is_ally(cur, td.owner) {
                     continue;
                 }
-                let adv = ta.dice as i32 - td.dice as i32;
-                // big stacks may gamble on even odds when bold enough
-                let allow_even = adv == 0
-                    && ((stuck && ta.dice == MAX_DICE)
-                        || (self.difficulty != Difficulty::Easy
-                            && (ta.dice == MAX_DICE
-                                || (self.difficulty == Difficulty::Hard && ta.dice >= 6))
-                            && (persona == Persona::Aggressive
-                                || self.difficulty == Difficulty::Hard)));
-                if adv < min_adv && !allow_even {
+                // decide on the exact win probability, not a crude dice gap
+                let p = win_chance_cached(ta.dice, td.dice);
+                let mut need: f32 = match self.difficulty {
+                    Difficulty::Easy => 0.65,
+                    Difficulty::Normal => 0.50,
+                    Difficulty::Hard => 0.42,
+                };
+                need += match persona {
+                    Persona::Aggressive => -0.06,
+                    Persona::Defensive => 0.08,
+                    _ => 0.0,
+                };
+                if stuck {
+                    need = need.min(0.42); // full stacks accept even odds
+                }
+                if p < need {
                     continue;
                 }
                 // when one player is running away with the game, stop wearing
                 // each other down and turn on the leader instead
                 if threat > 0.45
                     && !is_lead(td.owner)
-                    && adv < 2
+                    && p < 0.60
                     && !stuck
                     && self.difficulty != Difficulty::Easy
                 {
                     continue;
                 }
-                let mut score = adv as f32 * 10.0 + ta.dice as f32;
+                let mut score = (p - 0.5) * 120.0 + ta.dice as f32;
                 if threat > 0.34 {
                     if is_lead(td.owner) {
                         score += (threat - 0.3) * 90.0 * coord;
@@ -1800,7 +1806,7 @@ impl Game {
                 }
                 match persona {
                     Persona::Aggressive => score += 4.0,
-                    Persona::Defensive => score += adv as f32 * 5.0,
+                    Persona::Defensive => score += (p - 0.5) * 60.0,
                     Persona::Greedy => {
                         let friends = td
                             .neighbors
@@ -3372,6 +3378,7 @@ fn host_handle_client(
     let mut w = stream;
     // auth: JOIN <code> for a fresh seat, REJOIN <code> <token> to reclaim one
     let mut rejoin_seat: Option<usize> = None;
+    let mut rejoin_token: Option<String> = None;
     let mut join_name = String::new();
     let ok = match read_net_line_before(&mut reader, NET_MAX_LINE, NET_AUTH_TIMEOUT) {
         Some(l) => {
@@ -3392,12 +3399,17 @@ fn host_handle_client(
                 Some("REJOIN") => {
                     if it.next() == Some(code.as_str()) {
                         if let Some(tok) = it.next() {
-                            let mut sh = shared.lock().unwrap();
-                            if let Some(&slot_seat) = sh.tokens.get(tok) {
-                                if let Ok(clone) = w.try_clone() {
+                            if let Ok(next_token) = new_reconnect_token() {
+                                let mut sh = shared.lock().unwrap();
+                                if let (Some(&slot_seat), Ok(clone)) =
+                                    (sh.tokens.get(tok), w.try_clone())
+                                {
                                     sh.seats[slot_seat - 1] = Some(clone);
                                     sh.gens[slot_seat - 1] += 1;
+                                    sh.tokens.retain(|_, token_seat| *token_seat != slot_seat);
+                                    sh.tokens.insert(next_token.clone(), slot_seat);
                                     rejoin_seat = Some(slot_seat);
+                                    rejoin_token = Some(next_token);
                                 }
                             }
                         }
@@ -3461,12 +3473,19 @@ fn host_handle_client(
     let my_gen = shared.lock().unwrap().gens[seat - 1];
     let _ = reader.get_ref().set_read_timeout(None);
     if rejoin_seat.is_some() {
+        if let Some(token) = rejoin_token {
+            send_net_line(&mut w, &format!("RECONNECTED {} {}", seat, token));
+        }
         let _ = tx.send(HostMsg::Rejoined(seat));
     } else {
         // fresh join: issue the reconnect token
         let token = {
             let t = fresh_token.expect("fresh joins always create a token");
             let mut sh = shared.lock().unwrap();
+            // A lobby seat may have been reused after a disconnect. Invalidate
+            // every older token for that seat so its previous occupant cannot
+            // reclaim the new player's connection.
+            sh.tokens.retain(|_, token_seat| *token_seat != seat);
             sh.tokens.insert(t.clone(), seat);
             t
         };
@@ -6127,6 +6146,20 @@ async fn main() {
                                     (player, lands, it.next())
                                 {
                                     gn.pending.push_back(RepEvent::Reinforce { player, lands });
+                                } else {
+                                    reject_invalid_host_data(g, gn);
+                                    break;
+                                }
+                            }
+                            Some("RECONNECTED") => {
+                                let _lobby_seat =
+                                    it.next().and_then(|v| v.parse::<usize>().ok());
+                                let token = it.next();
+                                if let Some(token) = token.filter(|token| {
+                                    token.len() == 32
+                                        && token.bytes().all(|b| b.is_ascii_hexdigit())
+                                }) {
+                                    gn.token = token.to_string();
                                 } else {
                                     reject_invalid_host_data(g, gn);
                                     break;
