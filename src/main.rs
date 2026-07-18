@@ -130,6 +130,42 @@ fn apply_colors(v: &[usize]) {
     }
 }
 
+// everyone plays the dealt position matching their color where possible;
+// unpicked or out-of-range colors keep their own seat's position
+fn apply_position_swap(g: &mut Game, colors: &[usize]) {
+    let n = g.players;
+    let mut pos = vec![usize::MAX; n];
+    let mut used = vec![false; n];
+    for p in 0..n {
+        if let Some(&c) = colors.get(p) {
+            if c < n && !used[c] {
+                pos[p] = c;
+                used[c] = true;
+            }
+        }
+    }
+    for p in 0..n {
+        if pos[p] == usize::MAX && !used[p] {
+            pos[p] = p;
+            used[p] = true;
+        }
+    }
+    for p in 0..n {
+        if pos[p] == usize::MAX {
+            let q = (0..n).find(|&q| !used[q]).unwrap();
+            pos[p] = q;
+            used[q] = true;
+        }
+    }
+    let mut inv = vec![0usize; n];
+    for (p, &q) in pos.iter().enumerate() {
+        inv[q] = p;
+    }
+    for t in g.terrs.iter_mut() {
+        t.owner = inv[t.owner];
+    }
+}
+
 // solo / menu: a pure swap — you take the picked color's slot and it takes
 // yours, every other player keeps its color, so the map never re-shuffles
 fn apply_local_colors(my_color: usize) {
@@ -895,16 +931,8 @@ fn gen_map(seed: u64, players: usize, humans: usize, difficulty: Difficulty, tea
     // solo: picking a color means playing that dealt position — the map keeps
     // its look and you take over the territories (and dice) of that color
     if g.humans == 1 {
-        let c = color_map(0);
-        if c > 0 && c < g.players {
-            for t in g.terrs.iter_mut() {
-                t.owner = match t.owner {
-                    0 => c,
-                    o if o == c => 0,
-                    o => o,
-                };
-            }
-        }
+        let colors: Vec<usize> = (0..g.players).map(color_map).collect();
+        apply_position_swap(&mut g, &colors);
     }
     g.seed = seed;
     g
@@ -2650,7 +2678,7 @@ fn draw_game(game: &Game, ui: &Ui, settings: &Settings) {
 // broadcasts the resulting events (the same RepEvents replays use).
 
 const NET_PORT_DEFAULT: u16 = 7777;
-const NET_PROTO: &str = "4"; // bumped whenever map generation or messages change
+const NET_PROTO: &str = "5"; // bumped whenever map generation or messages change
 
 fn csv_usize(v: &[usize]) -> String {
     v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
@@ -3489,6 +3517,11 @@ struct Replay {
 impl Replay {
     fn new(src: &Game, saving: bool) -> Self {
         let mut g = gen_map(src.seed, src.players, src.humans, src.difficulty, src.teams);
+        if src.humans > 1 {
+            let colors: Vec<usize> = (0..src.players).map(color_map).collect();
+            apply_position_swap(&mut g, &colors);
+        }
+        g.names = src.names.clone();
         g.recording = false;
         g.banner_t = 0.0;
         Replay {
@@ -4819,6 +4852,9 @@ fn build_guest_game(
     }
     g.names = names;
     apply_colors(colors);
+    if g.humans > 1 {
+        apply_position_swap(&mut g, colors);
+    }
     g.net_guest = true;
     g.my_seat = seat;
     g
@@ -5934,6 +5970,9 @@ async fn main() {
                                         ng.team = tv;
                                         ng.names = nm;
                                         apply_colors(&cv);
+                                        if ng.humans > 1 {
+                                            apply_position_swap(&mut ng, &cv);
+                                        }
                                         h.sent = 0;
                                         awaiting.clear();
                                         *g = ng;
@@ -6304,6 +6343,9 @@ async fn main() {
                     ng.team = tv;
                     ng.names = nm;
                     apply_colors(&cv);
+                    if ng.humans > 1 {
+                        apply_position_swap(&mut ng, &cv);
+                    }
                     h.sent = 0;
                     game = Some(ng);
                     screen = Screen::Play;
