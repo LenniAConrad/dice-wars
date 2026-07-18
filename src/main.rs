@@ -18,7 +18,7 @@ const SQRT3: f32 = 1.732_050_8;
 const WIN_W: f32 = 930.0;
 const WIN_H: f32 = 820.0;
 
-const MAX_PLAYERS: usize = 8;
+const MAX_PLAYERS: usize = 9;
 const N_SEEDS: usize = 60; // regions grown on the grid
 const N_HOLES: usize = 9; // regions removed for lakes and ragged coasts
 const MAX_DICE: u32 = 8;
@@ -65,7 +65,7 @@ fn data_file(name: &str) -> String {
 }
 
 const COLOR_NAMES: [&str; MAX_PLAYERS] = [
-    "Buttercup", "Lavender", "Rose", "Mint", "Sky", "Peach", "Teal", "Plum",
+    "Buttercup", "Lavender", "Rose", "Mint", "Sky", "Peach", "Teal", "Plum", "Cocoa",
 ];
 
 // which palette slot each player uses; a permutation so colors stay unique
@@ -78,11 +78,13 @@ static COLOR_SLOTS: [AtomicUsize; MAX_PLAYERS] = [
     AtomicUsize::new(5),
     AtomicUsize::new(6),
     AtomicUsize::new(7),
+    AtomicUsize::new(8),
 ];
 // how many of the players are humans (hotseat); the rest are AI
 static HUMANS_N: AtomicUsize = AtomicUsize::new(1);
 
-const HUMAN_LABELS: [&str; MAX_PLAYERS] = ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"];
+const HUMAN_LABELS: [&str; MAX_PLAYERS] =
+    ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9"];
 
 fn color_map(p: usize) -> usize {
     COLOR_SLOTS[p % MAX_PLAYERS].load(Ordering::Relaxed)
@@ -317,6 +319,7 @@ const PLAYER_BASE: [Color; MAX_PLAYERS] = [
     Color::new(0.97, 0.71, 0.47, 1.0), // peach
     Color::new(0.45, 0.82, 0.78, 1.0), // teal
     Color::new(0.88, 0.62, 0.86, 1.0), // plum
+    Color::new(0.79, 0.66, 0.50, 1.0), // cocoa
 ];
 
 // Okabe-Ito inspired alternative with much larger hue separation
@@ -329,6 +332,7 @@ const PLAYER_BASE_CB: [Color; MAX_PLAYERS] = [
     Color::new(0.90, 0.62, 0.00, 1.0), // peach -> orange
     Color::new(0.00, 0.45, 0.70, 1.0), // teal -> blue
     Color::new(0.45, 0.45, 0.48, 1.0), // plum -> gray
+    Color::new(0.55, 0.40, 0.22, 1.0), // cocoa -> brown
 ];
 
 static COLORBLIND: AtomicBool = AtomicBool::new(false);
@@ -2013,11 +2017,12 @@ fn draw_symbol(x: f32, y: f32, r: f32, player: usize, col: Color) {
         4 => draw_poly(x, y, 6, r * 1.05, 0.0, col),   // hexagon
         5 => draw_poly(x, y, 3, r * 1.25, 90.0, col),  // triangle down
         6 => draw_poly(x, y, 5, r * 1.15, -90.0, col), // pentagon
-        _ => {
+        7 => {
             // cross
             draw_rectangle(x - r * 0.35, y - r, r * 0.7, r * 2.0, col);
             draw_rectangle(x - r, y - r * 0.35, r * 2.0, r * 0.7, col);
         }
+        _ => draw_star(x, y, r * 1.25, col),
     }
 }
 
@@ -2715,7 +2720,7 @@ fn draw_game(game: &Game, ui: &Ui, settings: &Settings) {
 // broadcasts the resulting events (the same RepEvents replays use).
 
 const NET_PORT_DEFAULT: u16 = 7777;
-const NET_PROTO: &str = "5"; // bumped whenever map generation or messages change
+const NET_PROTO: &str = "6"; // bumped whenever map generation or messages change
 
 fn csv_usize(v: &[usize]) -> String {
     v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
@@ -2902,7 +2907,7 @@ impl HostNet {
                             let too_fast = sh.last_try.get(&ip).map_or(false, |t| {
                                 t.elapsed() < std::time::Duration::from_secs(1)
                             });
-                            if sh.banned.contains(&ip) || sh.conns >= 8 || too_fast {
+                            if sh.banned.contains(&ip) || sh.conns >= 10 || too_fast {
                                 continue;
                             }
                             sh.last_try.insert(ip, std::time::Instant::now());
@@ -3951,6 +3956,8 @@ struct Settings {
     team_ff: bool,     // teammates may attack each other
     name: String,      // display name in multiplayer lobbies
     last_addr: String, // last host address joined, prefilled next time
+    players: usize,    // last chosen player count
+    difficulty: usize, // last chosen difficulty index
 }
 
 // lobby names travel in space/comma-separated messages: keep them plain
@@ -3990,6 +3997,8 @@ fn load_settings() -> Settings {
         team_ff: true,
         name: String::new(),
         last_addr: String::new(),
+        players: 6,
+        difficulty: 1,
     };
     if let Ok(txt) = std::fs::read_to_string(data_file(SETTINGS_FILE)) {
         for l in txt.lines() {
@@ -4017,6 +4026,12 @@ fn load_settings() -> Settings {
                 (Some("teamff"), Some(v)) => s.team_ff = v != "0",
                 (Some("name"), Some(v)) => s.name = clean_name(v),
                 (Some("lastaddr"), Some(v)) => s.last_addr = v.chars().take(40).collect(),
+                (Some("players"), Some(v)) => {
+                    s.players = v.parse::<usize>().unwrap_or(6).clamp(2, MAX_PLAYERS)
+                }
+                (Some("difficulty"), Some(v)) => {
+                    s.difficulty = v.parse::<usize>().unwrap_or(1).min(2)
+                }
                 _ => {}
             }
         }
@@ -4028,7 +4043,7 @@ fn save_settings(s: &Settings) {
     let _ = std::fs::write(
         data_file(SETTINGS_FILE),
         format!(
-            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\n",
+            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\nplayers {}\ndifficulty {}\n",
             s.chances as u8,
             s.muted as u8,
             s.colorblind as u8,
@@ -4042,16 +4057,18 @@ fn save_settings(s: &Settings) {
             s.team_bridge as u8,
             s.team_ff as u8,
             s.name,
-            s.last_addr
+            s.last_addr,
+            s.players,
+            s.difficulty
         ),
     );
 }
 
 impl Menu {
-    fn init() -> Self {
-        let players = 6;
+    fn init(settings: &Settings) -> Self {
+        let players = settings.players.clamp(2, MAX_PLAYERS);
         let humans = 1;
-        let difficulty = Difficulty::Normal;
+        let difficulty = idx_diff(settings.difficulty);
         let seed = random_seed();
         Menu {
             players,
@@ -4093,10 +4110,10 @@ const COL_L: f32 = 300.0;
 const COL_R: f32 = 728.0;
 
 fn r_color(i: usize) -> Rect {
-    Rect::new(WIN_W * 0.5 - 125.0 + i as f32 * 32.0, 100.0, 26.0, 14.0)
+    Rect::new(WIN_W * 0.5 - 141.0 + i as f32 * 32.0, 100.0, 26.0, 14.0)
 }
 fn r_player(k: usize) -> Rect {
-    Rect::new(COL_L - 130.0 + k as f32 * 51.0, 244.0, 51.0, 44.0)
+    Rect::new(COL_L - 130.0 + k as f32 * 45.0, 244.0, 45.0, 44.0)
 }
 fn r_diff(k: usize) -> Rect {
     Rect::new(COL_L - 130.0 + k as f32 * 119.0, 148.0, 119.0, 44.0)
@@ -4245,6 +4262,8 @@ fn update_menu(menu: &mut Menu, settings: &mut Settings, snd: &mut Vec<Snd>, dt:
     for k in 0..MAX_PLAYERS - 1 {
         if r_player(k).contains(m) {
             menu.players = k + 2;
+            settings.players = menu.players;
+            save_settings(settings);
             menu.regen();
             snd.push(Snd::Click);
             return MenuAction::None;
@@ -4256,6 +4275,8 @@ fn update_menu(menu: &mut Menu, settings: &mut Settings, snd: &mut Vec<Snd>, dt:
     {
         if r_diff(k).contains(m) {
             menu.difficulty = d;
+            settings.difficulty = diff_idx(d);
+            save_settings(settings);
             menu.regen();
             snd.push(Snd::Click);
             return MenuAction::None;
@@ -4606,8 +4627,8 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
         );
     }
 
-    let nums = ["2", "3", "4", "5", "6", "7", "8"];
-    let row: Vec<(Rect, &str, bool)> = (0..7)
+    let nums = ["2", "3", "4", "5", "6", "7", "8", "9"];
+    let row: Vec<(Rect, &str, bool)> = (0..MAX_PLAYERS - 1)
         .map(|k| (r_player(k), nums[k], menu.players == k + 2))
         .collect();
     seg_row(ui, m, true, "PLAYERS", &row, 18.0);
@@ -4911,7 +4932,7 @@ fn r_lobby_new() -> Rect {
     Rect::new(COL_L + 107.0, 286.0, 70.0, 40.0)
 }
 fn r_lobby_player(k: usize) -> Rect {
-    Rect::new(COL_L - 130.0 + k as f32 * 51.0, 356.0, 51.0, 38.0)
+    Rect::new(COL_L - 130.0 + k as f32 * 45.0, 356.0, 45.0, 38.0)
 }
 fn r_lobby_diff(k: usize) -> Rect {
     Rect::new(COL_L - 130.0 + k as f32 * 119.0, 404.0, 119.0, 38.0)
@@ -4942,7 +4963,7 @@ fn r_lobby_name() -> Rect {
     Rect::new(COL_R - 160.0, 212.0, 320.0, 40.0)
 }
 fn r_lobby_swatch(i: usize) -> Rect {
-    Rect::new(COL_R - 136.0 + i as f32 * 34.0, 288.0, 28.0, 22.0)
+    Rect::new(COL_R - 150.0 + i as f32 * 34.0, 288.0, 28.0, 22.0)
 }
 fn r_guest_team(k: usize, count: usize) -> Rect {
     let w = count as f32 * 48.0 - 8.0;
@@ -5020,8 +5041,8 @@ fn draw_lobby_settings(
     m: Vec2,
     live: bool,
 ) {
-    let nums = ["2", "3", "4", "5", "6", "7", "8"];
-    let row: Vec<(Rect, &str, bool)> = (0..7)
+    let nums = ["2", "3", "4", "5", "6", "7", "8", "9"];
+    let row: Vec<(Rect, &str, bool)> = (0..MAX_PLAYERS - 1)
         .map(|k| (r_lobby_player(k), nums[k], players == k + 2))
         .collect();
     seg_row(ui, m, live, "PLAYERS", &row, 18.0);
@@ -5413,7 +5434,7 @@ fn draw_guest_lobby(
     ui.text_centered(
         &format!("Waiting for the host to start{}", dots),
         WIN_W * 0.5,
-        700.0,
+        738.0,
         16.0,
         with_alpha(INK(), 0.6),
     );
@@ -5558,7 +5579,7 @@ async fn main() {
         std::process::exit(0);
     }
 
-    let mut menu = Menu::init();
+    let mut menu = Menu::init(&settings);
     let mut screen = Screen::Menu;
     let mut game: Option<Game> = None;
     if std::env::var("DW_AUTOSTART").is_ok() {
@@ -6267,6 +6288,8 @@ async fn main() {
                         if r_lobby_player(k).contains(m2) {
                             let n = h.resize_guests(k + 1);
                             menu.players = n + 1;
+                            settings.players = menu.players;
+                            save_settings(&settings);
                             dirty = true;
                             snd_queue.push(Snd::Click);
                         }
@@ -6277,6 +6300,8 @@ async fn main() {
                     {
                         if r_lobby_diff(k).contains(m2) {
                             menu.difficulty = d;
+                            settings.difficulty = diff_idx(d);
+                            save_settings(&settings);
                             dirty = true;
                             snd_queue.push(Snd::Click);
                         }
@@ -6567,6 +6592,8 @@ async fn main() {
                                 for k in 0..count {
                                     if r_guest_team(k, count).contains(m) {
                                         join.my_team = Some(k);
+                                        settings.team_mine = k;
+                                        save_settings(&settings);
                                         send_net_line(&mut gn.stream, &format!("TEAM {}", k));
                                         snd_queue.push(Snd::Click);
                                     }
@@ -6652,7 +6679,13 @@ async fn main() {
                     if (click && r_join_go().contains(m)) || is_key_pressed(KeyCode::Enter) {
                         join.status = "Connecting...".to_string();
                         match guest_connect(&join.addr, &join.code, &settings.name) {
-                            Ok(g) => {
+                            Ok(mut g) => {
+                                // apply saved preferences in the new lobby
+                                send_net_line(&mut g.stream, &format!("COLOR {}", settings.color));
+                                send_net_line(
+                                    &mut g.stream,
+                                    &format!("TEAM {}", settings.team_mine),
+                                );
                                 guest = Some(g);
                                 settings.last_addr = join.addr.clone();
                                 save_settings(&settings);

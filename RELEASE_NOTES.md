@@ -1,13 +1,15 @@
-# Dice Wars v1.3.6
+# Dice Wars v1.3.7
 
 Multiplayer lobby release. Online players must both update (older versions are told so).
 
-## v1.3.6 fixes
+## v1.3.7 fixes
 
 - Color picks select your map position everywhere — solo AND hosted games: each player takes over the territories of the color they chose, and the map itself never re-shuffles. Protocol bumped to 5.
 - The menu map preview no longer changes scale with the dealt dice heights.
 
 ## Lobby
+
+- Up to **9 players** (new Cocoa color, star symbol). All preferences persist now — name, color, team, player count, difficulty — and guests automatically bring their saved color and team into any lobby they join.
 
 - **Names & colors**: set your name (saved for next time, like the host address), and pick your color first-come-first-served — taken colors are crossed out. Bots take the leftovers.
 - **Guests see everything live**: the map preview, seed, and the full settings panel (players, difficulty, mode, team setup) mirror the host's lobby in real time, plus the roster with everyone's name, color, and team.
@@ -28,5 +30,5 @@ Multiplayer lobby release. Online players must both update (older versions are t
 
 ## Downloads
 
-- **Linux**: `dice-wars-v1.3.6-linux-x86_64.tar.gz`
-- **Windows**: `dice-wars-v1.3.6-windows-x86_64.zip`
+- **Linux**: `dice-wars-v1.3.7-linux-x86_64.tar.gz`
+- **Windows**: `dice-wars-v1.3.7-windows-x86_64.zip`
