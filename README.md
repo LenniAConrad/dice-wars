@@ -31,6 +31,7 @@ All scripts bootstrap everything needed to build from scratch (rustup, compiler)
 - **Your color** — click a swatch in the band under the title to pick the color you play as; your current pick is highlighted.
 - **Players / Humans** — choose 2–8 total players. Pick any color for yourself with the swatch band; every player has a unique color and symbol. For multiplayer, host a lobby — joined players get the first seats and AI fills the rest.
 - **Difficulty** — EASY bots hesitate, need a big advantage, and pick sloppy targets; NORMAL plays by personality; HARD bots gamble on even odds, consolidate territory, reinforce their frontlines, and gang up on humans.
+- **Mode** — FREE-FOR-ALL is the classic last-player-standing game. TEAMS ends the game when only one team is left alive: pick 2–4 teams and which one you play on (bots spread evenly across the rest), or choose HUMANS VS BOTS to put every human on one side. Everyone still plays for themselves — no shared dice or reinforcements. Two extra rules are toggleable: **Friendly fire** (teammates may attack each other, on by default) and **Islands link via allies** (your separated islands count as one connected region when teammate land bridges them, which boosts END TURN reinforcements — off by default). Bots never attack their own team. Everything persists in `settings.txt` and applies to hosted online games too.
 - **Map preview** — the generated map is shown live. Deals are fairness-balanced: every player starts with a comparable largest cluster, equal territory counts, and the first player is decided by the seed.
 - **Seed** — maps are deterministic: the same 8-digit seed and player count always produce the same map. Click the seed to type one in, use `<` / `>` to step through neighboring seeds, or `NEW` (or `N`) to skip to a random map.
 - **Bookmark map** — saves the current seed + player count to `bookmarks.txt`; click a bookmark to load it, or its `x` to delete it.
@@ -57,7 +58,7 @@ All sound effects are synthesized procedurally at startup (no audio asset files)
 
 Each AI has a hidden personality, rolled from the map seed — some attack recklessly, some wait for a clear advantage, some scheme against whoever is winning. All bots share a survival instinct: when one player grows dominant, they stop wearing each other down and gang up on the leader.
 
-Win by conquering the whole map. Player cards show each player's symbol and land count (plus a small +N when they have dice stored off-board).
+Win by conquering the whole map — or, in team mode, by being on the last team standing. Player cards show each player's symbol and land count (plus a small +N when they have dice stored off-board, and their team letter in team mode).
 
 ## Replays
 

@@ -1,31 +1,34 @@
-# Dice Wars v1.1.0
+# Dice Wars v1.2.0
 
-Balance release. Online players must both update (older versions are told so).
+Team mode release. Online players must both update (older versions are told so).
 
-## Fairness
+## Team mode
 
-- **The starting deal is fair now.** Maps are dealt so every player's biggest
-  connected cluster is comparable — no more winning the game at map generation.
-- **Equal territory counts.** Extra regions become lakes so the map always
-  divides evenly among the players; the host no longer gets a spare territory.
-- **Random first player.** Who moves first is decided by the map seed, not by
-  who hosts.
+- **New TEAMS mode** on the start screen: the game ends when only one team is
+  left alive — that team wins together. Everyone still plays for themselves:
+  own dice, own reinforcements, nothing shared.
+- **Pick your team.** Choose 2–4 teams and which one you play on; bots spread
+  evenly across the remaining teams. Or pick **HUMANS VS BOTS** to put every
+  human on one side.
+- **Friendly fire** (on by default): teammates may attack each other — but
+  bots never turn on their own team.
+- **Islands link via allies** (off by default): your separated islands count
+  as one connected region when teammate land bridges them, boosting END TURN
+  reinforcements.
+- Bots are team-aware: they never target allies and focus on the enemy teams.
+- Player cards and the host lobby roster show each player's team letter, and
+  team setup carries over to hosted online games.
 
-## Smarter bots
+## Menu & UI
 
-- All bots (except Easy) now lean on whoever is running away with the game,
-  harder the more of the map the leader holds — games stay contested longer.
-- Bots consider what they leave behind: no more emptying a territory next to a
-  big enemy stack for a marginal capture, and they prefer conquests that knit
-  their territory together.
-- Normal bots also reinforce their frontlines now (previously Hard only).
-
-## Map
-
-- Bigger playfield (30x22 cells, ~50 territories) with more lakes and more
-  ragged coastlines.
+- The start screen is more evenly spaced; a TEAM SETUP card appears while
+  team mode is on.
+- The battle roll showcase now sits over the bottom panel, so the board stays
+  fully visible during fights.
+- The menu map preview is fitted to the actual map, so small maps no longer
+  float in an empty frame.
 
 ## Downloads
 
-- **Linux**: `dice-wars-v1.1.0-linux-x86_64.tar.gz`
-- **Windows**: `dice-wars-v1.1.0-windows-x86_64.zip`
+- **Linux**: `dice-wars-v1.2.0-linux-x86_64.tar.gz`
+- **Windows**: `dice-wars-v1.2.0-windows-x86_64.zip`

@@ -105,6 +105,42 @@ enum Difficulty {
     Hard,
 }
 
+// team mode: every player keeps their own dice, but the surviving team wins
+// together; the human picks a team and the bots fill up whatever is left
+const MAX_TEAMS: usize = 4;
+
+#[derive(Clone, Copy, Default, PartialEq)]
+struct TeamCfg {
+    on: bool,
+    count: usize,   // number of teams (2..=MAX_TEAMS)
+    hvb: bool,      // humans-vs-bots: overrides count/my_team
+    my_team: usize, // the team seat 0 (the local human / host) plays on
+    bridge: bool,   // split islands count as connected through teammate land
+    ff: bool,       // friendly fire: teammates may attack each other
+}
+
+// deterministic, so host and guests derive identical teams from the cfg
+fn assign_teams(players: usize, humans: usize, cfg: TeamCfg) -> Vec<usize> {
+    if !cfg.on {
+        return vec![0; players];
+    }
+    if cfg.hvb && humans < players {
+        return (0..players).map(|p| usize::from(p >= humans)).collect();
+    }
+    let n = cfg.count.clamp(2, MAX_TEAMS);
+    // rotate the cycle so seat 0 lands on its chosen team; the remaining
+    // seats (bots last) spread evenly across the other teams
+    (0..players).map(|p| (p + cfg.my_team) % n).collect()
+}
+
+fn team_letter(t: usize) -> &'static str {
+    ["A", "B", "C", "D"][t % MAX_TEAMS]
+}
+
+fn team_name(t: usize) -> &'static str {
+    ["Team A", "Team B", "Team C", "Team D"][t % MAX_TEAMS]
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Persona {
     Aggressive, // attacks on any non-losing odds
@@ -695,6 +731,8 @@ struct FloatText {
 struct Game {
     players: usize,
     humans: usize, // players 0..humans are hotseat humans, the rest are AI
+    teams: TeamCfg,
+    team: Vec<usize>, // per-player team id, from assign_teams
     difficulty: Difficulty,
     personas: Vec<Persona>, // one per player; index 0 (human) is unused
     seed: u64,
@@ -781,16 +819,16 @@ fn random_seed() -> u64 {
 }
 
 // seed the global RNG, then generate: the same seed always yields the same map
-fn gen_map(seed: u64, players: usize, humans: usize, difficulty: Difficulty) -> Game {
+fn gen_map(seed: u64, players: usize, humans: usize, difficulty: Difficulty, teams: TeamCfg) -> Game {
     macroquad::rand::srand(seed.wrapping_add(0x9E37_79B9));
     HUMANS_N.store(humans.clamp(1, players), Ordering::Relaxed);
-    let mut g = Game::new(players, humans.clamp(1, players), difficulty);
+    let mut g = Game::new(players, humans.clamp(1, players), difficulty, teams);
     g.seed = seed;
     g
 }
 
 impl Game {
-    fn new(players: usize, humans: usize, difficulty: Difficulty) -> Self {
+    fn new(players: usize, humans: usize, difficulty: Difficulty, teams: TeamCfg) -> Self {
         'gen: loop {
             let total = COLS * ROWS;
 
@@ -991,6 +1029,8 @@ impl Game {
             return Game {
                 players,
                 humans,
+                teams,
+                team: assign_teams(players, humans, teams),
                 difficulty,
                 personas,
                 seed: 0,
@@ -1028,7 +1068,29 @@ impl Game {
         self.terrs.iter().filter(|t| t.owner == p).count()
     }
 
+    fn team_of(&self, p: usize) -> usize {
+        self.team.get(p).copied().unwrap_or(0)
+    }
+
+    fn same_team(&self, a: usize, b: usize) -> bool {
+        self.teams.on && self.team_of(a) == self.team_of(b)
+    }
+
+    // own land, or a teammate's (AI never attacks allies; reinforcement
+    // frontlines treat ally borders as safe)
+    fn is_ally(&self, p: usize, owner: usize) -> bool {
+        owner == p || self.same_team(p, owner)
+    }
+
+    // may player p attack a land with this owner?
+    fn can_target(&self, p: usize, owner: usize) -> bool {
+        owner != p && (self.teams.ff || !self.same_team(p, owner))
+    }
+
     fn largest_region(&self, p: usize) -> u32 {
+        // with ally bridging, the flood may pass through teammate land but
+        // only the player's own territories count toward the region size
+        let bridge = self.teams.on && self.teams.bridge;
         let n = self.terrs.len();
         let mut seen = vec![false; n];
         let mut best = 0u32;
@@ -1040,9 +1102,12 @@ impl Game {
             let mut stack = vec![start];
             seen[start] = true;
             while let Some(t) = stack.pop() {
-                size += 1;
+                if self.terrs[t].owner == p {
+                    size += 1;
+                }
                 for &nb in &self.terrs[t].neighbors {
-                    if !seen[nb] && self.terrs[nb].owner == p {
+                    let o = self.terrs[nb].owner;
+                    if !seen[nb] && (o == p || (bridge && self.same_team(p, o))) {
                         seen[nb] = true;
                         stack.push(nb);
                     }
@@ -1143,6 +1208,38 @@ impl Game {
             });
             self.banner_t = 0.0;
             self.snd.push(Snd::Lose);
+        } else if self.teams.on {
+            let mut alive = [false; MAX_TEAMS];
+            for p in 0..self.players {
+                if self.count(p) > 0 {
+                    alive[self.team_of(p) % MAX_TEAMS] = true;
+                }
+            }
+            if alive.iter().filter(|&&a| a).count() == 1 {
+                let t = alive.iter().position(|&a| a).unwrap();
+                let mine = self.team_of(self.my_seat) == t;
+                self.over = Some(if self.teams.hvb {
+                    if t == 0 {
+                        if self.humans == 1 {
+                            "You have defeated the bots!".to_string()
+                        } else {
+                            "The humans are victorious!".to_string()
+                        }
+                    } else {
+                        "The bots have conquered you!".to_string()
+                    }
+                } else if self.humans == 1 {
+                    if mine {
+                        "Your team is victorious!".to_string()
+                    } else {
+                        "The enemy team has won!".to_string()
+                    }
+                } else {
+                    format!("{} is victorious!", team_name(t))
+                });
+                self.banner_t = 0.0;
+                self.snd.push(if mine { Snd::Win } else { Snd::Lose });
+            }
         } else if let Some(w) = (0..self.players).find(|&p| self.count(p) == self.terrs.len()) {
             self.over = Some(if w == HUMAN && self.humans == 1 {
                 "You conquered the whole map!".to_string()
@@ -1175,7 +1272,7 @@ impl Game {
                         self.terrs[t]
                             .neighbors
                             .iter()
-                            .any(|&nb| self.terrs[nb].owner != p)
+                            .any(|&nb| !self.is_ally(p, self.terrs[nb].owner))
                     })
                     .collect();
                 if !front.is_empty() {
@@ -1335,9 +1432,10 @@ impl Game {
             min_adv += 2;
         }
 
-        // who is currently winning (for the schemer and the shared instinct)
+        // who is currently winning (for the schemer and the shared instinct);
+        // in team mode only the enemy team counts as a threat
         let leader = (0..self.players)
-            .filter(|&p| p != cur && self.count(p) > 0)
+            .filter(|&p| !self.is_ally(cur, p) && self.count(p) > 0)
             .max_by_key(|&p| self.count(p));
         // how dominant the leader is, 0..1 of the whole map
         let threat = leader
@@ -1358,7 +1456,8 @@ impl Game {
             }
             for &d in &ta.neighbors {
                 let td = &self.terrs[d];
-                if td.owner == cur {
+                // bots never turn on their own team, whatever the settings say
+                if self.is_ally(cur, td.owner) {
                     continue;
                 }
                 let adv = ta.dice as i32 - td.dice as i32;
@@ -1810,7 +1909,9 @@ fn handle_input(game: &mut Game, mut net_out: Option<&mut Vec<String>>) {
         }
         Some(sel) => {
             if owner != game.current {
-                if game.terrs[sel].neighbors.contains(&t) {
+                if !game.can_target(game.current, owner) {
+                    game.set_hint("That land belongs to a teammate — friendly fire is off.");
+                } else if game.terrs[sel].neighbors.contains(&t) {
                     if let Some(out) = net_out.as_deref_mut() {
                         out.push(format!("ATTACK {} {}", sel, t));
                         game.selected = None;
@@ -1829,7 +1930,11 @@ fn handle_input(game: &mut Game, mut net_out: Option<&mut Vec<String>>) {
         }
         None => {
             if owner != game.current {
-                game.set_hint("That is an enemy land — select one of your own first.");
+                if game.teams.on && game.same_team(game.current, owner) {
+                    game.set_hint("That land belongs to a teammate — select one of your own first.");
+                } else {
+                    game.set_hint("That is an enemy land — select one of your own first.");
+                }
             } else if dice > 1 {
                 game.selected = Some(t);
                 game.snd.push(Snd::Select);
@@ -1875,7 +1980,7 @@ fn draw_board(game: &Game, ui: &Ui, chances: bool) {
         let mut col = palette(terr.owner).fill;
         let selectable = terr.owner == game.current && terr.dice > 1;
         let attackable = game.selected.map_or(false, |s| {
-            terr.owner != game.current && game.terrs[s].neighbors.contains(&t)
+            game.can_target(game.current, terr.owner) && game.terrs[s].neighbors.contains(&t)
         });
         if game.selected == Some(t) {
             col = lighten(col, 0.38 + 0.1 * (game.time * 6.0).sin());
@@ -1933,7 +2038,7 @@ fn draw_board(game: &Game, ui: &Ui, chances: bool) {
             let alpha = 0.5 + 0.2 * (game.time * 5.0).sin();
             let col = with_alpha(palette(game.current).dark, alpha);
             for &d in &game.terrs[sel].neighbors {
-                if game.terrs[d].owner == game.current {
+                if !game.can_target(game.current, game.terrs[d].owner) {
                     continue;
                 }
                 let from = game.terrs[sel].anchor;
@@ -1976,7 +2081,7 @@ fn draw_board(game: &Game, ui: &Ui, chances: bool) {
     if chances && game.battle.is_none() && game.over.is_none() && game.current == game.my_seat {
         if let Some(sel) = game.selected {
             for &d in &game.terrs[sel].neighbors {
-                if game.terrs[d].owner == game.current {
+                if !game.can_target(game.current, game.terrs[d].owner) {
                     continue;
                 }
                 let c = win_chance(game.terrs[sel].dice, game.terrs[d].dice);
@@ -2062,7 +2167,7 @@ fn draw_panel(game: &Game, ui: &Ui, settings: &Settings) {
         format!("Waiting for {} to make their move...", HUMAN_LABELS[cur])
     } else if let Some(sel) = game.selected {
         let target = hover.filter(|&h| {
-            game.terrs[h].owner != cur && game.terrs[sel].neighbors.contains(&h)
+            game.can_target(cur, game.terrs[h].owner) && game.terrs[sel].neighbors.contains(&h)
         });
         if let Some(tgt) = target {
             if chances {
@@ -2166,6 +2271,17 @@ fn draw_player_cards(game: &Game, ui: &Ui, cy: f32, right_margin: f32) {
         }
         let a = if alive { 1.0 } else { 0.25 };
         draw_symbol(cx + 26.0, cy + 24.0, 9.0, p, with_alpha(palette(p).dark, a));
+        if game.teams.on {
+            // team letter in the card corner so alliances are always visible
+            let ink = if is_cur { INK_ON_FILL } else { INK() };
+            ui.text(
+                team_letter(game.team_of(p)),
+                cx + 7.0,
+                cy + 43.0,
+                11.0,
+                with_alpha(ink, 0.55 * a),
+            );
+        }
         if game.humans > 1 && p == game.my_seat {
             let bw_ = ui.width("YOU", 10.0) + 10.0;
             draw_round_rect(cx - 4.0, cy - 8.0, bw_, 16.0, 8.0, BORDER());
@@ -2377,9 +2493,10 @@ fn draw_confirm(kind: Confirm, ui: &Ui) {
 
 fn draw_game(game: &Game, ui: &Ui, settings: &Settings) {
     draw_board(game, ui, settings.chances);
-    draw_battle_overlay(game, ui);
     draw_icon_bar(settings, ui, mouse_virtual());
     draw_panel(game, ui, settings);
+    // after the panel: during a battle the showcase card covers it
+    draw_battle_overlay(game, ui);
     draw_banner(game, ui);
     draw_over(game, ui);
 }
@@ -2389,7 +2506,7 @@ fn draw_game(game: &Game, ui: &Ui, settings: &Settings) {
 // broadcasts the resulting events (the same RepEvents replays use).
 
 const NET_PORT_DEFAULT: u16 = 7777;
-const NET_PROTO: &str = "2"; // bumped whenever map generation or messages change
+const NET_PROTO: &str = "3"; // bumped whenever map generation or messages change
 
 // DW_PORT overrides the port (used by the automated tests)
 fn net_port() -> u16 {
@@ -2610,7 +2727,7 @@ impl HostNet {
 
     // lock in whoever is connected, compact their seats, tell each guest
     // their game seat, and return the human count (host included)
-    fn start_game(&mut self, seed: u64, players: usize, diff: Difficulty) -> usize {
+    fn start_game(&mut self, seed: u64, players: usize, diff: Difficulty, teams: TeamCfg) -> usize {
         use std::io::Write;
         let mut sh = self.shared.lock().unwrap();
         sh.started = true;
@@ -2627,13 +2744,19 @@ impl HostNet {
             if let Some(s) = sh.seats[i].as_mut() {
                 let _ = writeln!(
                     s,
-                    "START {} {} {} {} {} {}",
+                    "START {} {} {} {} {} {} {} {} {} {} {} {}",
                     seed,
                     players,
                     humans,
                     diff_idx(diff),
                     k + 1,
-                    HUMAN_COLOR.load(Ordering::Relaxed)
+                    HUMAN_COLOR.load(Ordering::Relaxed),
+                    teams.on as u8,
+                    teams.bridge as u8,
+                    teams.ff as u8,
+                    teams.count,
+                    teams.hvb as u8,
+                    teams.my_team
                 );
             }
         }
@@ -2650,13 +2773,19 @@ impl HostNet {
         if let Some(s) = sh.seats[lobby_seat - 1].as_mut() {
             let _ = writeln!(
                 s,
-                "RESUME {} {} {} {} {} {}",
+                "RESUME {} {} {} {} {} {} {} {} {} {} {} {}",
                 seed,
                 g.players,
                 g.humans,
                 diff_idx(diff),
                 game_seat,
-                HUMAN_COLOR.load(Ordering::Relaxed)
+                HUMAN_COLOR.load(Ordering::Relaxed),
+                g.teams.on as u8,
+                g.teams.bridge as u8,
+                g.teams.ff as u8,
+                g.teams.count,
+                g.teams.hvb as u8,
+                g.teams.my_team
             );
             for ev in &g.events {
                 let line = match ev {
@@ -3077,7 +3206,7 @@ struct Replay {
 
 impl Replay {
     fn new(src: &Game, saving: bool) -> Self {
-        let mut g = gen_map(src.seed, src.players, src.humans, src.difficulty);
+        let mut g = gen_map(src.seed, src.players, src.humans, src.difficulty, src.teams);
         g.recording = false;
         g.banner_t = 0.0;
         Replay {
@@ -3348,11 +3477,9 @@ fn draw_battle_overlay(game: &Game, ui: &Ui) {
     let w = 560.0;
     let h = 152.0;
     let x = (WIN_W - w) * 0.5;
-    let y = 34.0; // tucked along the top edge, out of the board's way
+    let y = 648.0; // over the bottom panel, so the board stays fully visible
     let ap = ease_out((b.t / 0.2).min(1.0));
-    // the veil dims the board lightly; the showcase lives at the top edge
-    draw_rectangle(0.0, 0.0, WIN_W, 624.0, with_alpha(SRF(), 0.72 * ap));
-    let _ = h;
+    draw_round_frame(x, y, w, h, 16.0, 3.0, with_alpha(SRF(), ap), with_alpha(BORDER(), ap));
     let reveal = b.t - T_SHAKE * 0.6;
     for (row, (player, dice)) in [(atk, &b.ad), (def, &b.dd)].into_iter().enumerate() {
         let ry = y + 44.0 + row as f32 * 66.0;
@@ -3463,6 +3590,25 @@ struct Settings {
     color: usize,     // which palette color the human plays as
     speed: f32,       // game speed multiplier (1x / 2x)
     dark: bool,       // dark mode
+    teams: bool,       // team mode on/off
+    team_count: usize, // number of teams (2..=MAX_TEAMS)
+    team_hvb: bool,    // humans vs bots
+    team_mine: usize,  // which team the local player picked
+    team_bridge: bool, // islands count as connected through teammate land
+    team_ff: bool,     // teammates may attack each other
+}
+
+impl Settings {
+    fn team_cfg(&self) -> TeamCfg {
+        TeamCfg {
+            on: self.teams,
+            count: self.team_count.clamp(2, MAX_TEAMS),
+            hvb: self.team_hvb,
+            my_team: self.team_mine % self.team_count.clamp(2, MAX_TEAMS),
+            bridge: self.team_bridge,
+            ff: self.team_ff,
+        }
+    }
 }
 
 fn load_settings() -> Settings {
@@ -3473,6 +3619,12 @@ fn load_settings() -> Settings {
         color: 0,
         speed: 1.0,
         dark: false,
+        teams: false,
+        team_count: 2,
+        team_hvb: false,
+        team_mine: 0,
+        team_bridge: false,
+        team_ff: true,
     };
     if let Ok(txt) = std::fs::read_to_string(data_file(SETTINGS_FILE)) {
         for l in txt.lines() {
@@ -3488,6 +3640,16 @@ fn load_settings() -> Settings {
                     s.speed = if v == "2" { 2.0 } else { 1.0 }
                 }
                 (Some("dark"), Some(v)) => s.dark = v != "0",
+                (Some("teams"), Some(v)) => s.teams = v != "0",
+                (Some("teamcount"), Some(v)) => {
+                    s.team_count = v.parse::<usize>().unwrap_or(2).clamp(2, MAX_TEAMS)
+                }
+                (Some("teamhvb"), Some(v)) => s.team_hvb = v != "0",
+                (Some("teammine"), Some(v)) => {
+                    s.team_mine = v.parse::<usize>().unwrap_or(0) % MAX_TEAMS
+                }
+                (Some("teambridge"), Some(v)) => s.team_bridge = v != "0",
+                (Some("teamff"), Some(v)) => s.team_ff = v != "0",
                 _ => {}
             }
         }
@@ -3499,8 +3661,19 @@ fn save_settings(s: &Settings) {
     let _ = std::fs::write(
         data_file(SETTINGS_FILE),
         format!(
-            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\n",
-            s.chances as u8, s.muted as u8, s.colorblind as u8, s.color, s.speed as u8, s.dark as u8
+            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\n",
+            s.chances as u8,
+            s.muted as u8,
+            s.colorblind as u8,
+            s.color,
+            s.speed as u8,
+            s.dark as u8,
+            s.teams as u8,
+            s.team_count,
+            s.team_hvb as u8,
+            s.team_mine,
+            s.team_bridge as u8,
+            s.team_ff as u8
         ),
     );
 }
@@ -3516,7 +3689,7 @@ impl Menu {
             humans,
             difficulty,
             seed,
-            preview: gen_map(seed, players, humans, difficulty),
+            preview: gen_map(seed, players, humans, difficulty, TeamCfg::default()),
             editing: false,
             seed_text: String::new(),
             bookmarks: load_bookmarks(),
@@ -3528,7 +3701,9 @@ impl Menu {
     }
 
     fn regen(&mut self) {
-        self.preview = gen_map(self.seed, self.players, self.humans, self.difficulty);
+        // the preview only shows the map, which team settings don't affect
+        self.preview =
+            gen_map(self.seed, self.players, self.humans, self.difficulty, TeamCfg::default());
     }
 
     fn commit_seed(&mut self) {
@@ -3560,31 +3735,56 @@ fn r_diff(k: usize) -> Rect {
     Rect::new(COL_L - 196.0 + k as f32 * 136.0, 148.0, 120.0, 44.0)
 }
 fn r_preview() -> Rect {
-    Rect::new(COL_L - 230.0, 304.0, 460.0, 240.0)
+    Rect::new(COL_L - 230.0, 304.0, 460.0, 216.0)
 }
 fn r_prev() -> Rect {
-    Rect::new(COL_L - 200.0, 566.0, 48.0, 48.0)
+    Rect::new(COL_L - 200.0, 550.0, 48.0, 48.0)
 }
 fn r_seedbox() -> Rect {
-    Rect::new(COL_L - 144.0, 566.0, 200.0, 48.0)
+    Rect::new(COL_L - 144.0, 550.0, 200.0, 48.0)
 }
 fn r_next() -> Rect {
-    Rect::new(COL_L + 64.0, 566.0, 48.0, 48.0)
+    Rect::new(COL_L + 64.0, 550.0, 48.0, 48.0)
 }
 fn r_new() -> Rect {
-    Rect::new(COL_L + 120.0, 566.0, 80.0, 48.0)
+    Rect::new(COL_L + 120.0, 550.0, 80.0, 48.0)
 }
 fn r_bookmark() -> Rect {
     Rect::new(COL_L + 230.0 - 54.0, 312.0, 42.0, 42.0)
 }
+fn r_mode(k: usize) -> Rect {
+    // two buttons: FREE-FOR-ALL | TEAMS, between the seed row and start
+    Rect::new(COL_L - 178.0 + k as f32 * 186.0, 628.0, 170.0, 40.0)
+}
+// the team setup card replaces the how-to-play card while team mode is on
+const TEAM_CARD_X: f32 = COL_R - 160.0;
+const TEAM_CARD_Y: f32 = 552.0;
+const TEAM_CARD_H: f32 = 240.0;
+fn r_team_count(k: usize) -> Rect {
+    // k = 0..2 → 2/3/4 teams; k = 3 → humans-vs-bots
+    if k < 3 {
+        Rect::new(TEAM_CARD_X + 16.0 + k as f32 * 48.0, TEAM_CARD_Y + 54.0, 40.0, 32.0)
+    } else {
+        Rect::new(TEAM_CARD_X + 16.0 + 144.0, TEAM_CARD_Y + 54.0, 144.0, 32.0)
+    }
+}
+fn r_team_pick(k: usize) -> Rect {
+    Rect::new(TEAM_CARD_X + 16.0 + k as f32 * 48.0, TEAM_CARD_Y + 120.0, 40.0, 32.0)
+}
+fn r_team_ff() -> Rect {
+    Rect::new(TEAM_CARD_X + 16.0, TEAM_CARD_Y + 170.0, 288.0, 24.0)
+}
+fn r_team_bridge() -> Rect {
+    Rect::new(TEAM_CARD_X + 16.0, TEAM_CARD_Y + 202.0, 288.0, 24.0)
+}
 fn r_start() -> Rect {
-    Rect::new(COL_L - 234.0, 664.0, 300.0, 72.0)
+    Rect::new(COL_L - 234.0, 698.0, 300.0, 72.0)
 }
 fn r_host() -> Rect {
-    Rect::new(COL_L + 78.0, 664.0, 156.0, 33.0)
+    Rect::new(COL_L + 78.0, 698.0, 156.0, 33.0)
 }
 fn r_join() -> Rect {
-    Rect::new(COL_L + 78.0, 703.0, 156.0, 33.0)
+    Rect::new(COL_L + 78.0, 737.0, 156.0, 33.0)
 }
 fn r_bm_row(i: usize) -> Rect {
     Rect::new(COL_R - 160.0, 320.0 + i as f32 * 54.0, 320.0, 44.0)
@@ -3693,6 +3893,52 @@ fn update_menu(menu: &mut Menu, settings: &mut Settings, snd: &mut Vec<Snd>, dt:
             return MenuAction::None;
         }
     }
+    for k in 0..2 {
+        if r_mode(k).contains(m) {
+            settings.teams = k == 1;
+            save_settings(settings);
+            snd.push(Snd::Click);
+            return MenuAction::None;
+        }
+    }
+    if settings.teams {
+        for k in 0..4 {
+            if r_team_count(k).contains(m) {
+                if k < 3 {
+                    settings.team_hvb = false;
+                    settings.team_count = k + 2;
+                    settings.team_mine = settings.team_mine.min(k + 1);
+                } else {
+                    settings.team_hvb = !settings.team_hvb;
+                }
+                save_settings(settings);
+                snd.push(Snd::Click);
+                return MenuAction::None;
+            }
+        }
+        if !settings.team_hvb {
+            for k in 0..settings.team_count.clamp(2, MAX_TEAMS) {
+                if r_team_pick(k).contains(m) {
+                    settings.team_mine = k;
+                    save_settings(settings);
+                    snd.push(Snd::Click);
+                    return MenuAction::None;
+                }
+            }
+        }
+        if r_team_ff().contains(m) {
+            settings.team_ff = !settings.team_ff;
+            save_settings(settings);
+            snd.push(Snd::Click);
+            return MenuAction::None;
+        }
+        if r_team_bridge().contains(m) {
+            settings.team_bridge = !settings.team_bridge;
+            save_settings(settings);
+            snd.push(Snd::Click);
+            return MenuAction::None;
+        }
+    }
     if r_seedbox().contains(m) {
         if !menu.editing {
             menu.editing = true;
@@ -3784,9 +4030,31 @@ fn update_menu(menu: &mut Menu, settings: &mut Settings, snd: &mut Vec<Snd>, dt:
 
 // small map rendering for the menu preview
 fn draw_map_mini(game: &Game, area: Rect) {
-    // virtual-canvas map bounds, padded above for dice towers and below
-    // for their shadows so nothing pokes out of the preview frame
-    let (bx, by, bw, bh) = (30.0, 9.0, 845.0, 615.0);
+    // fit the frame to this map's actual content: hex extents plus each
+    // territory's dice tower, so the preview sits centered with even margins
+    let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+    let (mut x1, mut y1) = (f32::MIN, f32::MIN);
+    for i in 0..COLS * ROWS {
+        if game.cell_terr[i] < 0 {
+            continue;
+        }
+        let p = cell_pos(i);
+        x0 = x0.min(p.x - SQRT3 * 0.5 * HEX);
+        x1 = x1.max(p.x + SQRT3 * 0.5 * HEX);
+        y0 = y0.min(p.y - HEX);
+        y1 = y1.max(p.y + HEX);
+    }
+    for t in &game.terrs {
+        // tallest column of the stack, in die widths (see draw_stack)
+        let front = (t.dice.min(4) as f32 - 1.0) * 0.62 + 1.14;
+        let back = if t.dice > 4 {
+            (t.dice as f32 - 5.0) * 0.62 + 1.40
+        } else {
+            0.0
+        };
+        y0 = y0.min(t.anchor.y + 4.0 - DIE_W * front.max(back));
+    }
+    let (bx, by, bw, bh) = (x0, y0, x1 - x0, y1 - y0);
     let k = (area.w / bw).min(area.h / bh);
     let ox = area.x + (area.w - bw * k) * 0.5 - bx * k;
     let oy = area.y + (area.h - bh * k) * 0.5 - by * k;
@@ -3882,13 +4150,21 @@ fn draw_menu_hero() {
     let cy = 212.0;
     draw_burst(cx, cy, 118.0, 54.0, 12, 0.1, mix(base_color(0), WHITE, 0.12));
     draw_burst(cx, cy, 82.0, 40.0, 12, 0.36, mix(base_color(0), WHITE, 0.62));
+    // one contact shadow per die, centered under its base diamond with the
+    // same footprint formula the in-game stacks use
     let sh = Color::new(0.15, 0.16, 0.30, 0.16);
-    draw_ellipse_fan(cx + 8.0, cy - 12.0, 24.0, 7.0, sh);
-    draw_ellipse_fan(cx - 38.0, cy + 58.0, 32.0, 9.0, sh);
-    draw_ellipse_fan(cx + 46.0, cy + 62.0, 29.0, 8.5, sh);
-    draw_die(cx + 4.0, cy - 16.0, 42.0, 5, 0, &palette(3));
-    draw_die(cx - 46.0, cy + 54.0, 58.0, 11, 0, &palette(2));
-    draw_die(cx + 42.0, cy + 58.0, 52.0, 23, 0, &palette(4));
+    let dice = [
+        (cx + 4.0, cy - 16.0, 42.0, 5u32, 3usize),
+        (cx - 46.0, cy + 54.0, 58.0, 11, 2),
+        (cx + 42.0, cy + 58.0, 52.0, 23, 4),
+    ];
+    for &(x, y, w, _, _) in &dice {
+        let qh = w * 0.26;
+        draw_ellipse_fan(x, y - qh * 0.8, w * 0.62, qh * 1.3, sh);
+    }
+    for &(x, y, w, seed, pl) in &dice {
+        draw_die(x, y, w, seed, 0, &palette(pl));
+    }
 }
 
 fn draw_star(cx: f32, cy: f32, r: f32, col: Color) {
@@ -4038,6 +4314,21 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     menu_button(rr, SRF(), CARD_EDGE(), rr.contains(m));
     ui.text_centered("NEW", rr.x + rr.w * 0.5, rr.y + 31.0, 18.0, INK());
 
+    // game mode: classic free-for-all, or two teams on alternating seats
+    for (k, label) in ["FREE-FOR-ALL", "TEAMS"].into_iter().enumerate() {
+        let r = r_mode(k);
+        let sel = settings.teams == (k == 1);
+        let fill = if sel { palette(HUMAN).fill } else { SRF() };
+        let edge = if sel { BORDER() } else { CARD_EDGE() };
+        menu_button(r, fill, edge, r.contains(m));
+        ui.text_centered(
+            label,
+            r.x + r.w * 0.5,
+            r.y + 26.0,
+            16.0,
+            if sel { INK_ON_FILL } else { INK() },
+        );
+    }
     // bookmark star, frameless, tucked into the preview's corner
     let rb = r_bookmark();
     let marked = menu.is_bookmarked();
@@ -4058,7 +4349,7 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
         ui.text_centered(
             "Could not open port 7777 — is another instance hosting?",
             COL_L,
-            790.0,
+            800.0,
             15.0,
             palette(2).dark,
         );
@@ -4116,11 +4407,14 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
         draw_round_rect(COL_R + 166.0, ty, 5.0, th, 2.5, with_alpha(INK(), 0.35));
     }
 
-    // a quick rules card below the bookmark list
-    {
-        let hx = COL_R - 160.0;
-        let hy = 560.0;
-        draw_round_frame(hx, hy, 320.0, 218.0, 14.0, 2.0, SRF(), CARD_EDGE());
+    // below the bookmark list: team setup while team mode is on,
+    // otherwise a quick rules card
+    if settings.teams {
+        draw_team_card(settings, ui, m);
+    } else {
+        let hx = TEAM_CARD_X;
+        let hy = TEAM_CARD_Y;
+        draw_round_frame(hx, hy, 320.0, TEAM_CARD_H, 14.0, 2.0, SRF(), CARD_EDGE());
         ui.text_centered("HOW TO PLAY", COL_R, hy + 28.0, 13.0, with_alpha(INK(), 0.55));
         for (i, line) in [
             "1. Click one of your lands (2+ dice),",
@@ -4134,10 +4428,94 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
         .iter()
         .enumerate()
         {
-            ui.text(line, hx + 18.0, hy + 56.0 + i as f32 * 23.0, 13.5, with_alpha(INK(), 0.8));
+            ui.text(line, hx + 18.0, hy + 62.0 + i as f32 * 25.0, 14.0, with_alpha(INK(), 0.8));
         }
     }
 
+}
+
+// team-mode controls: how many teams, which one is yours, and the two rules
+fn draw_team_card(settings: &Settings, ui: &Ui, m: Vec2) {
+    let hx = TEAM_CARD_X;
+    let hy = TEAM_CARD_Y;
+    draw_round_frame(hx, hy, 320.0, TEAM_CARD_H, 14.0, 2.0, SRF(), CARD_EDGE());
+    ui.text_centered("TEAM SETUP", COL_R, hy + 26.0, 13.0, with_alpha(INK(), 0.55));
+
+    ui.text("TEAMS", hx + 16.0, hy + 48.0, 10.0, with_alpha(INK(), 0.55));
+    for (k, label) in ["2", "3", "4", "HUMANS VS BOTS"].into_iter().enumerate() {
+        let r = r_team_count(k);
+        let sel = if k < 3 {
+            !settings.team_hvb && settings.team_count == k + 2
+        } else {
+            settings.team_hvb
+        };
+        let fill = if sel { palette(HUMAN).fill } else { SRF() };
+        let edge = if sel { BORDER() } else { CARD_EDGE() };
+        menu_button(r, fill, edge, r.contains(m));
+        ui.text_centered(
+            label,
+            r.x + r.w * 0.5,
+            r.y + 22.0,
+            if k < 3 { 16.0 } else { 12.0 },
+            if sel { INK_ON_FILL } else { INK() },
+        );
+    }
+
+    if settings.team_hvb {
+        ui.text(
+            "Every human against all the bots.",
+            hx + 16.0,
+            hy + 140.0,
+            13.0,
+            with_alpha(INK(), 0.7),
+        );
+    } else {
+        ui.text("YOUR TEAM", hx + 16.0, hy + 114.0, 10.0, with_alpha(INK(), 0.55));
+        let count = settings.team_count.clamp(2, MAX_TEAMS);
+        for k in 0..count {
+            let r = r_team_pick(k);
+            let sel = settings.team_mine.min(count - 1) == k;
+            let fill = if sel { palette(HUMAN).fill } else { SRF() };
+            let edge = if sel { BORDER() } else { CARD_EDGE() };
+            menu_button(r, fill, edge, r.contains(m));
+            ui.text_centered(
+                team_letter(k),
+                r.x + r.w * 0.5,
+                r.y + 22.0,
+                16.0,
+                if sel { INK_ON_FILL } else { INK() },
+            );
+        }
+    }
+
+    for (r, label, on) in [
+        (r_team_ff(), "FRIENDLY FIRE", settings.team_ff),
+        (r_team_bridge(), "ISLANDS LINK VIA ALLIES", settings.team_bridge),
+    ] {
+        let hov = r.contains(m);
+        let (bx, by) = (r.x, r.y + 2.0);
+        draw_round_frame(
+            bx,
+            by,
+            20.0,
+            20.0,
+            6.0,
+            2.0,
+            if on { palette(HUMAN).mid } else { SRF() },
+            if hov { BORDER() } else { CARD_EDGE() },
+        );
+        if on {
+            draw_line(bx + 4.5, by + 10.0, bx + 8.5, by + 14.5, 2.6, WHITE);
+            draw_line(bx + 8.5, by + 14.5, bx + 15.5, by + 5.5, 2.6, WHITE);
+        }
+        ui.text(
+            label,
+            r.x + 28.0,
+            r.y + 17.0,
+            13.0,
+            with_alpha(INK(), if hov { 0.95 } else { 0.72 }),
+        );
+    }
 }
 
 // ---------------------------------------------------------------- lobby screens
@@ -4192,7 +4570,7 @@ fn draw_lobby_card(ui: &Ui, title: &str) {
     ui.text_centered(title, WIN_W * 0.5, 160.0, 44.0, INK());
 }
 
-fn draw_host_lobby(h: &HostNet, menu: &Menu, ui: &Ui, time: f32, copied_t: f32) {
+fn draw_host_lobby(h: &HostNet, menu: &Menu, ui: &Ui, teams: TeamCfg, time: f32, copied_t: f32) {
     draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
     let m = mouse_virtual();
     ui.text_centered("HOSTING", WIN_W * 0.5, 96.0, 40.0, INK());
@@ -4232,7 +4610,21 @@ fn draw_host_lobby(h: &HostNet, menu: &Menu, ui: &Ui, time: f32, copied_t: f32) 
         INK(),
     );
 
-    ui.text_centered("PLAYERS", COL_R, 316.0, 13.0, with_alpha(INK(), 0.55));
+    ui.text_centered(
+        if teams.on {
+            if teams.hvb {
+                "PLAYERS — HUMANS VS BOTS"
+            } else {
+                "PLAYERS — TEAM MODE"
+            }
+        } else {
+            "PLAYERS"
+        },
+        COL_R,
+        316.0,
+        13.0,
+        with_alpha(INK(), 0.55),
+    );
     let slots = h.slots();
     let joined: usize = slots.iter().filter(|&&s| s).count();
     let mut seat = 0usize;
@@ -4250,12 +4642,23 @@ fn draw_host_lobby(h: &HostNet, menu: &Menu, ui: &Ui, time: f32, copied_t: f32) 
     // center the roster block under its heading
     let roster_w = 150.0;
     let rx0 = COL_R - roster_w * 0.5;
+    // the teams the game would start with right now (bots fill open seats)
+    let team_v = assign_teams(menu.players, joined + 1, teams);
     for (k, label) in rows.iter().enumerate() {
         let ry = 346.0 + k as f32 * 33.0;
         let pal = palette(k);
         draw_round_rect(rx0, ry - 14.0, 24.0, 18.0, 6.0, pal.mid);
         draw_symbol(rx0 + 40.0, ry - 5.0, 7.0, k, pal.dark);
         ui.text(label, rx0 + 58.0, ry, 17.0, INK());
+        if teams.on {
+            ui.text(
+                team_letter(team_v.get(k).copied().unwrap_or(0)),
+                rx0 + 196.0,
+                ry,
+                14.0,
+                with_alpha(INK(), 0.55),
+            );
+        }
     }
     let dots = ".".repeat(1 + (time * 2.0) as usize % 3);
     ui.text_centered(
@@ -4413,7 +4816,7 @@ async fn main() {
     let mut screen = Screen::Menu;
     let mut game: Option<Game> = None;
     if std::env::var("DW_AUTOSTART").is_ok() {
-        game = Some(gen_map(menu.seed, menu.players, 1, menu.difficulty));
+        game = Some(gen_map(menu.seed, menu.players, 1, menu.difficulty, settings.team_cfg()));
         screen = Screen::Play;
     }
     let mut replay: Option<Replay> = None;
@@ -4475,7 +4878,13 @@ async fn main() {
                 menu_time += dt;
                 match update_menu(&mut menu, &mut settings, &mut snd_queue, dt) {
                     MenuAction::Start => {
-                        game = Some(gen_map(menu.seed, menu.players, 1, menu.difficulty));
+                        game = Some(gen_map(
+                            menu.seed,
+                            menu.players,
+                            1,
+                            menu.difficulty,
+                            settings.team_cfg(),
+                        ));
                         screen = Screen::Play;
                         snd_queue.push(Snd::Click);
                     }
@@ -4556,7 +4965,7 @@ async fn main() {
                                                 && d < g.terrs.len()
                                                 && g.terrs[a].owner == seat
                                                 && g.terrs[a].dice > 1
-                                                && g.terrs[d].owner != seat
+                                                && g.can_target(seat, g.terrs[d].owner)
                                                 && g.terrs[a].neighbors.contains(&d)
                                             {
                                                 g.begin_attack(a, d);
@@ -4686,9 +5095,28 @@ async fn main() {
                                 {
                                     HUMAN_COLOR.store(c % MAX_PLAYERS, Ordering::Relaxed);
                                 }
+                                let teams = TeamCfg {
+                                    on: it.next() == Some("1"),
+                                    bridge: it.next() == Some("1"),
+                                    ff: it.next() == Some("1"),
+                                    count: it
+                                        .next()
+                                        .and_then(|v| v.parse().ok())
+                                        .unwrap_or(2),
+                                    hvb: it.next() == Some("1"),
+                                    my_team: it
+                                        .next()
+                                        .and_then(|v| v.parse().ok())
+                                        .unwrap_or(0),
+                                };
                                 gn.seat = seat;
-                                let mut ng =
-                                    gen_map(seed, players.clamp(2, 8), humans, idx_diff(di));
+                                let mut ng = gen_map(
+                                    seed,
+                                    players.clamp(2, 8),
+                                    humans,
+                                    idx_diff(di),
+                                    teams,
+                                );
                                 ng.net_guest = true;
                                 ng.my_seat = seat;
                                 *g = ng;
@@ -4766,7 +5194,13 @@ async fn main() {
                             match kind {
                                 Confirm::NewMap => {
                                     menu.seed = random_seed();
-                                    *g = gen_map(menu.seed, menu.players, 1, menu.difficulty);
+                                    *g = gen_map(
+                                        menu.seed,
+                                        menu.players,
+                                        1,
+                                        menu.difficulty,
+                                        settings.team_cfg(),
+                                    );
                                 }
                                 Confirm::Menu => go_menu = true,
                             }
@@ -4789,7 +5223,13 @@ async fn main() {
                 } else if is_key_pressed(KeyCode::R) && host.is_none() && guest.is_none() {
                     if g.over.is_some() {
                         menu.seed = random_seed();
-                        *g = gen_map(menu.seed, menu.players, 1, menu.difficulty);
+                        *g = gen_map(
+                            menu.seed,
+                            menu.players,
+                            1,
+                            menu.difficulty,
+                            settings.team_cfg(),
+                        );
                     } else {
                         confirm = Some(Confirm::NewMap);
                     }
@@ -4924,12 +5364,13 @@ async fn main() {
                     || is_key_pressed(KeyCode::Enter)
                     || (test_host_auto > 0 && h.joined() >= test_host_auto);
                 if want_start {
-                    let humans = h.start_game(menu.seed, menu.players, menu.difficulty);
-                    game = Some(gen_map(menu.seed, menu.players, humans, menu.difficulty));
+                    let cfg = settings.team_cfg();
+                    let humans = h.start_game(menu.seed, menu.players, menu.difficulty, cfg);
+                    game = Some(gen_map(menu.seed, menu.players, humans, menu.difficulty, cfg));
                     screen = Screen::Play;
                     snd_queue.push(Snd::Turn);
                 }
-                draw_host_lobby(h, &menu, &ui, menu_time, copied_t);
+                draw_host_lobby(h, &menu, &ui, settings.team_cfg(), menu_time, copied_t);
                 if cancel {
                     host = None;
                     screen = Screen::Menu;
@@ -4961,8 +5402,27 @@ async fn main() {
                                     // adopt the host's color mapping for this match
                                     HUMAN_COLOR.store(c % MAX_PLAYERS, Ordering::Relaxed);
                                 }
-                                let mut g =
-                                    gen_map(seed, players.clamp(2, 8), humans, idx_diff(di));
+                                let teams = TeamCfg {
+                                    on: it.next() == Some("1"),
+                                    bridge: it.next() == Some("1"),
+                                    ff: it.next() == Some("1"),
+                                    count: it
+                                        .next()
+                                        .and_then(|v| v.parse().ok())
+                                        .unwrap_or(2),
+                                    hvb: it.next() == Some("1"),
+                                    my_team: it
+                                        .next()
+                                        .and_then(|v| v.parse().ok())
+                                        .unwrap_or(0),
+                                };
+                                let mut g = gen_map(
+                                    seed,
+                                    players.clamp(2, 8),
+                                    humans,
+                                    idx_diff(di),
+                                    teams,
+                                );
                                 g.net_guest = true;
                                 g.my_seat = gn.seat;
                                 game = Some(g);
@@ -5098,8 +5558,8 @@ async fn main() {
                     }
                 }
                 draw_board(&r.g, &ui, false);
-                draw_battle_overlay(&r.g, &ui);
                 draw_panel_replay(&r.g, &ui);
+                draw_battle_overlay(&r.g, &ui);
                 draw_replay_hud(r, &ui);
                 if (r.finished() || r.saved.is_some()) && is_mouse_button_pressed(MouseButton::Left)
                 {
@@ -5131,5 +5591,139 @@ async fn main() {
 
         set_default_camera();
         next_frame().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // a tiny hand-built map: territory i owned by owners[i], linked by edges
+    fn mk_game(owners: &[usize], edges: &[(usize, usize)], players: usize, teams: TeamCfg) -> Game {
+        let mut terrs: Vec<Territory> = owners
+            .iter()
+            .map(|&o| Territory {
+                owner: o,
+                dice: 2,
+                neighbors: Vec::new(),
+                anchor: Vec2::ZERO,
+                seed: 0,
+            })
+            .collect();
+        for &(a, b) in edges {
+            terrs[a].neighbors.push(b);
+            terrs[b].neighbors.push(a);
+        }
+        Game {
+            players,
+            humans: 1,
+            teams,
+            team: assign_teams(players, 1, teams),
+            difficulty: Difficulty::Normal,
+            personas: vec![Persona::Aggressive; players],
+            seed: 0,
+            reserve: vec![0; players],
+            recording: true,
+            net_guest: false,
+            my_seat: 0,
+            events: Vec::new(),
+            cell_terr: Vec::new(),
+            fx: vec![TerrFx::default(); owners.len()],
+            terrs,
+            current: 0,
+            selected: None,
+            log: Vec::new(),
+            hint: String::new(),
+            hint_t: 0.0,
+            ai_timer: 0.0,
+            over: None,
+            over_t: 0.0,
+            battle: None,
+            floats: Vec::new(),
+            banner: String::new(),
+            banner_t: 0.0,
+            time: 0.0,
+            snd: Vec::new(),
+        }
+    }
+
+    const TEAMS_FF: TeamCfg = TeamCfg {
+        on: true,
+        count: 2,
+        hvb: false,
+        my_team: 0,
+        bridge: false,
+        ff: true,
+    };
+
+    #[test]
+    fn teams_assign_choice_and_fill() {
+        // the human picks team B (1); bots cycle through the rest
+        let cfg = TeamCfg { my_team: 1, ..TEAMS_FF };
+        assert_eq!(assign_teams(5, 1, cfg), vec![1, 0, 1, 0, 1]);
+        // three teams, human on C (2)
+        let cfg = TeamCfg { count: 3, my_team: 2, ..TEAMS_FF };
+        assert_eq!(assign_teams(6, 1, cfg), vec![2, 0, 1, 2, 0, 1]);
+        // humans vs bots: both humans together, every bot on the other side
+        let cfg = TeamCfg { hvb: true, ..TEAMS_FF };
+        assert_eq!(assign_teams(5, 2, cfg), vec![0, 0, 1, 1, 1]);
+        // all-human lobby cannot be humans-vs-bots; falls back to the cycle
+        assert_eq!(assign_teams(4, 4, cfg), vec![0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn bridge_connects_islands_through_allies() {
+        // p0's two islands separated by teammate p2's land in the middle
+        let mut g = mk_game(&[0, 2, 0], &[(0, 1), (1, 2)], 4, TEAMS_FF);
+        assert_eq!(g.largest_region(0), 1);
+        g.teams.bridge = true;
+        assert_eq!(g.largest_region(0), 2);
+        // an enemy in the middle never bridges
+        g.terrs[1].owner = 1;
+        assert_eq!(g.largest_region(0), 1);
+    }
+
+    #[test]
+    fn friendly_fire_toggle_gates_targets() {
+        let mut g = mk_game(&[0, 2, 1], &[(0, 1), (1, 2)], 4, TEAMS_FF);
+        assert!(g.can_target(0, 2)); // teammate, friendly fire on
+        assert!(g.can_target(0, 1)); // enemy
+        assert!(!g.can_target(0, 0)); // own land
+        g.teams.ff = false;
+        assert!(!g.can_target(0, 2)); // teammate protected
+        assert!(g.can_target(0, 1));
+    }
+
+    #[test]
+    fn last_team_standing_wins() {
+        // team A (p0 + p2) vs team B (p1, one land left)
+        let mut g = mk_game(&[0, 2, 1], &[(0, 1), (1, 2)], 3, TEAMS_FF);
+        g.apply_battle(Battle {
+            a: 1,
+            d: 2,
+            ra: 9,
+            rd: 3,
+            ad: Vec::new(),
+            dd: Vec::new(),
+            captured: true,
+            t: 0.0,
+        });
+        assert!(g.over.as_deref().unwrap_or("").contains("victorious"));
+    }
+
+    #[test]
+    fn ffa_conquest_still_ends_game() {
+        let mut g = mk_game(&[0, 0, 1], &[(0, 1), (1, 2)], 2, TeamCfg::default());
+        g.apply_battle(Battle {
+            a: 1,
+            d: 2,
+            ra: 9,
+            rd: 3,
+            ad: Vec::new(),
+            dd: Vec::new(),
+            captured: true,
+            t: 0.0,
+        });
+        assert!(g.over.is_some());
     }
 }
