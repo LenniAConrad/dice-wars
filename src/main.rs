@@ -6742,18 +6742,17 @@ mod tests {
     }
 
     #[test]
-    fn color_pick_takes_over_that_position() {
+    fn color_pick_swaps_position_not_the_map() {
         apply_local_colors(0);
-        let base = gen_map(424242, 4, 1, Difficulty::Normal, TeamCfg::default());
-        let purple: Vec<usize> = (0..base.terrs.len())
-            .filter(|&t| base.terrs[t].owner == 1)
-            .collect();
-        apply_local_colors(1); // pick the purple slot
-        let g = gen_map(424242, 4, 1, Difficulty::Normal, TeamCfg::default());
-        let mine: Vec<usize> = (0..g.terrs.len())
-            .filter(|&t| g.terrs[t].owner == 0)
-            .collect();
-        assert_eq!(purple, mine);
+        let base = gen_map(777, 6, 1, Difficulty::Normal, TeamCfg::default());
+        apply_local_colors(4); // pick a middle slot (sky)
+        let g = gen_map(777, 6, 1, Difficulty::Normal, TeamCfg::default());
+        for i in 0..base.terrs.len() {
+            // every territory keeps its on-screen color...
+            assert_eq!(color_map(g.terrs[i].owner), base.terrs[i].owner);
+            // ...and you own exactly what the sky player had
+            assert_eq!(g.terrs[i].owner == 0, base.terrs[i].owner == 4);
+        }
         apply_local_colors(0);
     }
 
