@@ -1,34 +1,27 @@
-# Dice Wars v1.2.0
+# Dice Wars v1.3.0
 
-Team mode release. Online players must both update (older versions are told so).
+Multiplayer lobby release. Online players must both update (older versions are told so).
 
-## Team mode
+## Lobby
 
-- **New TEAMS mode** on the start screen: the game ends when only one team is
-  left alive — that team wins together. Everyone still plays for themselves:
-  own dice, own reinforcements, nothing shared.
-- **Pick your team.** Choose 2–4 teams and which one you play on; bots spread
-  evenly across the remaining teams. Or pick **HUMANS VS BOTS** to put every
-  human on one side.
-- **Friendly fire** (on by default): teammates may attack each other — but
-  bots never turn on their own team.
-- **Islands link via allies** (off by default): your separated islands count
-  as one connected region when teammate land bridges them, boosting END TURN
-  reinforcements.
-- Bots are team-aware: they never target allies and focus on the enemy teams.
-- Player cards and the host lobby roster show each player's team letter, and
-  team setup carries over to hosted online games.
+- **Names & colors**: set your name (saved for next time, like the host address), and pick your color first-come-first-served — taken colors are crossed out. Bots take the leftovers.
+- **Guests see everything live**: the map preview, seed, and the full settings panel (players, difficulty, mode, team setup) mirror the host's lobby in real time, plus the roster with everyone's name, color, and team.
+- **Host controls everything in the lobby**: player count (seats resize without dropping guests), difficulty, mode, team count / humans-vs-bots, friendly fire, island links.
+- **Pick your own team** — host and guests each choose their team letter; bots balance the rest.
+- Redesigned segmented-control style, shared by the lobby and the start screen.
 
-## Menu & UI
+## Playing online
 
-- The start screen is more evenly spaced; a TEAM SETUP card appears while
-  team mode is on.
-- The battle roll showcase now sits over the bottom panel, so the board stays
-  fully visible during fights.
-- The menu map preview is fitted to the actual map, so small maps no longer
-  float in an empty frame.
+- **60s turn timer** in games with 2+ humans: idle turns auto-pass; any attack resets the clock (countdown shown by the turn pill).
+- **Disconnects no longer end the game**: after a grace period a bot takes the seat over; reconnecting players (auto-retry plus a manual retry) take it back.
+- **Rematch**: the host's NEW MAP (or R) moves everyone straight into a fresh round — names, colors, and teams intact.
+
+## Solo
+
+- Picking a color now means playing that map position: the previewed map keeps its look and you take over that color's territories and dice.
+- AI tuning: Easy is easier, Hard is harder, and bot personalities are milder leans instead of extremes.
 
 ## Downloads
 
-- **Linux**: `dice-wars-v1.2.0-linux-x86_64.tar.gz`
-- **Windows**: `dice-wars-v1.2.0-windows-x86_64.zip`
+- **Linux**: `dice-wars-v1.3.0-linux-x86_64.tar.gz`
+- **Windows**: `dice-wars-v1.3.0-windows-x86_64.zip`

@@ -24,6 +24,7 @@ const N_HOLES: usize = 9; // regions removed for lakes and ragged coasts
 const MAX_DICE: u32 = 8;
 const HUMAN: usize = 0;
 const AI_STEP: f32 = 0.35; // pause between AI actions (on top of battle time)
+const TURN_SECS: f32 = 60.0; // multiplayer idle limit before the turn auto-ends
 
 // battle animation timing
 const T_SHAKE: f32 = 0.45; // dice rattle before the rolls appear
@@ -67,36 +68,73 @@ const COLOR_NAMES: [&str; MAX_PLAYERS] = [
     "Buttercup", "Lavender", "Rose", "Mint", "Sky", "Peach", "Teal", "Plum",
 ];
 
-// which palette slot the human picked; other players swap around it
-static HUMAN_COLOR: AtomicUsize = AtomicUsize::new(0);
+// which palette slot each player uses; a permutation so colors stay unique
+static COLOR_SLOTS: [AtomicUsize; MAX_PLAYERS] = [
+    AtomicUsize::new(0),
+    AtomicUsize::new(1),
+    AtomicUsize::new(2),
+    AtomicUsize::new(3),
+    AtomicUsize::new(4),
+    AtomicUsize::new(5),
+    AtomicUsize::new(6),
+    AtomicUsize::new(7),
+];
 // how many of the players are humans (hotseat); the rest are AI
 static HUMANS_N: AtomicUsize = AtomicUsize::new(1);
 
 const HUMAN_LABELS: [&str; MAX_PLAYERS] = ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"];
 
 fn color_map(p: usize) -> usize {
-    let c = HUMAN_COLOR.load(Ordering::Relaxed);
-    if p == HUMAN {
-        c
-    } else if p == c {
-        0
-    } else {
-        p
+    COLOR_SLOTS[p % MAX_PLAYERS].load(Ordering::Relaxed)
+}
+
+// resolve everyone's color: humans keep their picks (first come, first
+// served), then every remaining seat gets the lowest free palette slot
+fn resolve_colors(players: usize, humans: usize, picks: &[Option<usize>]) -> Vec<usize> {
+    let mut used = [false; MAX_PLAYERS];
+    let mut out = vec![usize::MAX; players.min(MAX_PLAYERS)];
+    for p in 0..humans.min(out.len()) {
+        if let Some(c) = picks.get(p).copied().flatten() {
+            if c < MAX_PLAYERS && !used[c] {
+                out[p] = c;
+                used[c] = true;
+            }
+        }
+    }
+    for slot in out.iter_mut() {
+        if *slot == usize::MAX {
+            let c = (0..MAX_PLAYERS).find(|&c| !used[c]).unwrap_or(0);
+            *slot = c;
+            used[c] = true;
+        }
+    }
+    out
+}
+
+// install a color assignment globally, padding to a full 8-slot permutation
+fn apply_colors(v: &[usize]) {
+    let mut used = [false; MAX_PLAYERS];
+    let mut k = 0;
+    for (i, slot) in COLOR_SLOTS.iter().enumerate() {
+        let c = match v.get(i) {
+            Some(&c) if c < MAX_PLAYERS && !used[c] => c,
+            _ => {
+                while used[k] {
+                    k += 1;
+                }
+                k
+            }
+        };
+        used[c] = true;
+        slot.store(c, Ordering::Relaxed);
     }
 }
 
-fn player_name(p: usize) -> &'static str {
-    let humans = HUMANS_N.load(Ordering::Relaxed);
-    if p < humans {
-        if humans == 1 {
-            "You"
-        } else {
-            HUMAN_LABELS[p]
-        }
-    } else {
-        COLOR_NAMES[color_map(p)]
-    }
+// solo / menu: the local player's pick plus defaults for everyone else
+fn apply_local_colors(my_color: usize) {
+    apply_colors(&resolve_colors(MAX_PLAYERS, 1, &[Some(my_color)]));
 }
+
 
 #[derive(Clone, Copy, PartialEq)]
 enum Difficulty {
@@ -119,18 +157,43 @@ struct TeamCfg {
     ff: bool,       // friendly fire: teammates may attack each other
 }
 
-// deterministic, so host and guests derive identical teams from the cfg
-fn assign_teams(players: usize, humans: usize, cfg: TeamCfg) -> Vec<usize> {
+// every human may pick a team; bots then fill the smallest teams so the
+// sides stay balanced. Deterministic, so host and guests agree.
+fn fill_teams(players: usize, humans: usize, cfg: TeamCfg, picks: &[Option<usize>]) -> Vec<usize> {
     if !cfg.on {
         return vec![0; players];
     }
-    if cfg.hvb && humans < players {
-        return (0..players).map(|p| usize::from(p >= humans)).collect();
+    if cfg.hvb {
+        return if humans < players {
+            (0..players).map(|p| usize::from(p >= humans)).collect()
+        } else {
+            // an all-human lobby cannot be humans-vs-bots; alternate instead
+            (0..players).map(|p| p % 2).collect()
+        };
     }
     let n = cfg.count.clamp(2, MAX_TEAMS);
-    // rotate the cycle so seat 0 lands on its chosen team; the remaining
-    // seats (bots last) spread evenly across the other teams
-    (0..players).map(|p| (p + cfg.my_team) % n).collect()
+    let mut team = vec![0usize; players];
+    let mut size = vec![0usize; n];
+    for p in 0..humans.min(players) {
+        let t = picks
+            .get(p)
+            .copied()
+            .flatten()
+            .unwrap_or(p + cfg.my_team)
+            % n;
+        team[p] = t;
+        size[t] += 1;
+    }
+    for t in team.iter_mut().take(players).skip(humans) {
+        let smallest = (0..n).min_by_key(|&k| (size[k], k)).unwrap();
+        *t = smallest;
+        size[smallest] += 1;
+    }
+    team
+}
+
+fn assign_teams(players: usize, humans: usize, cfg: TeamCfg) -> Vec<usize> {
+    fill_teams(players, humans, cfg, &[])
 }
 
 fn team_letter(t: usize) -> &'static str {
@@ -732,7 +795,10 @@ struct Game {
     players: usize,
     humans: usize, // players 0..humans are hotseat humans, the rest are AI
     teams: TeamCfg,
-    team: Vec<usize>, // per-player team id, from assign_teams
+    team: Vec<usize>,   // per-player team id, from assign_teams
+    names: Vec<String>, // lobby names for human seats; empty = P1/P2 labels
+    absent: Vec<bool>,  // human seats a bot took over after a disconnect
+    turn_timer: f32,    // multiplayer: seconds left before the turn auto-ends
     difficulty: Difficulty,
     personas: Vec<Persona>, // one per player; index 0 (human) is unused
     seed: u64,
@@ -823,6 +889,20 @@ fn gen_map(seed: u64, players: usize, humans: usize, difficulty: Difficulty, tea
     macroquad::rand::srand(seed.wrapping_add(0x9E37_79B9));
     HUMANS_N.store(humans.clamp(1, players), Ordering::Relaxed);
     let mut g = Game::new(players, humans.clamp(1, players), difficulty, teams);
+    // solo: picking a color means playing that dealt position — the map keeps
+    // its look and you take over the territories (and dice) of that color
+    if g.humans == 1 {
+        let c = color_map(0);
+        if c > 0 && c < g.players {
+            for t in g.terrs.iter_mut() {
+                t.owner = match t.owner {
+                    0 => c,
+                    o if o == c => 0,
+                    o => o,
+                };
+            }
+        }
+    }
     g.seed = seed;
     g
 }
@@ -1031,6 +1111,9 @@ impl Game {
                 humans,
                 teams,
                 team: assign_teams(players, humans, teams),
+                names: Vec::new(),
+                absent: vec![false; players],
+                turn_timer: TURN_SECS,
                 difficulty,
                 personas,
                 seed: 0,
@@ -1055,7 +1138,7 @@ impl Game {
                 banner: if first == HUMAN && humans == 1 {
                     "Your turn".to_string()
                 } else {
-                    format!("{}'s turn", player_name(first))
+                    format!("{}'s turn", COLOR_NAMES[color_map(first)])
                 },
                 banner_t: 1.6,
                 time: 0.0,
@@ -1066,6 +1149,46 @@ impl Game {
 
     fn count(&self, p: usize) -> usize {
         self.terrs.iter().filter(|t| t.owner == p).count()
+    }
+
+    // a human seat that lost its player is bot-controlled until they return
+    fn is_human(&self, p: usize) -> bool {
+        p < self.humans && !self.absent.get(p).copied().unwrap_or(false)
+    }
+
+    fn name_of(&self, p: usize) -> String {
+        if p < self.humans {
+            if self.humans == 1 {
+                return "You".to_string();
+            }
+            match self.names.get(p) {
+                Some(n) if !n.is_empty() => n.clone(),
+                _ => HUMAN_LABELS[p % MAX_PLAYERS].to_string(),
+            }
+        } else {
+            COLOR_NAMES[color_map(p)].to_string()
+        }
+    }
+
+    // multiplayer only: an idle human forfeits the turn after a minute;
+    // ticks on real time (unscaled by the speed toggle), frozen in battles
+    fn tick_turn_timer(&mut self, dt: f32) {
+        if self.humans < 2
+            || !self.is_human(self.current)
+            || self.over.is_some()
+            || self.battle.is_some()
+        {
+            return;
+        }
+        self.turn_timer -= dt;
+        if self.turn_timer <= 0.0 {
+            self.turn_timer = TURN_SECS;
+            if !self.net_guest {
+                let n = self.name_of(self.current);
+                self.push_log(format!("{} ran out of time — turn passed.", n));
+                self.end_turn();
+            }
+        }
     }
 
     fn team_of(&self, p: usize) -> usize {
@@ -1153,6 +1276,7 @@ impl Game {
         self.fx[a].shake = 1.0;
         self.fx[d].shake = 1.0;
         self.selected = None;
+        self.turn_timer = TURN_SECS; // acting resets the idle clock
         self.snd.push(Snd::Roll);
     }
 
@@ -1179,19 +1303,19 @@ impl Game {
             self.fx[b.d].bounce = 1.0;
             self.push_log(format!(
                 "{} rolled {} vs {} {} — captured!",
-                player_name(atk), b.ra, player_name(def), b.rd
+                self.name_of(atk), b.ra, self.name_of(def), b.rd
             ));
         } else {
             self.fx[b.a].bounce = 1.0;
             self.push_log(format!(
                 "{} rolled {} vs {} {} — repelled!",
-                player_name(atk), b.ra, player_name(def), b.rd
+                self.name_of(atk), b.ra, self.name_of(def), b.rd
             ));
         }
         self.terrs[b.a].dice = 1;
         self.snd.push(if b.captured { Snd::Capture } else { Snd::Repel });
         if b.captured && self.count(def) == 0 {
-            self.push_log(format!("{} eliminated!", player_name(def)));
+            self.push_log(format!("{} eliminated!", self.name_of(def)));
             self.snd.push(Snd::Eliminated);
         }
 
@@ -1244,7 +1368,7 @@ impl Game {
             self.over = Some(if w == HUMAN && self.humans == 1 {
                 "You conquered the whole map!".to_string()
             } else {
-                format!("{} conquered the whole map!", player_name(w))
+                format!("{} conquered the whole map!", self.name_of(w))
             });
             self.banner_t = 0.0;
             self.snd.push(if w < self.humans { Snd::Win } else { Snd::Lose });
@@ -1264,7 +1388,7 @@ impl Game {
                 break;
             }
             // bots stack their borders instead of scattering dice inland
-            if self.difficulty != Difficulty::Easy && p >= self.humans {
+            if self.difficulty != Difficulty::Easy && !self.is_human(p) {
                 let front: Vec<usize> = cand
                     .iter()
                     .copied()
@@ -1299,14 +1423,14 @@ impl Game {
         if self.reserve[p] > 0 {
             self.push_log(format!(
                 "{} reinforced with {} dice ({} stored).",
-                player_name(p),
+                self.name_of(p),
                 reinforced.len(),
                 self.reserve[p]
             ));
         } else {
             self.push_log(format!(
                 "{} reinforced with {} dice.",
-                player_name(p),
+                self.name_of(p),
                 reinforced.len()
             ));
         }
@@ -1333,13 +1457,14 @@ impl Game {
         }
         self.selected = None;
         self.ai_timer = -0.3;
+        self.turn_timer = TURN_SECS;
         if self.current < self.humans {
             self.snd.push(Snd::Turn);
         }
         self.banner = if self.current == HUMAN && self.humans == 1 {
             "Your turn".to_string()
         } else {
-            format!("{}'s turn", player_name(self.current))
+            format!("{}'s turn", self.name_of(self.current))
         };
         self.banner_t = 1.6;
     }
@@ -1368,6 +1493,7 @@ impl Game {
         self.fx[a].shake = 1.0;
         self.fx[d].shake = 1.0;
         self.selected = None;
+        self.turn_timer = TURN_SECS;
         self.snd.push(Snd::Roll);
     }
 
@@ -1406,7 +1532,7 @@ impl Game {
             });
         }
         self.reserve[player] = n.saturating_sub(placed).min(64);
-        self.push_log(format!("{} reinforced with {} dice.", player_name(player), placed));
+        self.push_log(format!("{} reinforced with {} dice.", self.name_of(player), placed));
         if player < self.humans && placed > 0 {
             self.snd.push(Snd::Reinforce);
         }
@@ -1419,7 +1545,7 @@ impl Game {
         let persona = self.personas[cur];
 
         // easy bots lose their nerve and end their turn early often
-        if self.difficulty == Difficulty::Easy && gen_range(0.0f32, 1.0) < 0.45 {
+        if self.difficulty == Difficulty::Easy && gen_range(0.0f32, 1.0) < 0.55 {
             return None;
         }
 
@@ -1430,6 +1556,10 @@ impl Game {
         };
         if self.difficulty == Difficulty::Easy {
             min_adv += 2;
+        }
+        if self.difficulty == Difficulty::Hard {
+            // hard bots keep the pressure up regardless of temperament
+            min_adv = (min_adv - 1).max(0);
         }
 
         // who is currently winning (for the schemer and the shared instinct);
@@ -1443,7 +1573,7 @@ impl Game {
             .unwrap_or(0.0);
         // how strongly this bot coordinates against a runaway leader
         let coord = match self.difficulty {
-            Difficulty::Easy => 0.25,
+            Difficulty::Easy => 0.15,
             Difficulty::Normal => 1.0,
             Difficulty::Hard => 1.6,
         };
@@ -1509,22 +1639,22 @@ impl Game {
                     score += friends as f32 * 4.0;
                 }
                 match persona {
-                    Persona::Aggressive => score += 6.0,
-                    Persona::Defensive => score += adv as f32 * 10.0,
+                    Persona::Aggressive => score += 4.0,
+                    Persona::Defensive => score += adv as f32 * 5.0,
                     Persona::Greedy => {
                         let friends = td
                             .neighbors
                             .iter()
                             .filter(|&&n| self.terrs[n].owner == cur)
                             .count();
-                        score += friends as f32 * 8.0;
+                        score += friends as f32 * 6.0;
                     }
                     Persona::Balancer => {
                         if Some(td.owner) == leader {
-                            score += 25.0;
+                            score += 15.0;
                         }
                     }
-                    Persona::Chaotic => score += gen_range(0.0f32, 30.0),
+                    Persona::Chaotic => score += gen_range(0.0f32, 18.0),
                 }
                 if self.difficulty == Difficulty::Hard && td.owner < self.humans {
                     score += 6.0; // hard bots gang up on you
@@ -1566,7 +1696,7 @@ impl Game {
         }
 
         // AI acts between battles
-        if self.over.is_none() && self.battle.is_none() && self.current >= self.humans && !self.net_guest {
+        if self.over.is_none() && self.battle.is_none() && !self.is_human(self.current) && !self.net_guest {
             self.ai_timer += dt;
             if self.ai_timer >= AI_STEP {
                 self.ai_timer = 0.0;
@@ -2148,12 +2278,23 @@ fn draw_panel(game: &Game, ui: &Ui, settings: &Settings) {
             format!("{}'s turn — attack phase", HUMAN_LABELS[cur])
         }
     } else {
-        format!("{}'s turn (AI)", player_name(cur))
+        format!("{}'s turn (AI)", game.name_of(cur))
     };
     let tw = ui.width(&turn_text, 21.0);
     draw_round_frame(40.0, py + 12.0, tw + 60.0, 36.0, 12.0, 2.5, palette(cur).fill, BORDER());
     draw_symbol(62.0, py + 30.0, 8.5, cur, palette(cur).dark);
     ui.text(&turn_text, 80.0, py + 37.0, 21.0, INK_ON_FILL);
+    // multiplayer idle countdown: the turn auto-passes at zero
+    if game.humans > 1 && game.is_human(cur) && game.over.is_none() {
+        let secs = game.turn_timer.ceil().max(0.0) as u32;
+        let txt = format!("{}:{:02}", secs / 60, secs % 60);
+        let col = if secs <= 10 {
+            palette(2).dark
+        } else {
+            with_alpha(INK(), 0.55)
+        };
+        ui.text(&txt, 40.0 + tw + 74.0, py + 37.0, 20.0, col);
+    }
 
     // ---- current step instruction, invalid-action hint, or attack preview
     let hover = pick_territory(game, mp);
@@ -2175,7 +2316,7 @@ fn draw_panel(game: &Game, ui: &Ui, settings: &Settings) {
                 format!(
                     "You: {} dice  vs  {}: {} dice — {:.0}% win chance. Click to attack!",
                     game.terrs[sel].dice,
-                    player_name(game.terrs[tgt].owner),
+                    game.name_of(game.terrs[tgt].owner),
                     game.terrs[tgt].dice,
                     c * 100.0
                 )
@@ -2183,7 +2324,7 @@ fn draw_panel(game: &Game, ui: &Ui, settings: &Settings) {
                 format!(
                     "You: {} dice  vs  {}: {} dice — click to attack!",
                     game.terrs[sel].dice,
-                    player_name(game.terrs[tgt].owner),
+                    game.name_of(game.terrs[tgt].owner),
                     game.terrs[tgt].dice
                 )
             }
@@ -2506,7 +2647,51 @@ fn draw_game(game: &Game, ui: &Ui, settings: &Settings) {
 // broadcasts the resulting events (the same RepEvents replays use).
 
 const NET_PORT_DEFAULT: u16 = 7777;
-const NET_PROTO: &str = "3"; // bumped whenever map generation or messages change
+const NET_PROTO: &str = "4"; // bumped whenever map generation or messages change
+
+fn csv_usize(v: &[usize]) -> String {
+    v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+}
+
+fn parse_csv_usize(s: &str) -> Vec<usize> {
+    s.split(',').filter_map(|x| x.parse().ok()).collect()
+}
+
+// what every human picked in the lobby, keyed by 1-based lobby seat
+#[derive(Default)]
+struct LobbyPicks {
+    team: HashMap<usize, usize>,
+    color: HashMap<usize, usize>,
+    name: HashMap<usize, String>,
+}
+
+// the teams and colors the game would start with right now: host first,
+// joined guests in seat order, bots fill the rest
+fn lobby_layout(
+    occupied: &[usize], // 1-based lobby seats, ascending
+    players: usize,
+    teams: TeamCfg,
+    picks: &LobbyPicks,
+    host_color: usize,
+) -> (Vec<usize>, Vec<usize>) {
+    let humans = occupied.len() + 1;
+    let mut tpicks: Vec<Option<usize>> = vec![None; players];
+    let mut cpicks: Vec<Option<usize>> = vec![None; players];
+    if !tpicks.is_empty() {
+        tpicks[0] = Some(teams.my_team);
+        cpicks[0] = Some(host_color);
+    }
+    for (k, &seat) in occupied.iter().enumerate() {
+        if k + 1 < players {
+            tpicks[k + 1] = picks.team.get(&seat).copied();
+            cpicks[k + 1] = picks.color.get(&seat).copied();
+        }
+    }
+    (
+        fill_teams(players, humans, teams, &tpicks),
+        resolve_colors(players, humans, &cpicks),
+    )
+}
 
 // DW_PORT overrides the port (used by the automated tests)
 fn net_port() -> u16 {
@@ -2570,7 +2755,7 @@ fn read_net_line(r: &mut std::io::BufReader<std::net::TcpStream>, cap: usize) ->
 }
 
 enum HostMsg {
-    Joined(#[allow(dead_code)] usize),
+    Joined(usize, String),
     Rejoined(usize), // lobby seat that reattached mid-game
     Left(usize),
     Intent(usize, String),
@@ -2695,14 +2880,31 @@ impl HostNet {
         })
     }
 
-    fn slots(&self) -> Vec<bool> {
+    // 1-based lobby seats currently connected, ascending
+    fn occupied(&self) -> Vec<usize> {
         self.shared
             .lock()
             .unwrap()
             .seats
             .iter()
-            .map(|s| s.is_some())
+            .enumerate()
+            .filter_map(|(i, s)| s.as_ref().map(|_| i + 1))
             .collect()
+    }
+
+    // grow/shrink guest seats; never drops a connected guest. Returns the
+    // resulting seat count.
+    fn resize_guests(&self, guests: usize) -> usize {
+        let mut sh = self.shared.lock().unwrap();
+        let min = sh
+            .seats
+            .iter()
+            .rposition(|s| s.is_some())
+            .map_or(0, |i| i + 1);
+        let n = guests.max(min).max(1);
+        sh.seats.resize_with(n, || None);
+        sh.gens.resize(n, 0);
+        n
     }
 
     fn joined(&self) -> usize {
@@ -2727,7 +2929,16 @@ impl HostNet {
 
     // lock in whoever is connected, compact their seats, tell each guest
     // their game seat, and return the human count (host included)
-    fn start_game(&mut self, seed: u64, players: usize, diff: Difficulty, teams: TeamCfg) -> usize {
+    fn start_game(
+        &mut self,
+        seed: u64,
+        players: usize,
+        diff: Difficulty,
+        teams: TeamCfg,
+        picks: &LobbyPicks,
+        host_color: usize,
+        host_name: &str,
+    ) -> (usize, Vec<usize>, Vec<usize>, Vec<String>) {
         use std::io::Write;
         let mut sh = self.shared.lock().unwrap();
         sh.started = true;
@@ -2735,32 +2946,53 @@ impl HostNet {
             .seats
             .iter()
             .enumerate()
-            .filter_map(|(i, s)| s.as_ref().map(|_| i))
+            .filter_map(|(i, s)| s.as_ref().map(|_| i + 1))
             .collect();
         let humans = occupied.len() + 1;
+        let (team_v, color_v) = lobby_layout(&occupied, players, teams, picks, host_color);
+        let mut names: Vec<String> = vec![if host_name.is_empty() {
+            "-".to_string()
+        } else {
+            host_name.to_string()
+        }];
+        for &seat in &occupied {
+            names.push(match picks.name.get(&seat) {
+                Some(n) if !n.is_empty() => n.clone(),
+                _ => "-".to_string(),
+            });
+        }
+        let line_tail = format!(
+            "{} {} {} {} {} {} {} {}",
+            csv_usize(&color_v),
+            teams.on as u8,
+            teams.bridge as u8,
+            teams.ff as u8,
+            teams.count.clamp(2, MAX_TEAMS),
+            teams.hvb as u8,
+            csv_usize(&team_v),
+            names.join(",")
+        );
         self.remap.clear();
-        for (k, &i) in occupied.iter().enumerate() {
-            self.remap.insert(i + 1, k + 1);
-            if let Some(s) = sh.seats[i].as_mut() {
+        for (k, &seat) in occupied.iter().enumerate() {
+            self.remap.insert(seat, k + 1);
+            if let Some(s) = sh.seats[seat - 1].as_mut() {
                 let _ = writeln!(
                     s,
-                    "START {} {} {} {} {} {} {} {} {} {} {} {}",
+                    "START {} {} {} {} {} {}",
                     seed,
                     players,
                     humans,
                     diff_idx(diff),
                     k + 1,
-                    HUMAN_COLOR.load(Ordering::Relaxed),
-                    teams.on as u8,
-                    teams.bridge as u8,
-                    teams.ff as u8,
-                    teams.count,
-                    teams.hvb as u8,
-                    teams.my_team
+                    line_tail
                 );
             }
         }
-        humans
+        let names_clean = names
+            .iter()
+            .map(|n| if n == "-" { String::new() } else { n.clone() })
+            .collect();
+        (humans, team_v, color_v, names_clean)
     }
 
     // resend everything a reattached guest missed, then mark it synced
@@ -2770,22 +3002,32 @@ impl HostNet {
         let Some(&game_seat) = self.remap.get(&lobby_seat) else {
             return;
         };
+        let colors: Vec<usize> = (0..g.players).map(color_map).collect();
+        let names: Vec<String> = (0..g.humans)
+            .map(|p| match g.names.get(p) {
+                Some(n) if !n.is_empty() => n.clone(),
+                _ => "-".to_string(),
+            })
+            .collect();
+        let absent: Vec<usize> = g.absent.iter().map(|&a| a as usize).collect();
         if let Some(s) = sh.seats[lobby_seat - 1].as_mut() {
             let _ = writeln!(
                 s,
-                "RESUME {} {} {} {} {} {} {} {} {} {} {} {}",
+                "RESUME {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
                 seed,
                 g.players,
                 g.humans,
                 diff_idx(diff),
                 game_seat,
-                HUMAN_COLOR.load(Ordering::Relaxed),
+                csv_usize(&colors),
                 g.teams.on as u8,
                 g.teams.bridge as u8,
                 g.teams.ff as u8,
-                g.teams.count,
+                g.teams.count.clamp(2, MAX_TEAMS),
                 g.teams.hvb as u8,
-                g.teams.my_team
+                csv_usize(&g.team),
+                names.join(","),
+                csv_usize(&absent)
             );
             for ev in &g.events {
                 let line = match ev {
@@ -2830,6 +3072,39 @@ impl HostNet {
     }
 }
 
+// everything a guest needs to render the lobby, broadcast by the host
+fn lobby_line(h: &HostNet, menu: &Menu, settings: &Settings, picks: &LobbyPicks) -> String {
+    let occ = h.occupied();
+    let cfg = settings.team_cfg();
+    let (team_v, color_v) = lobby_layout(&occ, menu.players, cfg, picks, settings.color);
+    let mut names: Vec<String> = vec![if settings.name.is_empty() {
+        "-".to_string()
+    } else {
+        settings.name.clone()
+    }];
+    for &seat in &occ {
+        names.push(match picks.name.get(&seat) {
+            Some(n) if !n.is_empty() => n.clone(),
+            _ => "-".to_string(),
+        });
+    }
+    format!(
+        "LOBBY {} {} {} {} {} {} {} {} {} {} {} {}",
+        menu.seed,
+        menu.players,
+        diff_idx(menu.difficulty),
+        cfg.on as u8,
+        cfg.hvb as u8,
+        cfg.count.clamp(2, MAX_TEAMS),
+        cfg.ff as u8,
+        cfg.bridge as u8,
+        if occ.is_empty() { "-".to_string() } else { csv_usize(&occ) },
+        csv_usize(&team_v),
+        csv_usize(&color_v),
+        names.join(",")
+    )
+}
+
 fn host_handle_client(
     stream: std::net::TcpStream,
     ip: std::net::IpAddr,
@@ -2848,6 +3123,7 @@ fn host_handle_client(
     let mut w = stream;
     // auth: JOIN <code> for a fresh seat, REJOIN <code> <token> to reclaim one
     let mut rejoin_seat: Option<usize> = None;
+    let mut join_name = String::new();
     let ok = match read_net_line(&mut reader, NET_MAX_LINE) {
         Some(l) => {
             let mut it = l.split_whitespace();
@@ -2860,6 +3136,7 @@ fn host_handle_client(
                         release(&shared);
                         return;
                     } else {
+                        join_name = clean_name(it.next().unwrap_or(""));
                         true
                     }
                 }
@@ -2937,7 +3214,7 @@ fn host_handle_client(
             t
         };
         send_net_line(&mut w, &format!("WELCOME {} {}", seat, token));
-        let _ = tx.send(HostMsg::Joined(seat));
+        let _ = tx.send(HostMsg::Joined(seat, join_name));
     }
     loop {
         use std::io::Read;
@@ -3004,6 +3281,7 @@ struct GuestNet {
     code: String,
     token: String,
     catching_up: bool, // replaying the backlog after a reconnect
+    rec_failed: bool,  // auto-reconnect gave up; the player may retry
     rec_rx: Option<std::sync::mpsc::Receiver<Result<NetParts, String>>>,
 }
 
@@ -3069,7 +3347,7 @@ fn spawn_reconnect(
     rx
 }
 
-fn guest_connect(addr: &str, code: &str) -> Result<GuestNet, String> {
+fn guest_connect(addr: &str, code: &str, name: &str) -> Result<GuestNet, String> {
     let addr_owned = addr.to_string();
     let code_owned = code.to_string();
     let full = if addr.contains(':') {
@@ -3082,7 +3360,7 @@ fn guest_connect(addr: &str, code: &str) -> Result<GuestNet, String> {
         .map_err(|_| "Could not connect — wrong address, or firewall blocking port 7777".to_string())?;
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(8)));
     let mut w = stream.try_clone().map_err(|_| "Socket error".to_string())?;
-    send_net_line(&mut w, &format!("JOIN {} {}", code, NET_PROTO));
+    send_net_line(&mut w, &format!("JOIN {} {} {}", code, NET_PROTO, clean_name(name)));
     let mut reader =
         std::io::BufReader::new(stream.try_clone().map_err(|_| "Socket error".to_string())?);
     let hello = read_net_line(&mut reader, NET_MAX_HOST_LINE).ok_or_else(|| {
@@ -3113,6 +3391,7 @@ fn guest_connect(addr: &str, code: &str) -> Result<GuestNet, String> {
         code: code_owned,
         token,
         catching_up: false,
+        rec_failed: false,
         rec_rx: None,
     })
 }
@@ -3273,8 +3552,8 @@ impl Replay {
                         self.g.fx[t].bounce = 1.0;
                     }
                 }
-                self.g
-                    .push_log(format!("{} reinforced with {} dice.", player_name(player), n));
+                let nm = self.g.name_of(player);
+                self.g.push_log(format!("{} reinforced with {} dice.", nm, n));
             }
         }
     }
@@ -3596,6 +3875,16 @@ struct Settings {
     team_mine: usize,  // which team the local player picked
     team_bridge: bool, // islands count as connected through teammate land
     team_ff: bool,     // teammates may attack each other
+    name: String,      // display name in multiplayer lobbies
+    last_addr: String, // last host address joined, prefilled next time
+}
+
+// lobby names travel in space/comma-separated messages: keep them plain
+fn clean_name(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(12)
+        .collect()
 }
 
 impl Settings {
@@ -3625,6 +3914,8 @@ fn load_settings() -> Settings {
         team_mine: 0,
         team_bridge: false,
         team_ff: true,
+        name: String::new(),
+        last_addr: String::new(),
     };
     if let Ok(txt) = std::fs::read_to_string(data_file(SETTINGS_FILE)) {
         for l in txt.lines() {
@@ -3650,6 +3941,8 @@ fn load_settings() -> Settings {
                 }
                 (Some("teambridge"), Some(v)) => s.team_bridge = v != "0",
                 (Some("teamff"), Some(v)) => s.team_ff = v != "0",
+                (Some("name"), Some(v)) => s.name = clean_name(v),
+                (Some("lastaddr"), Some(v)) => s.last_addr = v.chars().take(40).collect(),
                 _ => {}
             }
         }
@@ -3661,7 +3954,7 @@ fn save_settings(s: &Settings) {
     let _ = std::fs::write(
         data_file(SETTINGS_FILE),
         format!(
-            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\n",
+            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\n",
             s.chances as u8,
             s.muted as u8,
             s.colorblind as u8,
@@ -3673,7 +3966,9 @@ fn save_settings(s: &Settings) {
             s.team_hvb as u8,
             s.team_mine,
             s.team_bridge as u8,
-            s.team_ff as u8
+            s.team_ff as u8,
+            s.name,
+            s.last_addr
         ),
     );
 }
@@ -3727,12 +4022,10 @@ fn r_color(i: usize) -> Rect {
     Rect::new(WIN_W * 0.5 - 125.0 + i as f32 * 32.0, 100.0, 26.0, 14.0)
 }
 fn r_player(k: usize) -> Rect {
-    // 7 buttons for 2..=8 players, centered on the main column
-    let total = 7.0 * 58.0 + 6.0 * 12.0;
-    Rect::new(COL_L - total * 0.5 + k as f32 * 70.0, 244.0, 58.0, 48.0)
+    Rect::new(COL_L - 130.0 + k as f32 * 51.0, 244.0, 51.0, 44.0)
 }
 fn r_diff(k: usize) -> Rect {
-    Rect::new(COL_L - 196.0 + k as f32 * 136.0, 148.0, 120.0, 44.0)
+    Rect::new(COL_L - 130.0 + k as f32 * 119.0, 148.0, 119.0, 44.0)
 }
 fn r_preview() -> Rect {
     Rect::new(COL_L - 230.0, 304.0, 460.0, 216.0)
@@ -3753,8 +4046,8 @@ fn r_bookmark() -> Rect {
     Rect::new(COL_L + 230.0 - 54.0, 312.0, 42.0, 42.0)
 }
 fn r_mode(k: usize) -> Rect {
-    // two buttons: FREE-FOR-ALL | TEAMS, between the seed row and start
-    Rect::new(COL_L - 178.0 + k as f32 * 186.0, 628.0, 170.0, 40.0)
+    // one segmented row: FREE-FOR-ALL | TEAMS, between the seed row and start
+    Rect::new(COL_L - 130.0 + k as f32 * 178.0, 628.0, 178.0, 40.0)
 }
 // the team setup card replaces the how-to-play card while team mode is on
 const TEAM_CARD_X: f32 = COL_R - 160.0;
@@ -3868,7 +4161,8 @@ fn update_menu(menu: &mut Menu, settings: &mut Settings, snd: &mut Vec<Snd>, dt:
     for i in 0..MAX_PLAYERS {
         if r_color(i).contains(m) {
             settings.color = i;
-            HUMAN_COLOR.store(i, Ordering::Relaxed);
+            apply_local_colors(i);
+            menu.regen();
             save_settings(settings);
             snd.push(Snd::Click);
             return MenuAction::None;
@@ -4230,7 +4524,7 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
         } else {
             PLAYER_BASE[i]
         };
-        let sel = HUMAN_COLOR.load(Ordering::Relaxed) == i;
+        let sel = settings.color == i;
         if sel {
             draw_round_frame(r.x - 3.0, r.y - 3.0, r.w + 6.0, r.h + 6.0, 8.0, 2.0, SRF(), BORDER());
         }
@@ -4245,51 +4539,21 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
         );
     }
 
-    // players
-    ui.text_centered("PLAYERS", COL_L, 232.0, 13.0, with_alpha(INK(), 0.55));
-    for k in 0..MAX_PLAYERS - 1 {
-        let r = r_player(k);
-        let n = k + 2;
-        let sel = menu.players == n;
-        let fill = if sel { palette(HUMAN).fill } else { SRF() };
-        let edge = if sel { BORDER() } else { CARD_EDGE() };
-        menu_button(r, fill, edge, r.contains(m));
-        ui.text_centered(
-            &n.to_string(),
-            r.x + r.w * 0.5,
-            r.y + 33.0,
-            25.0,
-            if sel { INK_ON_FILL } else { INK() },
-        );
-    }
-
-    // difficulty
-    ui.text_centered("DIFFICULTY", COL_L, 136.0, 13.0, with_alpha(INK(), 0.55));
-    for (k, (label, d, tone)) in [
-        ("EASY", Difficulty::Easy, 3usize),
-        ("NORMAL", Difficulty::Normal, 0usize),
-        ("HARD", Difficulty::Hard, 2usize),
+    let nums = ["2", "3", "4", "5", "6", "7", "8"];
+    let row: Vec<(Rect, &str, bool)> = (0..7)
+        .map(|k| (r_player(k), nums[k], menu.players == k + 2))
+        .collect();
+    seg_row(ui, m, true, "PLAYERS", &row, 18.0);
+    let row: Vec<(Rect, &str, bool)> = [
+        ("EASY", Difficulty::Easy),
+        ("NORMAL", Difficulty::Normal),
+        ("HARD", Difficulty::Hard),
     ]
     .into_iter()
     .enumerate()
-    {
-        let r = r_diff(k);
-        let sel = menu.difficulty == d;
-        let fill = if sel {
-            mix(base_color(tone), WHITE, 0.4)
-        } else {
-            SRF()
-        };
-        let edge = if sel { BORDER() } else { CARD_EDGE() };
-        menu_button(r, fill, edge, r.contains(m));
-        ui.text_centered(
-            label,
-            r.x + r.w * 0.5,
-            r.y + 29.0,
-            18.0,
-            if sel { INK_ON_FILL } else { INK() },
-        );
-    }
+    .map(|(k, (l, d))| (r_diff(k), l, menu.difficulty == d))
+    .collect();
+    seg_row(ui, m, true, "DIFFICULTY", &row, 15.0);
 
     // map preview
     let pv = r_preview();
@@ -4314,21 +4578,12 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     menu_button(rr, SRF(), CARD_EDGE(), rr.contains(m));
     ui.text_centered("NEW", rr.x + rr.w * 0.5, rr.y + 31.0, 18.0, INK());
 
-    // game mode: classic free-for-all, or two teams on alternating seats
-    for (k, label) in ["FREE-FOR-ALL", "TEAMS"].into_iter().enumerate() {
-        let r = r_mode(k);
-        let sel = settings.teams == (k == 1);
-        let fill = if sel { palette(HUMAN).fill } else { SRF() };
-        let edge = if sel { BORDER() } else { CARD_EDGE() };
-        menu_button(r, fill, edge, r.contains(m));
-        ui.text_centered(
-            label,
-            r.x + r.w * 0.5,
-            r.y + 26.0,
-            16.0,
-            if sel { INK_ON_FILL } else { INK() },
-        );
-    }
+    let row = vec![
+        (r_mode(0), "FREE-FOR-ALL", !settings.teams),
+        (r_mode(1), "TEAMS", settings.teams),
+    ];
+    seg_row(ui, m, true, "MODE", &row, 15.0);
+
     // bookmark star, frameless, tucked into the preview's corner
     let rb = r_bookmark();
     let marked = menu.is_bookmarked();
@@ -4492,77 +4747,160 @@ fn draw_team_card(settings: &Settings, ui: &Ui, m: Vec2) {
         (r_team_ff(), "FRIENDLY FIRE", settings.team_ff),
         (r_team_bridge(), "ISLANDS LINK VIA ALLIES", settings.team_bridge),
     ] {
-        let hov = r.contains(m);
-        let (bx, by) = (r.x, r.y + 2.0);
-        draw_round_frame(
-            bx,
-            by,
-            20.0,
-            20.0,
-            6.0,
-            2.0,
-            if on { palette(HUMAN).mid } else { SRF() },
-            if hov { BORDER() } else { CARD_EDGE() },
-        );
-        if on {
-            draw_line(bx + 4.5, by + 10.0, bx + 8.5, by + 14.5, 2.6, WHITE);
-            draw_line(bx + 8.5, by + 14.5, bx + 15.5, by + 5.5, 2.6, WHITE);
-        }
-        ui.text(
-            label,
-            r.x + 28.0,
-            r.y + 17.0,
-            13.0,
-            with_alpha(INK(), if hov { 0.95 } else { 0.72 }),
-        );
+        draw_toggle(r, label, on, ui, m);
     }
 }
 
 // ---------------------------------------------------------------- lobby screens
 
+// the host's lobby snapshot, as far as this guest has seen it
+struct LobbyView {
+    players: usize,
+    diff: usize,
+    ton: bool,
+    thvb: bool,
+    tcount: usize,
+    tff: bool,
+    tbridge: bool,
+    occupied: Vec<usize>,
+    teams: Vec<usize>,
+    colors: Vec<usize>,
+    names: Vec<String>,
+}
+
 #[derive(Default)]
 struct JoinUi {
     addr: String,
     code: String,
-    focus: usize, // 0 = address, 1 = code
+    focus: usize, // 0 = address, 1 = code, 2 = name
     status: String,
+    view: Option<LobbyView>,
+    my_team: Option<usize>,
+    my_color: Option<usize>,
+    preview: Option<Game>,
+    preview_key: (u64, usize),
+}
+
+fn parse_names_csv(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|n| if n == "-" { String::new() } else { clean_name(n) })
+        .collect()
+}
+
+// the shared tail of START/RESUME: colors, team cfg, team list, names
+fn parse_start_tail(
+    it: &mut std::str::SplitWhitespace,
+) -> (Vec<usize>, TeamCfg, Vec<usize>, Vec<String>) {
+    let colors = it.next().map(parse_csv_usize).unwrap_or_default();
+    let teams = TeamCfg {
+        on: it.next() == Some("1"),
+        bridge: it.next() == Some("1"),
+        ff: it.next() == Some("1"),
+        count: it.next().and_then(|v| v.parse().ok()).unwrap_or(2),
+        hvb: it.next() == Some("1"),
+        my_team: 0,
+    };
+    let team_v = it.next().map(parse_csv_usize).unwrap_or_default();
+    let names = it.next().map(parse_names_csv).unwrap_or_default();
+    (colors, teams, team_v, names)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_guest_game(
+    seed: u64,
+    players: usize,
+    humans: usize,
+    di: usize,
+    seat: usize,
+    colors: &[usize],
+    teams: TeamCfg,
+    team_v: Vec<usize>,
+    names: Vec<String>,
+) -> Game {
+    let mut g = gen_map(seed, players.clamp(2, MAX_PLAYERS), humans, idx_diff(di), teams);
+    if team_v.len() == g.players {
+        g.team = team_v;
+    }
+    g.names = names;
+    apply_colors(colors);
+    g.net_guest = true;
+    g.my_seat = seat;
+    g
 }
 
 fn r_lobby_prev() -> Rect {
-    Rect::new(COL_L - 200.0, 480.0, 48.0, 48.0)
+    Rect::new(COL_L - 177.0, 286.0, 44.0, 40.0)
 }
 fn r_lobby_seed() -> Rect {
-    Rect::new(COL_L - 144.0, 480.0, 200.0, 48.0)
+    Rect::new(COL_L - 125.0, 286.0, 172.0, 40.0)
 }
 fn r_lobby_next() -> Rect {
-    Rect::new(COL_L + 64.0, 480.0, 48.0, 48.0)
+    Rect::new(COL_L + 55.0, 286.0, 44.0, 40.0)
 }
 fn r_lobby_new() -> Rect {
-    Rect::new(COL_L + 120.0, 480.0, 80.0, 48.0)
+    Rect::new(COL_L + 107.0, 286.0, 70.0, 40.0)
+}
+fn r_lobby_player(k: usize) -> Rect {
+    Rect::new(COL_L - 130.0 + k as f32 * 51.0, 356.0, 51.0, 38.0)
+}
+fn r_lobby_diff(k: usize) -> Rect {
+    Rect::new(COL_L - 130.0 + k as f32 * 119.0, 404.0, 119.0, 38.0)
+}
+fn r_lobby_mode(k: usize) -> Rect {
+    Rect::new(COL_L - 130.0 + k as f32 * 178.0, 452.0, 178.0, 38.0)
+}
+fn r_lobby_count(k: usize) -> Rect {
+    if k < 3 {
+        Rect::new(COL_L - 130.0 + k as f32 * 60.0, 500.0, 60.0, 38.0)
+    } else {
+        Rect::new(COL_L + 50.0, 500.0, 177.0, 38.0)
+    }
+}
+fn r_lobby_team(k: usize, _count: usize) -> Rect {
+    Rect::new(COL_L - 130.0 + k as f32 * 64.0, 548.0, 64.0, 38.0)
+}
+fn r_lobby_ff() -> Rect {
+    Rect::new(COL_L - 130.0, 598.0, 170.0, 24.0)
+}
+fn r_lobby_bridge() -> Rect {
+    Rect::new(COL_L + 56.0, 598.0, 190.0, 24.0)
 }
 fn r_lobby_copy() -> Rect {
-    Rect::new(COL_R + 100.0, 250.0, 76.0, 28.0)
+    Rect::new(COL_R + 104.0, 152.0, 72.0, 26.0)
+}
+fn r_lobby_name() -> Rect {
+    Rect::new(COL_R - 160.0, 212.0, 320.0, 40.0)
+}
+fn r_lobby_swatch(i: usize) -> Rect {
+    Rect::new(COL_R - 136.0 + i as f32 * 34.0, 288.0, 28.0, 22.0)
+}
+fn r_guest_team(k: usize, count: usize) -> Rect {
+    let w = count as f32 * 48.0 - 8.0;
+    Rect::new(COL_R - w * 0.5 + k as f32 * 48.0, 348.0, 40.0, 30.0)
 }
 fn r_lobby_start() -> Rect {
-    Rect::new(WIN_W * 0.5 - 160.0, 620.0, 320.0, 64.0)
+    Rect::new(WIN_W * 0.5 - 160.0, 700.0, 320.0, 62.0)
 }
 fn r_lobby_cancel() -> Rect {
-    Rect::new(WIN_W * 0.5 - 70.0, 700.0, 140.0, 40.0)
+    Rect::new(WIN_W * 0.5 - 70.0, 772.0, 140.0, 36.0)
 }
 fn r_join_addr() -> Rect {
-    Rect::new(WIN_W * 0.5 - 170.0, 330.0, 340.0, 48.0)
+    Rect::new(WIN_W * 0.5 - 170.0, 310.0, 340.0, 48.0)
 }
 fn r_join_code() -> Rect {
-    Rect::new(WIN_W * 0.5 - 170.0, 424.0, 340.0, 48.0)
+    Rect::new(WIN_W * 0.5 - 170.0, 404.0, 340.0, 48.0)
+}
+fn r_join_name() -> Rect {
+    Rect::new(WIN_W * 0.5 - 170.0, 498.0, 340.0, 48.0)
 }
 fn r_join_paste() -> Rect {
-    Rect::new(WIN_W * 0.5 + 178.0, 330.0, 76.0, 48.0)
+    Rect::new(WIN_W * 0.5 + 178.0, 310.0, 76.0, 48.0)
 }
 fn r_join_go() -> Rect {
-    Rect::new(WIN_W * 0.5 - 170.0, 500.0, 160.0, 48.0)
+    Rect::new(WIN_W * 0.5 - 170.0, 578.0, 160.0, 48.0)
 }
 fn r_join_back() -> Rect {
-    Rect::new(WIN_W * 0.5 + 10.0, 500.0, 160.0, 48.0)
+    Rect::new(WIN_W * 0.5 + 10.0, 578.0, 160.0, 48.0)
 }
 
 fn draw_lobby_card(ui: &Ui, title: &str) {
@@ -4570,34 +4908,142 @@ fn draw_lobby_card(ui: &Ui, title: &str) {
     ui.text_centered(title, WIN_W * 0.5, 160.0, 44.0, INK());
 }
 
-fn draw_host_lobby(h: &HostNet, menu: &Menu, ui: &Ui, teams: TeamCfg, time: f32, copied_t: f32) {
+// one segmented control: label left, options in a single pill container
+fn seg_row(ui: &Ui, m: Vec2, live: bool, label: &str, items: &[(Rect, &str, bool)], size: f32) {
+    let y = items[0].0.y;
+    let h = items[0].0.h;
+    ui.text(label, COL_L - 230.0, y + h * 0.5 + 4.0, 12.0, with_alpha(INK(), 0.55));
+    let last = &items[items.len() - 1].0;
+    let x0 = items[0].0.x;
+    draw_round_frame(x0, y, last.x + last.w - x0, h, h * 0.5, 2.0, SRF(), CARD_EDGE());
+    for (i, (r, txt, sel)) in items.iter().enumerate() {
+        if i > 0 && !sel && !items[i - 1].2 {
+            draw_line(r.x, y + 8.0, r.x, y + h - 8.0, 1.5, CARD_EDGE());
+        }
+        let hov = live && r.contains(m);
+        if *sel {
+            draw_round_frame(
+                r.x + 2.5, y + 2.5, r.w - 5.0, h - 5.0, (h - 5.0) * 0.5, 2.0,
+                palette(HUMAN).fill, BORDER(),
+            );
+        } else if hov {
+            draw_round_rect(
+                r.x + 2.5, y + 2.5, r.w - 5.0, h - 5.0, (h - 5.0) * 0.5,
+                mix(SRF(), palette(HUMAN).fill, 0.35),
+            );
+        }
+        ui.text_centered(
+            txt, r.x + r.w * 0.5, y + h * 0.5 + size * 0.33, size,
+            if *sel { INK_ON_FILL } else { INK() },
+        );
+    }
+}
+
+// the game-settings rows both lobbies show: the host clicks them, guests
+// see the exact same picture read-only
+fn draw_lobby_settings(
+    players: usize,
+    diff: Difficulty,
+    cfg: TeamCfg,
+    my_team: Option<usize>,
+    ui: &Ui,
+    m: Vec2,
+    live: bool,
+) {
+    let nums = ["2", "3", "4", "5", "6", "7", "8"];
+    let row: Vec<(Rect, &str, bool)> = (0..7)
+        .map(|k| (r_lobby_player(k), nums[k], players == k + 2))
+        .collect();
+    seg_row(ui, m, live, "PLAYERS", &row, 18.0);
+    let row: Vec<(Rect, &str, bool)> = [
+        ("EASY", Difficulty::Easy),
+        ("NORMAL", Difficulty::Normal),
+        ("HARD", Difficulty::Hard),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(k, (l, d))| (r_lobby_diff(k), l, diff == d))
+    .collect();
+    seg_row(ui, m, live, "DIFFICULTY", &row, 15.0);
+    let row = vec![
+        (r_lobby_mode(0), "FREE-FOR-ALL", !cfg.on),
+        (r_lobby_mode(1), "TEAMS", cfg.on),
+    ];
+    seg_row(ui, m, live, "MODE", &row, 15.0);
+    if cfg.on {
+        let row: Vec<(Rect, &str, bool)> = ["2", "3", "4", "HUMANS VS BOTS"]
+            .into_iter()
+            .enumerate()
+            .map(|(k, l)| {
+                let sel = if k < 3 { !cfg.hvb && cfg.count == k + 2 } else { cfg.hvb };
+                (r_lobby_count(k), l, sel)
+            })
+            .collect();
+        seg_row(ui, m, live, "TEAMS", &row, 13.0);
+        if let Some(mine) = my_team {
+            if !cfg.hvb {
+                let count = cfg.count.clamp(2, MAX_TEAMS);
+                let row: Vec<(Rect, &str, bool)> = (0..count)
+                    .map(|k| (r_lobby_team(k, count), team_letter(k), mine.min(count - 1) == k))
+                    .collect();
+                seg_row(ui, m, live, "YOUR TEAM", &row, 15.0);
+            }
+        }
+        for (r, label, on) in [
+            (r_lobby_ff(), "FRIENDLY FIRE", cfg.ff),
+            (r_lobby_bridge(), "ISLANDS LINK VIA ALLIES", cfg.bridge),
+        ] {
+            draw_toggle(r, label, on, ui, if live { m } else { vec2(-1.0, -1.0) });
+        }
+    }
+}
+
+fn draw_host_lobby(
+    h: &HostNet,
+    menu: &Menu,
+    settings: &Settings,
+    picks: &LobbyPicks,
+    ui: &Ui,
+    name_edit: bool,
+    time: f32,
+    copied_t: f32,
+) {
     draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
     let m = mouse_virtual();
-    ui.text_centered("HOSTING", WIN_W * 0.5, 96.0, 40.0, INK());
+    ui.text_centered("HOSTING", WIN_W * 0.5, 52.0, 32.0, INK());
 
-    // left: pick the map while people join
-    ui.text_centered("MAP", COL_L, 196.0, 13.0, with_alpha(INK(), 0.55));
-    let pv = Rect::new(COL_L - 230.0, 208.0, 460.0, 250.0);
+    // ---- left: the map and every game setting
+    let pv = Rect::new(COL_L - 230.0, 74.0, 460.0, 190.0);
     draw_round_frame(pv.x, pv.y, pv.w, pv.h, 14.0, 2.0, SRF(), CARD_EDGE());
     draw_map_mini(&menu.preview, Rect::new(pv.x + 8.0, pv.y + 8.0, pv.w - 16.0, pv.h - 16.0));
     let (rp, rs, rn, rr) = (r_lobby_prev(), r_lobby_seed(), r_lobby_next(), r_lobby_new());
     menu_button(rp, SRF(), CARD_EDGE(), rp.contains(m));
-    draw_poly(rp.x + rp.w * 0.5 - 1.5, rp.y + rp.h * 0.5, 3, 8.5, 180.0, INK());
+    draw_poly(rp.x + rp.w * 0.5 - 1.5, rp.y + rp.h * 0.5, 3, 8.0, 180.0, INK());
     menu_button(rs, SRF(), CARD_EDGE(), false);
-    ui.text_centered(&format!("{:08}", menu.seed), rs.x + rs.w * 0.5, rs.y + 32.0, 22.0, INK());
+    ui.text_centered(&format!("{:08}", menu.seed), rs.x + rs.w * 0.5, rs.y + 27.0, 19.0, INK());
     menu_button(rn, SRF(), CARD_EDGE(), rn.contains(m));
-    draw_poly(rn.x + rn.w * 0.5 + 1.5, rn.y + rn.h * 0.5, 3, 8.5, 0.0, INK());
+    draw_poly(rn.x + rn.w * 0.5 + 1.5, rn.y + rn.h * 0.5, 3, 8.0, 0.0, INK());
     menu_button(rr, SRF(), CARD_EDGE(), rr.contains(m));
-    ui.text_centered("NEW", rr.x + rr.w * 0.5, rr.y + 31.0, 18.0, INK());
+    ui.text_centered("NEW", rr.x + rr.w * 0.5, rr.y + 26.0, 15.0, INK());
 
-    // right: room info and who plays which color
-    ui.text_centered("ROOM CODE", COL_R, 152.0, 13.0, with_alpha(INK(), 0.55));
-    ui.text_centered(&h.code, COL_R, 214.0, 58.0, INK());
+    draw_lobby_settings(
+        menu.players,
+        menu.difficulty,
+        settings.team_cfg(),
+        Some(settings.team_mine),
+        ui,
+        m,
+        true,
+    );
+
+    // ---- right: room info, identity, and who is here
+    ui.text_centered("ROOM CODE", COL_R, 92.0, 13.0, with_alpha(INK(), 0.55));
+    ui.text_centered(&h.code, COL_R, 140.0, 44.0, INK());
     ui.text(
         &format!("{}:{}", local_ip(), net_port()),
         COL_R - 160.0,
-        270.0,
-        17.0,
+        172.0,
+        15.0,
         with_alpha(INK(), 0.7),
     );
     let rc2 = r_lobby_copy();
@@ -4605,122 +5051,352 @@ fn draw_host_lobby(h: &HostNet, menu: &Menu, ui: &Ui, teams: TeamCfg, time: f32,
     ui.text_centered(
         if copied_t > 0.0 { "COPIED!" } else { "COPY" },
         rc2.x + rc2.w * 0.5,
-        rc2.y + 19.0,
+        rc2.y + 18.0,
         12.0,
         INK(),
     );
+    let occ = h.occupied();
+    let cfg = settings.team_cfg();
+    let (team_v, color_v) = lobby_layout(&occ, menu.players, cfg, picks, settings.color);
+    let mut names: Vec<String> = vec![settings.name.clone()];
+    for &seat in &occ {
+        names.push(picks.name.get(&seat).cloned().unwrap_or_default());
+    }
+    draw_lobby_shared(ui, m, settings.name.as_str(), name_edit, settings.color, time, &LobbyRoster {
+        players: menu.players,
+        humans: occ.len() + 1,
+        you_row: 0,
+        host_label: "(you)",
+        cfg,
+        team_v: &team_v,
+        color_v: &color_v,
+        names: &names,
+        my_team_sel: if cfg.on && !cfg.hvb { Some(cfg.my_team) } else { None },
+        show_team_picker: false,
+    });
 
+    let joined = occ.len();
+    let dots = ".".repeat(1 + (time * 2.0) as usize % 3);
     ui.text_centered(
-        if teams.on {
-            if teams.hvb {
-                "PLAYERS — HUMANS VS BOTS"
-            } else {
-                "PLAYERS — TEAM MODE"
-            }
-        } else {
-            "PLAYERS"
-        },
-        COL_R,
-        316.0,
-        13.0,
-        with_alpha(INK(), 0.55),
+        &format!(
+            "{} player{} here — start whenever you like{}",
+            joined + 1,
+            if joined == 0 { "" } else { "s" },
+            dots
+        ),
+        WIN_W * 0.5,
+        688.0,
+        16.0,
+        with_alpha(INK(), 0.6),
     );
-    let slots = h.slots();
-    let joined: usize = slots.iter().filter(|&&s| s).count();
-    let mut seat = 0usize;
-    let mut rows: Vec<String> = vec!["P1  (you)".to_string()];
-    for (i, &occ) in slots.iter().enumerate() {
-        let _ = i;
-        if occ {
-            seat += 1;
-            rows.push(format!("P{}  (connected)", seat + 1));
+    let rst = r_lobby_start();
+    menu_button(rst, palette(HUMAN).mid, BORDER(), rst.contains(m));
+    ui.text_centered("START GAME", rst.x + rst.w * 0.5, rst.y + 40.0, 25.0, WHITE);
+    let rc = r_lobby_cancel();
+    menu_button(rc, SRF(), CARD_EDGE(), rc.contains(m));
+    ui.text_centered("CANCEL", rc.x + rc.w * 0.5, rc.y + 24.0, 15.0, INK());
+}
+
+// checkbox row shared by the menu card and both lobbies
+fn draw_toggle(r: Rect, label: &str, on: bool, ui: &Ui, m: Vec2) {
+    let hov = r.contains(m);
+    let (bx, by) = (r.x, r.y + 2.0);
+    draw_round_frame(
+        bx,
+        by,
+        20.0,
+        20.0,
+        6.0,
+        2.0,
+        if on { palette(HUMAN).mid } else { SRF() },
+        if hov { BORDER() } else { CARD_EDGE() },
+    );
+    if on {
+        // round caps at the elbow and tips keep the check seamless
+        draw_line(bx + 4.5, by + 10.0, bx + 8.5, by + 14.5, 2.6, WHITE);
+        draw_line(bx + 8.5, by + 14.5, bx + 15.5, by + 5.5, 2.6, WHITE);
+        for (px, py) in [(4.5, 10.0), (8.5, 14.5), (15.5, 5.5)] {
+            draw_circle(bx + px, by + py, 1.3, WHITE);
         }
     }
-    while rows.len() < menu.players {
-        rows.push("AI".to_string());
+    ui.text(
+        label,
+        r.x + 28.0,
+        r.y + 17.0,
+        13.0,
+        with_alpha(INK(), if hov { 0.95 } else { 0.72 }),
+    );
+}
+
+// the right-hand column both lobbies share: name box, color band, roster
+struct LobbyRoster<'a> {
+    players: usize,
+    humans: usize,
+    you_row: usize,
+    host_label: &'a str,
+    cfg: TeamCfg,
+    team_v: &'a [usize],
+    color_v: &'a [usize],
+    names: &'a [String],
+    my_team_sel: Option<usize>,
+    show_team_picker: bool,
+}
+
+fn draw_lobby_shared(
+    ui: &Ui,
+    m: Vec2,
+    my_name: &str,
+    name_edit: bool,
+    my_color: usize,
+    time: f32,
+    r: &LobbyRoster,
+) {
+    ui.text_centered("YOUR NAME", COL_R, 204.0, 12.0, with_alpha(INK(), 0.55));
+    let rn = r_lobby_name();
+    menu_button(rn, SRF(), if name_edit { BORDER() } else { CARD_EDGE() }, rn.contains(m));
+    let caret = if name_edit && (time * 2.5) as i32 % 2 == 0 { "|" } else { "" };
+    let shown = if my_name.is_empty() && !name_edit {
+        "click to set a name".to_string()
+    } else {
+        format!("{}{}", my_name, caret)
+    };
+    ui.text_centered(
+        &shown,
+        rn.x + rn.w * 0.5,
+        rn.y + 26.0,
+        17.0,
+        if my_name.is_empty() && !name_edit {
+            with_alpha(INK(), 0.4)
+        } else {
+            INK()
+        },
+    );
+
+    ui.text_centered("YOUR COLOR", COL_R, 280.0, 12.0, with_alpha(INK(), 0.55));
+    // colors already claimed by other humans are crossed out
+    let taken: Vec<usize> = (0..r.humans)
+        .filter(|&row| row != r.you_row)
+        .filter_map(|row| r.color_v.get(row).copied())
+        .collect();
+    for i in 0..MAX_PLAYERS {
+        let rc = r_lobby_swatch(i);
+        let base = base_color(i);
+        let sel = my_color == i;
+        if sel {
+            draw_round_frame(rc.x - 3.0, rc.y - 3.0, rc.w + 6.0, rc.h + 6.0, 8.0, 2.0, SRF(), BORDER());
+        }
+        let hov = rc.contains(m) && !taken.contains(&i);
+        draw_round_rect(rc.x, rc.y, rc.w, rc.h, 6.0, if hov { lighten(base, 0.25) } else { base });
+        if taken.contains(&i) {
+            draw_line(rc.x + 4.0, rc.y + rc.h - 4.0, rc.x + rc.w - 4.0, rc.y + 4.0, 2.5, SRF());
+        }
     }
-    // center the roster block under its heading
-    let roster_w = 150.0;
-    let rx0 = COL_R - roster_w * 0.5;
-    // the teams the game would start with right now (bots fill open seats)
-    let team_v = assign_teams(menu.players, joined + 1, teams);
-    for (k, label) in rows.iter().enumerate() {
-        let ry = 346.0 + k as f32 * 33.0;
-        let pal = palette(k);
-        draw_round_rect(rx0, ry - 14.0, 24.0, 18.0, 6.0, pal.mid);
-        draw_symbol(rx0 + 40.0, ry - 5.0, 7.0, k, pal.dark);
-        ui.text(label, rx0 + 58.0, ry, 17.0, INK());
-        if teams.on {
+
+    if r.show_team_picker && r.cfg.on && !r.cfg.hvb {
+        ui.text_centered("YOUR TEAM", COL_R, 340.0, 12.0, with_alpha(INK(), 0.55));
+        let count = r.cfg.count.clamp(2, MAX_TEAMS);
+        for k in 0..count {
+            let rt = r_guest_team(k, count);
+            let sel = r.my_team_sel == Some(k);
+            let fill = if sel { palette(HUMAN).fill } else { SRF() };
+            menu_button(rt, fill, if sel { BORDER() } else { CARD_EDGE() }, rt.contains(m));
+            ui.text_centered(
+                team_letter(k),
+                rt.x + rt.w * 0.5,
+                rt.y + 21.0,
+                15.0,
+                if sel { INK_ON_FILL } else { INK() },
+            );
+        }
+    }
+
+    let head = if r.cfg.on {
+        if r.cfg.hvb {
+            "PLAYERS — HUMANS VS BOTS"
+        } else {
+            "PLAYERS"
+        }
+    } else {
+        "PLAYERS"
+    };
+    let ry0 = if r.show_team_picker { 412.0 } else { 344.0 };
+    ui.text_centered(head, COL_R, ry0, 12.0, with_alpha(INK(), 0.55));
+    let x0 = COL_R - 160.0;
+    for k in 0..r.players {
+        let ry = ry0 + 24.0 + k as f32 * 31.0;
+        let slot = r.color_v.get(k).copied().unwrap_or(k);
+        let base = base_color(slot);
+        draw_round_rect(x0, ry - 13.0, 24.0, 18.0, 6.0, base);
+        draw_symbol(x0 + 40.0, ry - 4.0, 7.0, k, darken(base, 0.7));
+        let label = if k == 0 {
+            let n = r.names.first().cloned().unwrap_or_default();
+            let n = if n.is_empty() { "P1".to_string() } else { n };
+            format!("{} {}", n, r.host_label)
+        } else if k < r.humans {
+            let n = r.names.get(k).cloned().unwrap_or_default();
+            let n = if n.is_empty() { format!("P{}", k + 1) } else { n };
+            if k == r.you_row {
+                format!("{} (you)", n)
+            } else {
+                n
+            }
+        } else {
+            "AI".to_string()
+        };
+        ui.text(&label, x0 + 58.0, ry, 15.0, INK());
+        if r.cfg.on {
             ui.text(
-                team_letter(team_v.get(k).copied().unwrap_or(0)),
-                rx0 + 196.0,
+                team_letter(r.team_v.get(k).copied().unwrap_or(0)),
+                x0 + 296.0,
                 ry,
                 14.0,
                 with_alpha(INK(), 0.55),
             );
         }
     }
-    let dots = ".".repeat(1 + (time * 2.0) as usize % 3);
-    ui.text_centered(
-        &format!(
-            "{} player{} here — waiting for more{}",
-            joined + 1,
-            if joined == 0 { "" } else { "s" },
-            dots
-        ),
-        WIN_W * 0.5,
-        584.0,
-        17.0,
-        with_alpha(INK(), 0.6),
-    );
-
-    let rst = r_lobby_start();
-    menu_button(rst, palette(HUMAN).mid, BORDER(), rst.contains(m));
-    ui.text_centered("START GAME", rst.x + rst.w * 0.5, rst.y + 41.0, 26.0, WHITE);
-    let rc = r_lobby_cancel();
-    menu_button(rc, SRF(), CARD_EDGE(), rc.contains(m));
-    ui.text_centered("CANCEL", rc.x + rc.w * 0.5, rc.y + 27.0, 16.0, INK());
 }
 
-fn draw_join_lobby(j: &JoinUi, connected: bool, ui: &Ui, time: f32) {
+fn draw_guest_lobby(
+    j: &JoinUi,
+    my_seat: usize,
+    settings: &Settings,
+    ui: &Ui,
+    name_edit: bool,
+    time: f32,
+) {
+    draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
+    let m = mouse_virtual();
+    ui.text_centered("LOBBY", WIN_W * 0.5, 52.0, 32.0, INK());
+    let pv = Rect::new(COL_L - 230.0, 74.0, 460.0, 190.0);
+    draw_round_frame(pv.x, pv.y, pv.w, pv.h, 14.0, 2.0, SRF(), CARD_EDGE());
+    if let Some(g) = &j.preview {
+        draw_map_mini(g, Rect::new(pv.x + 8.0, pv.y + 8.0, pv.w - 16.0, pv.h - 16.0));
+    } else {
+        ui.text_centered(
+            "Waiting for the host's map...",
+            COL_L,
+            pv.y + 100.0,
+            15.0,
+            with_alpha(INK(), 0.5),
+        );
+    }
+    if let Some(v) = &j.view {
+        ui.text_centered(
+            &format!("MAP #{:08}", j.preview_key.0),
+            COL_L,
+            314.0,
+            17.0,
+            with_alpha(INK(), 0.7),
+        );
+        let cfg = TeamCfg {
+            on: v.ton,
+            count: v.tcount,
+            hvb: v.thvb,
+            my_team: 0,
+            bridge: v.tbridge,
+            ff: v.tff,
+        };
+        draw_lobby_settings(v.players, idx_diff(v.diff), cfg, None, ui, m, false);
+        let own_row = 1 + v.occupied.iter().position(|&x| x == my_seat).unwrap_or(0);
+        let my_color = j
+            .my_color
+            .or_else(|| v.colors.get(own_row).copied())
+            .unwrap_or(settings.color);
+        let my_team = j.my_team.or_else(|| v.teams.get(own_row).copied());
+        draw_lobby_shared(
+            ui,
+            m,
+            settings.name.as_str(),
+            name_edit,
+            my_color,
+            time,
+            &LobbyRoster {
+                players: v.players,
+                humans: v.occupied.len() + 1,
+                you_row: own_row,
+                host_label: "(host)",
+                cfg: TeamCfg {
+                    on: v.ton,
+                    count: v.tcount,
+                    hvb: v.thvb,
+                    my_team: 0,
+                    bridge: v.tbridge,
+                    ff: v.tff,
+                },
+                team_v: &v.teams,
+                color_v: &v.colors,
+                names: &v.names,
+                my_team_sel: my_team,
+                show_team_picker: true,
+            },
+        );
+    } else {
+        ui.text_centered(
+            "Connected — syncing with the host...",
+            COL_R,
+            300.0,
+            15.0,
+            with_alpha(INK(), 0.6),
+        );
+    }
+    let dots = ".".repeat(1 + (time * 2.0) as usize % 3);
+    ui.text_centered(
+        &format!("Waiting for the host to start{}", dots),
+        WIN_W * 0.5,
+        700.0,
+        16.0,
+        with_alpha(INK(), 0.6),
+    );
+    let rc = r_lobby_cancel();
+    menu_button(rc, SRF(), CARD_EDGE(), rc.contains(m));
+    ui.text_centered("LEAVE", rc.x + rc.w * 0.5, rc.y + 24.0, 15.0, INK());
+}
+
+fn draw_join_lobby(j: &JoinUi, settings: &Settings, ui: &Ui, time: f32) {
     draw_lobby_card(ui, "JOIN GAME");
     let m = mouse_virtual();
-    ui.text_centered("HOST ADDRESS", WIN_W * 0.5, 316.0, 14.0, with_alpha(INK(), 0.55));
-    let ra = r_join_addr();
-    menu_button(ra, SRF(), if j.focus == 0 && !connected { BORDER() } else { CARD_EDGE() }, ra.contains(m));
     let caret = |on: bool| if on && (time * 2.5) as i32 % 2 == 0 { "|" } else { "" };
+    ui.text_centered("HOST ADDRESS", WIN_W * 0.5, 296.0, 14.0, with_alpha(INK(), 0.55));
+    let ra = r_join_addr();
+    menu_button(ra, SRF(), if j.focus == 0 { BORDER() } else { CARD_EDGE() }, ra.contains(m));
     ui.text_centered(
-        &format!("{}{}", j.addr, caret(j.focus == 0 && !connected)),
+        &format!("{}{}", j.addr, caret(j.focus == 0)),
         ra.x + ra.w * 0.5,
         ra.y + 31.0,
         20.0,
         INK(),
     );
-    if !connected {
-        let rpst = r_join_paste();
-        menu_button(rpst, SRF(), CARD_EDGE(), rpst.contains(m));
-        ui.text_centered("PASTE", rpst.x + rpst.w * 0.5, rpst.y + 30.0, 14.0, INK());
-    }
-    ui.text_centered("ROOM CODE", WIN_W * 0.5, 410.0, 14.0, with_alpha(INK(), 0.55));
+    let rpst = r_join_paste();
+    menu_button(rpst, SRF(), CARD_EDGE(), rpst.contains(m));
+    ui.text_centered("PASTE", rpst.x + rpst.w * 0.5, rpst.y + 30.0, 14.0, INK());
+    ui.text_centered("ROOM CODE", WIN_W * 0.5, 390.0, 14.0, with_alpha(INK(), 0.55));
     let rc = r_join_code();
-    menu_button(rc, SRF(), if j.focus == 1 && !connected { BORDER() } else { CARD_EDGE() }, rc.contains(m));
+    menu_button(rc, SRF(), if j.focus == 1 { BORDER() } else { CARD_EDGE() }, rc.contains(m));
     ui.text_centered(
-        &format!("{}{}", j.code, caret(j.focus == 1 && !connected)),
+        &format!("{}{}", j.code, caret(j.focus == 1)),
         rc.x + rc.w * 0.5,
         rc.y + 31.0,
         22.0,
         INK(),
     );
-    if !connected {
-        let rg = r_join_go();
-        menu_button(rg, palette(HUMAN).fill, BORDER(), rg.contains(m));
-        ui.text_centered("CONNECT", rg.x + rg.w * 0.5, rg.y + 31.0, 18.0, INK());
-    }
+    ui.text_centered("YOUR NAME", WIN_W * 0.5, 484.0, 14.0, with_alpha(INK(), 0.55));
+    let rn = r_join_name();
+    menu_button(rn, SRF(), if j.focus == 2 { BORDER() } else { CARD_EDGE() }, rn.contains(m));
+    ui.text_centered(
+        &format!("{}{}", settings.name, caret(j.focus == 2)),
+        rn.x + rn.w * 0.5,
+        rn.y + 31.0,
+        20.0,
+        INK(),
+    );
+    let rg = r_join_go();
+    menu_button(rg, palette(HUMAN).fill, BORDER(), rg.contains(m));
+    ui.text_centered("CONNECT", rg.x + rg.w * 0.5, rg.y + 31.0, 18.0, INK());
     let rb = r_join_back();
     menu_button(rb, SRF(), CARD_EDGE(), rb.contains(m));
     ui.text_centered("BACK", rb.x + rb.w * 0.5, rb.y + 31.0, 18.0, INK());
     if !j.status.is_empty() {
-        ui.text_centered(&j.status, WIN_W * 0.5, 600.0, 18.0, with_alpha(INK(), 0.75));
+        ui.text_centered(&j.status, WIN_W * 0.5, 670.0, 17.0, with_alpha(INK(), 0.75));
     }
 }
 
@@ -4780,7 +5456,7 @@ async fn main() {
     let sounds = Sounds::load().await;
     let mut settings = load_settings();
     COLORBLIND.store(settings.colorblind, Ordering::Relaxed);
-    HUMAN_COLOR.store(settings.color, Ordering::Relaxed);
+    apply_local_colors(settings.color);
     DARK.store(settings.dark, Ordering::Relaxed);
     if std::env::var("DW_EXPORT_ICON").is_ok() {
         let rt = render_target(1024, 1024);
@@ -4825,6 +5501,9 @@ async fn main() {
     let mut join = JoinUi::default();
     let mut menu_time = 0.0f32;
     let mut net_ping_t = 0.0f32;
+    let mut lobby_picks = LobbyPicks::default();
+    let mut lobby_sync_t = 0.0f32;
+    let mut lobby_name_edit = false;
     let mut awaiting: HashMap<usize, f32> = HashMap::new(); // game seat -> grace timer
     let mut copied_t = 0.0f32;
     let mut confirm: Option<Confirm> = None;
@@ -4852,7 +5531,7 @@ async fn main() {
         let code = it.next().unwrap_or("").to_string();
         join.addr = addr;
         join.code = code;
-        match guest_connect(&join.addr, &join.code) {
+        match guest_connect(&join.addr, &join.code, &settings.name) {
             Ok(g) => {
                 eprintln!("JOINED seat {}", g.seat);
                 guest = Some(g);
@@ -4891,12 +5570,19 @@ async fn main() {
                     MenuAction::Host => match HostNet::start(menu.players - 1) {
                         Ok(h) => {
                             host = Some(h);
+                            lobby_picks = LobbyPicks::default();
+                            lobby_sync_t = 0.0;
+                            lobby_name_edit = false;
                             screen = Screen::HostLobby;
                         }
                         Err(_) => menu.host_err = 4.0,
                     },
                     MenuAction::Join => {
-                        join = JoinUi::default();
+                        join = JoinUi {
+                            addr: settings.last_addr.clone(),
+                            ..Default::default()
+                        };
+                        lobby_name_edit = false;
                         screen = Screen::JoinLobby;
                     }
                     MenuAction::None => {}
@@ -4906,6 +5592,18 @@ async fn main() {
             Screen::Play => {
                 let g = game.as_mut().unwrap();
                 g.update(dt * settings.speed);
+                g.tick_turn_timer(dt);
+                if let Some(gn) = guest.as_mut() {
+                    if gn.rec_failed && is_mouse_button_pressed(MouseButton::Left) {
+                        gn.rec_failed = false;
+                        gn.rec_rx = Some(spawn_reconnect(
+                            gn.addr.clone(),
+                            gn.code.clone(),
+                            gn.token.clone(),
+                        ));
+                        g.push_log("Reconnecting...".to_string());
+                    }
+                }
                 let mut go_menu = false;
                 let click = is_mouse_button_pressed(MouseButton::Left);
                 if click && g.over.is_none() && confirm.is_none() {
@@ -4983,23 +5681,26 @@ async fn main() {
                                 if g.over.is_none() {
                                     // hold the seat and give them time to come back
                                     awaiting.insert(seat, 45.0);
+                                    let n = g.name_of(seat);
                                     g.push_log(format!(
                                         "{} lost connection — waiting for them to reconnect...",
-                                        HUMAN_LABELS[seat]
+                                        n
                                     ));
                                 }
                             }
                             HostMsg::Rejoined(lobby_seat) => {
-                                h.send_resume(lobby_seat, g, menu.seed, menu.difficulty);
-                                if let Some(&seat) = h.remap.get(&lobby_seat) {
+                                if let Some(&seat) = h.remap.get(&lobby_seat).copied().as_ref() {
+                                    if seat < g.absent.len() {
+                                        g.absent[seat] = false;
+                                    }
                                     awaiting.remove(&seat);
-                                    g.push_log(format!(
-                                        "{} reconnected!",
-                                        HUMAN_LABELS[seat]
-                                    ));
+                                    let n = g.name_of(seat);
+                                    g.push_log(format!("{} reconnected!", n));
+                                    h.broadcast(&format!("ABSENT {} 0", seat));
                                 }
+                                h.send_resume(lobby_seat, g, menu.seed, menu.difficulty);
                             }
-                            HostMsg::Joined(_) => {}
+                            HostMsg::Joined(..) => {}
                         }
                     }
                     h.flush_events(g);
@@ -5013,11 +5714,11 @@ async fn main() {
                     }
                     for seat in expired {
                         awaiting.remove(&seat);
-                        if g.over.is_none() {
-                            let msg = format!("{} disconnected", HUMAN_LABELS[seat]);
-                            g.over = Some(msg.clone());
-                            g.banner_t = 0.0;
-                            h.broadcast(&format!("OVER {}", msg));
+                        if g.over.is_none() && seat < g.absent.len() {
+                            g.absent[seat] = true;
+                            let n = g.name_of(seat);
+                            g.push_log(format!("{} left — a bot takes over.", n));
+                            h.broadcast(&format!("ABSENT {} 1", seat));
                         }
                     }
                 }
@@ -5038,12 +5739,9 @@ async fn main() {
                                     gn.catching_up = true;
                                     gn.pending.clear();
                                 }
-                                Err(e) => {
+                                Err(_) => {
                                     gn.rec_rx = None;
-                                    if g.over.is_none() {
-                                        g.over = Some(e);
-                                        g.banner_t = 0.0;
-                                    }
+                                    gn.rec_failed = true;
                                 }
                             }
                         }
@@ -5090,41 +5788,64 @@ async fn main() {
                                     it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
                                 let seat: usize =
                                     it.next().and_then(|v| v.parse().ok()).unwrap_or(gn.seat);
-                                if let Some(c) =
-                                    it.next().and_then(|v| v.parse::<usize>().ok())
-                                {
-                                    HUMAN_COLOR.store(c % MAX_PLAYERS, Ordering::Relaxed);
-                                }
-                                let teams = TeamCfg {
-                                    on: it.next() == Some("1"),
-                                    bridge: it.next() == Some("1"),
-                                    ff: it.next() == Some("1"),
-                                    count: it
-                                        .next()
-                                        .and_then(|v| v.parse().ok())
-                                        .unwrap_or(2),
-                                    hvb: it.next() == Some("1"),
-                                    my_team: it
-                                        .next()
-                                        .and_then(|v| v.parse().ok())
-                                        .unwrap_or(0),
-                                };
+                                let (colors, teams, team_v, names) =
+                                    parse_start_tail(&mut it);
+                                let absent: Vec<usize> =
+                                    it.next().map(parse_csv_usize).unwrap_or_default();
                                 gn.seat = seat;
-                                let mut ng = gen_map(
-                                    seed,
-                                    players.clamp(2, 8),
-                                    humans,
-                                    idx_diff(di),
-                                    teams,
+                                let mut ng = build_guest_game(
+                                    seed, players, humans, di, seat, &colors, teams,
+                                    team_v, names,
                                 );
-                                ng.net_guest = true;
-                                ng.my_seat = seat;
+                                if absent.len() == ng.players {
+                                    ng.absent = absent.iter().map(|&a| a == 1).collect();
+                                }
                                 *g = ng;
                                 gn.catching_up = true;
                             }
                             Some("SYNCED") => {
                                 gn.catching_up = false;
                                 g.push_log("Reconnected!".to_string());
+                            }
+                            Some("START") => {
+                                // the host started a fresh round with everyone in it
+                                let seed: u64 =
+                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                                let players: usize =
+                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
+                                let humans: usize =
+                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
+                                let di: usize =
+                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+                                let seat: usize =
+                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(gn.seat);
+                                let (colors, teams, team_v, names) =
+                                    parse_start_tail(&mut it);
+                                gn.seat = seat;
+                                gn.pending.clear();
+                                gn.catching_up = false;
+                                *g = build_guest_game(
+                                    seed, players, humans, di, seat, &colors, teams,
+                                    team_v, names,
+                                );
+                                g.push_log("The host started a new round!".to_string());
+                                g.snd.push(Snd::Turn);
+                            }
+                            Some("ABSENT") => {
+                                let ps: Option<usize> =
+                                    it.next().and_then(|v| v.parse().ok());
+                                let gone = it.next() == Some("1");
+                                if let Some(ps) = ps {
+                                    if ps < g.absent.len() {
+                                        g.absent[ps] = gone;
+                                        let n = g.name_of(ps);
+                                        g.push_log(if gone {
+                                            format!("{} left — a bot takes over.", n)
+                                        } else {
+                                            format!("{} is back!", n)
+                                        });
+                                    }
+                                }
                             }
                             Some("LOST") => {
                                 // connection dropped: hold the game and retry quietly
@@ -5194,13 +5915,41 @@ async fn main() {
                             match kind {
                                 Confirm::NewMap => {
                                     menu.seed = random_seed();
-                                    *g = gen_map(
-                                        menu.seed,
-                                        menu.players,
-                                        1,
-                                        menu.difficulty,
-                                        settings.team_cfg(),
-                                    );
+                                    if let Some(h) = host.as_mut() {
+                                        // rematch: everyone still connected moves
+                                        // into the fresh round
+                                        let cfg = settings.team_cfg();
+                                        let (humans, tv, cv, nm) = h.start_game(
+                                            menu.seed,
+                                            menu.players,
+                                            menu.difficulty,
+                                            cfg,
+                                            &lobby_picks,
+                                            settings.color,
+                                            &settings.name,
+                                        );
+                                        let mut ng = gen_map(
+                                            menu.seed,
+                                            menu.players,
+                                            humans,
+                                            menu.difficulty,
+                                            cfg,
+                                        );
+                                        ng.team = tv;
+                                        ng.names = nm;
+                                        apply_colors(&cv);
+                                        h.sent = 0;
+                                        awaiting.clear();
+                                        *g = ng;
+                                    } else {
+                                        *g = gen_map(
+                                            menu.seed,
+                                            menu.players,
+                                            1,
+                                            menu.difficulty,
+                                            settings.team_cfg(),
+                                        );
+                                    }
                                 }
                                 Confirm::Menu => go_menu = true,
                             }
@@ -5210,7 +5959,7 @@ async fn main() {
                     }
                 } else if click && g.over.is_none() && r_btn_menu().contains(mouse_virtual()) {
                     confirm = Some(Confirm::Menu);
-                } else if click && g.over.is_none() && host.is_none() && guest.is_none() && r_btn_new().contains(mouse_virtual()) {
+                } else if click && g.over.is_none() && guest.is_none() && r_btn_new().contains(mouse_virtual()) {
                     confirm = Some(Confirm::NewMap);
                 } else if is_key_pressed(KeyCode::Escape) {
                     if g.selected.is_some() {
@@ -5220,8 +5969,8 @@ async fn main() {
                     } else {
                         confirm = Some(Confirm::Menu);
                     }
-                } else if is_key_pressed(KeyCode::R) && host.is_none() && guest.is_none() {
-                    if g.over.is_some() {
+                } else if is_key_pressed(KeyCode::R) && guest.is_none() {
+                    if g.over.is_some() && host.is_none() {
                         menu.seed = random_seed();
                         *g = gen_map(
                             menu.seed,
@@ -5270,8 +6019,12 @@ async fn main() {
                 }
                 draw_game(g, &ui, &settings);
                 if let Some(gn) = &guest {
-                    if gn.rec_rx.is_some() && g.over.is_none() {
-                        let txt = "Connection lost — reconnecting...";
+                    if (gn.rec_rx.is_some() || gn.rec_failed) && g.over.is_none() {
+                        let txt = if gn.rec_failed {
+                            "Could not reconnect — click anywhere to retry"
+                        } else {
+                            "Connection lost — reconnecting..."
+                        };
                         let w = ui.width(txt, 22.0) + 56.0;
                         draw_round_frame(
                             (WIN_W - w) * 0.5,
@@ -5295,40 +6048,214 @@ async fn main() {
                     host = None;
                     guest = None;
                     awaiting.clear();
-                    HUMAN_COLOR.store(settings.color, Ordering::Relaxed);
+                    apply_local_colors(settings.color);
                     screen = Screen::Menu;
                     menu.regen();
                 }
             }
             Screen::HostLobby => {
                 menu_time += dt;
-                let mut cancel = is_key_pressed(KeyCode::Escape);
-                if is_mouse_button_pressed(MouseButton::Left)
-                    && r_lobby_cancel().contains(mouse_virtual())
-                {
+                let click2 = is_mouse_button_pressed(MouseButton::Left);
+                let m2 = mouse_virtual();
+                let mut cancel = is_key_pressed(KeyCode::Escape) && !lobby_name_edit;
+                if click2 && r_lobby_cancel().contains(m2) {
                     cancel = true;
                 }
                 let h = host.as_mut().unwrap();
-                while h.rx.try_recv().is_ok() {}
+                let mut dirty = false;
+                while let Ok(msg) = h.rx.try_recv() {
+                    match msg {
+                        HostMsg::Joined(seat, name) => {
+                            if !name.is_empty() {
+                                lobby_picks.name.insert(seat, name);
+                            }
+                            // hand the newcomer the first color still free
+                            let mut used = vec![settings.color];
+                            used.extend(lobby_picks.color.values().copied());
+                            if let Some(c) = (0..MAX_PLAYERS).find(|c| !used.contains(c)) {
+                                lobby_picks.color.entry(seat).or_insert(c);
+                            }
+                            dirty = true;
+                        }
+                        HostMsg::Left(seat) => {
+                            lobby_picks.team.remove(&seat);
+                            lobby_picks.color.remove(&seat);
+                            lobby_picks.name.remove(&seat);
+                            dirty = true;
+                        }
+                        HostMsg::Intent(seat, line) => {
+                            let mut it = line.split_whitespace();
+                            match it.next() {
+                                Some("TEAM") => {
+                                    if let Some(t) =
+                                        it.next().and_then(|v| v.parse::<usize>().ok())
+                                    {
+                                        let n = settings.team_count.clamp(2, MAX_TEAMS);
+                                        lobby_picks.team.insert(seat, t % n);
+                                        dirty = true;
+                                    }
+                                }
+                                Some("COLOR") => {
+                                    if let Some(c) =
+                                        it.next().and_then(|v| v.parse::<usize>().ok())
+                                    {
+                                        let taken = c == settings.color
+                                            || lobby_picks
+                                                .color
+                                                .iter()
+                                                .any(|(&s2, &c2)| s2 != seat && c2 == c);
+                                        if c < MAX_PLAYERS && !taken {
+                                            lobby_picks.color.insert(seat, c);
+                                            dirty = true;
+                                        }
+                                    }
+                                }
+                                Some("NAME") => {
+                                    let n = clean_name(it.next().unwrap_or(""));
+                                    if n.is_empty() {
+                                        lobby_picks.name.remove(&seat);
+                                    } else {
+                                        lobby_picks.name.insert(seat, n);
+                                    }
+                                    dirty = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                        HostMsg::Rejoined(_) => {}
+                    }
+                }
                 copied_t = (copied_t - dt).max(0.0);
-                let click2 = is_mouse_button_pressed(MouseButton::Left);
-                let m2 = mouse_virtual();
-                if click2 && r_lobby_copy().contains(m2) {
-                    copy_to_clipboard(&format!("{}:{}", local_ip(), net_port()));
-                    copied_t = 1.5;
-                    snd_queue.push(Snd::Click);
+                if lobby_name_edit {
+                    while let Some(c) = get_char_pressed() {
+                        if (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                            && settings.name.len() < 12
+                        {
+                            settings.name.push(c);
+                            dirty = true;
+                        }
+                    }
+                    if is_key_pressed(KeyCode::Backspace) {
+                        settings.name.pop();
+                        dirty = true;
+                    }
+                    if is_key_pressed(KeyCode::Enter)
+                        || is_key_pressed(KeyCode::Escape)
+                        || (click2 && !r_lobby_name().contains(m2))
+                    {
+                        lobby_name_edit = false;
+                        save_settings(&settings);
+                    }
+                } else {
+                    while get_char_pressed().is_some() {}
                 }
-                if click2 && r_lobby_prev().contains(m2) {
-                    menu.seed = (menu.seed + SEED_MOD - 1) % SEED_MOD;
-                    menu.regen();
-                    snd_queue.push(Snd::Click);
+                if click2 {
+                    if r_lobby_copy().contains(m2) {
+                        copy_to_clipboard(&format!("{}:{}", local_ip(), net_port()));
+                        copied_t = 1.5;
+                        snd_queue.push(Snd::Click);
+                    }
+                    if r_lobby_name().contains(m2) {
+                        lobby_name_edit = true;
+                    }
+                    if r_lobby_prev().contains(m2) {
+                        menu.seed = (menu.seed + SEED_MOD - 1) % SEED_MOD;
+                        menu.regen();
+                        dirty = true;
+                        snd_queue.push(Snd::Click);
+                    }
+                    if r_lobby_next().contains(m2) {
+                        menu.seed = (menu.seed + 1) % SEED_MOD;
+                        menu.regen();
+                        dirty = true;
+                        snd_queue.push(Snd::Click);
+                    }
+                    if r_lobby_new().contains(m2) {
+                        menu.seed = random_seed();
+                        menu.regen();
+                        dirty = true;
+                        snd_queue.push(Snd::Click);
+                    }
+                    for k in 0..MAX_PLAYERS - 1 {
+                        if r_lobby_player(k).contains(m2) {
+                            let n = h.resize_guests(k + 1);
+                            menu.players = n + 1;
+                            menu.regen();
+                            dirty = true;
+                            snd_queue.push(Snd::Click);
+                        }
+                    }
+                    for (k, d) in [Difficulty::Easy, Difficulty::Normal, Difficulty::Hard]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        if r_lobby_diff(k).contains(m2) {
+                            menu.difficulty = d;
+                            dirty = true;
+                            snd_queue.push(Snd::Click);
+                        }
+                    }
+                    for k in 0..2 {
+                        if r_lobby_mode(k).contains(m2) {
+                            settings.teams = k == 1;
+                            save_settings(&settings);
+                            dirty = true;
+                            snd_queue.push(Snd::Click);
+                        }
+                    }
+                    if settings.teams {
+                        for k in 0..4 {
+                            if r_lobby_count(k).contains(m2) {
+                                if k < 3 {
+                                    settings.team_hvb = false;
+                                    settings.team_count = k + 2;
+                                    settings.team_mine = settings.team_mine.min(k + 1);
+                                } else {
+                                    settings.team_hvb = !settings.team_hvb;
+                                }
+                                save_settings(&settings);
+                                dirty = true;
+                                snd_queue.push(Snd::Click);
+                            }
+                        }
+                        if !settings.team_hvb {
+                            let count = settings.team_count.clamp(2, MAX_TEAMS);
+                            for k in 0..count {
+                                if r_lobby_team(k, count).contains(m2) {
+                                    settings.team_mine = k;
+                                    save_settings(&settings);
+                                    dirty = true;
+                                    snd_queue.push(Snd::Click);
+                                }
+                            }
+                        }
+                        if r_lobby_ff().contains(m2) {
+                            settings.team_ff = !settings.team_ff;
+                            save_settings(&settings);
+                            dirty = true;
+                            snd_queue.push(Snd::Click);
+                        }
+                        if r_lobby_bridge().contains(m2) {
+                            settings.team_bridge = !settings.team_bridge;
+                            save_settings(&settings);
+                            dirty = true;
+                            snd_queue.push(Snd::Click);
+                        }
+                    }
+                    for i in 0..MAX_PLAYERS {
+                        if r_lobby_swatch(i).contains(m2) {
+                            let taken = lobby_picks.color.values().any(|&c| c == i);
+                            if !taken {
+                                settings.color = i;
+                                apply_local_colors(i);
+                                save_settings(&settings);
+                                dirty = true;
+                                snd_queue.push(Snd::Click);
+                            }
+                        }
+                    }
                 }
-                if click2 && r_lobby_next().contains(m2) {
-                    menu.seed = (menu.seed + 1) % SEED_MOD;
-                    menu.regen();
-                    snd_queue.push(Snd::Click);
-                }
-                // hold-to-repeat, identical to the menu's seed arrows
+                // hold-to-repeat on the seed arrows
                 let held_dir: i64 = if is_mouse_button_down(MouseButton::Left) {
                     if r_lobby_prev().contains(m2) {
                         -1
@@ -5349,36 +6276,62 @@ async fn main() {
                             menu.seed =
                                 (menu.seed as i64 + held_dir).rem_euclid(SEED_MOD as i64) as u64;
                             menu.regen();
+                            dirty = true;
                         }
                     }
                 } else {
                     menu.hold_t = 0.0;
                     menu.hold_next = 0.0;
                 }
-                if click2 && r_lobby_new().contains(m2) {
-                    menu.seed = random_seed();
-                    menu.regen();
-                    snd_queue.push(Snd::Click);
+                // keep every guest's lobby view fresh
+                lobby_sync_t += dt;
+                if dirty || lobby_sync_t >= 1.5 {
+                    lobby_sync_t = 0.0;
+                    let line = lobby_line(h, &menu, &settings, &lobby_picks);
+                    h.broadcast(&line);
                 }
-                let want_start = (click2 && r_lobby_start().contains(mouse_virtual()))
-                    || is_key_pressed(KeyCode::Enter)
+                let want_start = (click2 && r_lobby_start().contains(m2))
+                    || (is_key_pressed(KeyCode::Enter) && !lobby_name_edit)
                     || (test_host_auto > 0 && h.joined() >= test_host_auto);
                 if want_start {
                     let cfg = settings.team_cfg();
-                    let humans = h.start_game(menu.seed, menu.players, menu.difficulty, cfg);
-                    game = Some(gen_map(menu.seed, menu.players, humans, menu.difficulty, cfg));
+                    let (humans, tv, cv, nm) = h.start_game(
+                        menu.seed,
+                        menu.players,
+                        menu.difficulty,
+                        cfg,
+                        &lobby_picks,
+                        settings.color,
+                        &settings.name,
+                    );
+                    let mut ng = gen_map(menu.seed, menu.players, humans, menu.difficulty, cfg);
+                    ng.team = tv;
+                    ng.names = nm;
+                    apply_colors(&cv);
+                    h.sent = 0;
+                    game = Some(ng);
                     screen = Screen::Play;
                     snd_queue.push(Snd::Turn);
                 }
-                draw_host_lobby(h, &menu, &ui, settings.team_cfg(), menu_time, copied_t);
+                draw_host_lobby(
+                    h,
+                    &menu,
+                    &settings,
+                    &lobby_picks,
+                    &ui,
+                    lobby_name_edit,
+                    menu_time,
+                    copied_t,
+                );
                 if cancel {
                     host = None;
+                    lobby_name_edit = false;
                     screen = Screen::Menu;
                 }
             }
             Screen::JoinLobby => {
                 menu_time += dt;
-                let mut back = is_key_pressed(KeyCode::Escape);
+                let mut back = is_key_pressed(KeyCode::Escape) && !lobby_name_edit;
                 let mut drop_guest = false;
                 let click = is_mouse_button_pressed(MouseButton::Left);
                 let m = mouse_virtual();
@@ -5398,42 +6351,132 @@ async fn main() {
                                 if let Some(s) = it.next().and_then(|v| v.parse().ok()) {
                                     gn.seat = s;
                                 }
-                                if let Some(c) = it.next().and_then(|v| v.parse::<usize>().ok()) {
-                                    // adopt the host's color mapping for this match
-                                    HUMAN_COLOR.store(c % MAX_PLAYERS, Ordering::Relaxed);
-                                }
-                                let teams = TeamCfg {
-                                    on: it.next() == Some("1"),
-                                    bridge: it.next() == Some("1"),
-                                    ff: it.next() == Some("1"),
-                                    count: it
-                                        .next()
-                                        .and_then(|v| v.parse().ok())
-                                        .unwrap_or(2),
-                                    hvb: it.next() == Some("1"),
-                                    my_team: it
-                                        .next()
-                                        .and_then(|v| v.parse().ok())
-                                        .unwrap_or(0),
-                                };
-                                let mut g = gen_map(
-                                    seed,
-                                    players.clamp(2, 8),
-                                    humans,
-                                    idx_diff(di),
-                                    teams,
+                                let (colors, teams, team_v, names) =
+                                    parse_start_tail(&mut it);
+                                let g = build_guest_game(
+                                    seed, players, humans, di, gn.seat, &colors, teams,
+                                    team_v, names,
                                 );
-                                g.net_guest = true;
-                                g.my_seat = gn.seat;
                                 game = Some(g);
                                 screen = Screen::Play;
                                 snd_queue.push(Snd::Turn);
+                            }
+                            Some("LOBBY") => {
+                                let seed: u64 =
+                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                                let players: usize =
+                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
+                                let diff: usize =
+                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+                                let ton = it.next() == Some("1");
+                                let thvb = it.next() == Some("1");
+                                let tcount: usize =
+                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
+                                let tff = it.next() == Some("1");
+                                let tbridge = it.next() == Some("1");
+                                let occupied = it
+                                    .next()
+                                    .map(|x| if x == "-" { Vec::new() } else { parse_csv_usize(x) })
+                                    .unwrap_or_default();
+                                let teams = it.next().map(parse_csv_usize).unwrap_or_default();
+                                let colors = it.next().map(parse_csv_usize).unwrap_or_default();
+                                let names = it.next().map(parse_names_csv).unwrap_or_default();
+                                if join.preview_key != (seed, players) {
+                                    join.preview = Some(gen_map(
+                                        seed,
+                                        players.clamp(2, MAX_PLAYERS),
+                                        1,
+                                        Difficulty::Normal,
+                                        TeamCfg::default(),
+                                    ));
+                                    join.preview_key = (seed, players);
+                                }
+                                join.view = Some(LobbyView {
+                                    players,
+                                    diff,
+                                    ton,
+                                    thvb,
+                                    tcount,
+                                    tff,
+                                    tbridge,
+                                    occupied,
+                                    teams,
+                                    colors,
+                                    names,
+                                });
                             }
                             Some("BYE") => {
                                 join.status = "Disconnected by host".to_string();
                                 drop_guest = true;
                             }
+                            Some("LOST") => {
+                                join.status = "Connection lost".to_string();
+                                drop_guest = true;
+                            }
                             _ => {}
+                        }
+                    }
+                    if lobby_name_edit {
+                        while let Some(c) = get_char_pressed() {
+                            if (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                                && settings.name.len() < 12
+                            {
+                                settings.name.push(c);
+                            }
+                        }
+                        if is_key_pressed(KeyCode::Backspace) {
+                            settings.name.pop();
+                        }
+                        if is_key_pressed(KeyCode::Enter)
+                            || is_key_pressed(KeyCode::Escape)
+                            || (click && !r_lobby_name().contains(m))
+                        {
+                            lobby_name_edit = false;
+                            save_settings(&settings);
+                            let n = if settings.name.is_empty() {
+                                "-".to_string()
+                            } else {
+                                settings.name.clone()
+                            };
+                            send_net_line(&mut gn.stream, &format!("NAME {}", n));
+                        }
+                    } else {
+                        while get_char_pressed().is_some() {}
+                    }
+                    if click {
+                        if r_lobby_name().contains(m) {
+                            lobby_name_edit = true;
+                        }
+                        if let Some(v) = &join.view {
+                            let own_row =
+                                1 + v.occupied.iter().position(|&x| x == gn.seat).unwrap_or(0);
+                            let humans = v.occupied.len() + 1;
+                            for i in 0..MAX_PLAYERS {
+                                if r_lobby_swatch(i).contains(m) {
+                                    let taken = (0..humans)
+                                        .any(|r2| r2 != own_row && v.colors.get(r2) == Some(&i));
+                                    if !taken {
+                                        join.my_color = Some(i);
+                                        settings.color = i;
+                                        save_settings(&settings);
+                                        send_net_line(&mut gn.stream, &format!("COLOR {}", i));
+                                        snd_queue.push(Snd::Click);
+                                    }
+                                }
+                            }
+                            if v.ton && !v.thvb {
+                                let count = v.tcount.clamp(2, MAX_TEAMS);
+                                for k in 0..count {
+                                    if r_guest_team(k, count).contains(m) {
+                                        join.my_team = Some(k);
+                                        send_net_line(&mut gn.stream, &format!("TEAM {}", k));
+                                        snd_queue.push(Snd::Click);
+                                    }
+                                }
+                            }
+                        }
+                        if r_lobby_cancel().contains(m) {
+                            back = true;
                         }
                     }
                 } else {
@@ -5448,7 +6491,7 @@ async fn main() {
                             if join.focus == 1 {
                                 join.code =
                                     t.chars().filter(|c| c.is_ascii_digit()).take(4).collect();
-                            } else {
+                            } else if join.focus == 0 {
                                 join.addr = t
                                     .trim()
                                     .chars()
@@ -5471,6 +6514,12 @@ async fn main() {
                             if c.is_ascii_digit() && join.code.len() < 4 {
                                 join.code.push(c);
                             }
+                        } else if join.focus == 2 {
+                            if (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                                && settings.name.len() < 12
+                            {
+                                settings.name.push(c);
+                            }
                         } else if (c.is_ascii_alphanumeric() || c == '.' || c == ':' || c == '-')
                             && join.addr.len() < 40
                         {
@@ -5478,14 +6527,20 @@ async fn main() {
                         }
                     }
                     if is_key_pressed(KeyCode::Backspace) {
-                        if join.focus == 1 {
-                            join.code.pop();
-                        } else {
-                            join.addr.pop();
+                        match join.focus {
+                            1 => {
+                                join.code.pop();
+                            }
+                            2 => {
+                                settings.name.pop();
+                            }
+                            _ => {
+                                join.addr.pop();
+                            }
                         }
                     }
                     if is_key_pressed(KeyCode::Tab) {
-                        join.focus ^= 1;
+                        join.focus = (join.focus + 1) % 3;
                     }
                     if click && r_join_addr().contains(m) {
                         join.focus = 0;
@@ -5493,26 +6548,39 @@ async fn main() {
                     if click && r_join_code().contains(m) {
                         join.focus = 1;
                     }
+                    if click && r_join_name().contains(m) {
+                        join.focus = 2;
+                    }
                     if (click && r_join_go().contains(m)) || is_key_pressed(KeyCode::Enter) {
                         join.status = "Connecting...".to_string();
-                        match guest_connect(&join.addr, &join.code) {
+                        match guest_connect(&join.addr, &join.code, &settings.name) {
                             Ok(g) => {
                                 guest = Some(g);
-                                join.status = "Connected — waiting for the host...".to_string();
+                                settings.last_addr = join.addr.clone();
+                                save_settings(&settings);
+                                join.status =
+                                    "Connected — waiting for the host to start...".to_string();
                             }
                             Err(e) => join.status = e,
                         }
                     }
-                }
-                if click && r_join_back().contains(m) {
-                    back = true;
+                    if click && r_join_back().contains(m) {
+                        back = true;
+                    }
                 }
                 if drop_guest {
                     guest = None;
+                    join.view = None;
                 }
-                draw_join_lobby(&join, guest.is_some(), &ui, menu_time);
+                if let Some(gn) = &guest {
+                    draw_guest_lobby(&join, gn.seat, &settings, &ui, lobby_name_edit, menu_time);
+                } else {
+                    draw_join_lobby(&join, &settings, &ui, menu_time);
+                }
                 if back {
                     guest = None;
+                    join.view = None;
+                    lobby_name_edit = false;
                     screen = Screen::Menu;
                 }
             }
@@ -5619,6 +6687,9 @@ mod tests {
             humans: 1,
             teams,
             team: assign_teams(players, 1, teams),
+            names: Vec::new(),
+            absent: vec![false; players],
+            turn_timer: TURN_SECS,
             difficulty: Difficulty::Normal,
             personas: vec![Persona::Aggressive; players],
             seed: 0,
@@ -5658,17 +6729,43 @@ mod tests {
 
     #[test]
     fn teams_assign_choice_and_fill() {
-        // the human picks team B (1); bots cycle through the rest
+        // the human picks team B (1); bots keep the sides balanced
         let cfg = TeamCfg { my_team: 1, ..TEAMS_FF };
-        assert_eq!(assign_teams(5, 1, cfg), vec![1, 0, 1, 0, 1]);
-        // three teams, human on C (2)
+        assert_eq!(assign_teams(5, 1, cfg), vec![1, 0, 0, 1, 0]);
+        // three teams, human on C (2): bots fill A and B first
         let cfg = TeamCfg { count: 3, my_team: 2, ..TEAMS_FF };
-        assert_eq!(assign_teams(6, 1, cfg), vec![2, 0, 1, 2, 0, 1]);
+        assert_eq!(assign_teams(6, 1, cfg), vec![2, 0, 1, 0, 1, 2]);
         // humans vs bots: both humans together, every bot on the other side
         let cfg = TeamCfg { hvb: true, ..TEAMS_FF };
         assert_eq!(assign_teams(5, 2, cfg), vec![0, 0, 1, 1, 1]);
         // all-human lobby cannot be humans-vs-bots; falls back to the cycle
         assert_eq!(assign_teams(4, 4, cfg), vec![0, 1, 0, 1]);
+        // explicit picks win: two humans both on team A, bots balance
+        let picks = [Some(0), Some(0)];
+        assert_eq!(fill_teams(4, 2, TEAMS_FF, &picks), vec![0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn color_pick_takes_over_that_position() {
+        apply_local_colors(0);
+        let base = gen_map(424242, 4, 1, Difficulty::Normal, TeamCfg::default());
+        let purple: Vec<usize> = (0..base.terrs.len())
+            .filter(|&t| base.terrs[t].owner == 1)
+            .collect();
+        apply_local_colors(1); // pick the purple slot
+        let g = gen_map(424242, 4, 1, Difficulty::Normal, TeamCfg::default());
+        let mine: Vec<usize> = (0..g.terrs.len())
+            .filter(|&t| g.terrs[t].owner == 0)
+            .collect();
+        assert_eq!(purple, mine);
+        apply_local_colors(0);
+    }
+
+    #[test]
+    fn colors_first_come_first_served() {
+        // host picked slot 2, guest wanted 2 too late (None), other guest 0
+        let picks = [Some(2), None, Some(0)];
+        assert_eq!(resolve_colors(5, 3, &picks), vec![2, 1, 0, 3, 4]);
     }
 
     #[test]
