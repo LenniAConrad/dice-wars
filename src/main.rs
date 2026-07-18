@@ -930,11 +930,15 @@ fn gen_map(seed: u64, players: usize, humans: usize, difficulty: Difficulty, tea
     let mut g = Game::new(players, humans.clamp(1, players), difficulty, teams);
     // solo: picking a color means playing that dealt position — the map keeps
     // its look and you take over the territories (and dice) of that color
-    if g.humans == 1 {
-        let colors: Vec<usize> = (0..g.players).map(color_map).collect();
-        apply_position_swap(&mut g, &colors);
-    }
     g.seed = seed;
+    g
+}
+
+// gen_map plus the position swap for THIS machine's current colors
+fn gen_map_local(seed: u64, players: usize, humans: usize, difficulty: Difficulty, teams: TeamCfg) -> Game {
+    let mut g = gen_map(seed, players, humans, difficulty, teams);
+    let colors: Vec<usize> = (0..g.players).map(color_map).collect();
+    apply_position_swap(&mut g, &colors);
     g
 }
 
@@ -3516,11 +3520,7 @@ struct Replay {
 
 impl Replay {
     fn new(src: &Game, saving: bool) -> Self {
-        let mut g = gen_map(src.seed, src.players, src.humans, src.difficulty, src.teams);
-        if src.humans > 1 {
-            let colors: Vec<usize> = (0..src.players).map(color_map).collect();
-            apply_position_swap(&mut g, &colors);
-        }
+        let mut g = gen_map_local(src.seed, src.players, src.humans, src.difficulty, src.teams);
         g.names = src.names.clone();
         g.recording = false;
         g.banner_t = 0.0;
@@ -4020,7 +4020,7 @@ impl Menu {
             humans,
             difficulty,
             seed,
-            preview: gen_map(seed, players, humans, difficulty, TeamCfg::default()),
+            preview: gen_map_local(seed, players, humans, difficulty, TeamCfg::default()),
             editing: false,
             seed_text: String::new(),
             bookmarks: load_bookmarks(),
@@ -4034,7 +4034,7 @@ impl Menu {
     fn regen(&mut self) {
         // the preview only shows the map, which team settings don't affect
         self.preview =
-            gen_map(self.seed, self.players, self.humans, self.difficulty, TeamCfg::default());
+            gen_map_local(self.seed, self.players, self.humans, self.difficulty, TeamCfg::default());
     }
 
     fn commit_seed(&mut self) {
@@ -5524,7 +5524,7 @@ async fn main() {
     let mut screen = Screen::Menu;
     let mut game: Option<Game> = None;
     if std::env::var("DW_AUTOSTART").is_ok() {
-        game = Some(gen_map(menu.seed, menu.players, 1, menu.difficulty, settings.team_cfg()));
+        game = Some(gen_map_local(menu.seed, menu.players, 1, menu.difficulty, settings.team_cfg()));
         screen = Screen::Play;
     }
     let mut replay: Option<Replay> = None;
@@ -5589,7 +5589,7 @@ async fn main() {
                 menu_time += dt;
                 match update_menu(&mut menu, &mut settings, &mut snd_queue, dt) {
                     MenuAction::Start => {
-                        game = Some(gen_map(
+                        game = Some(gen_map_local(
                             menu.seed,
                             menu.players,
                             1,
@@ -5605,6 +5605,23 @@ async fn main() {
                             lobby_picks = LobbyPicks::default();
                             lobby_sync_t = 0.0;
                             lobby_name_edit = false;
+                            // preview switches to the lobby's color layout
+                            let (_tv, cv) = lobby_layout(
+                                &[],
+                                menu.players,
+                                settings.team_cfg(),
+                                &lobby_picks,
+                                settings.color,
+                            );
+                            let mut g0 = gen_map(
+                                menu.seed,
+                                menu.players,
+                                1,
+                                menu.difficulty,
+                                TeamCfg::default(),
+                            );
+                            apply_position_swap(&mut g0, &cv);
+                            menu.preview = g0;
                             screen = Screen::HostLobby;
                         }
                         Err(_) => menu.host_err = 4.0,
@@ -5977,7 +5994,7 @@ async fn main() {
                                         awaiting.clear();
                                         *g = ng;
                                     } else {
-                                        *g = gen_map(
+                                        *g = gen_map_local(
                                             menu.seed,
                                             menu.players,
                                             1,
@@ -6007,7 +6024,7 @@ async fn main() {
                 } else if is_key_pressed(KeyCode::R) && guest.is_none() {
                     if g.over.is_some() && host.is_none() {
                         menu.seed = random_seed();
-                        *g = gen_map(
+                        *g = gen_map_local(
                             menu.seed,
                             menu.players,
                             1,
@@ -6320,6 +6337,15 @@ async fn main() {
                 }
                 // keep every guest's lobby view fresh
                 lobby_sync_t += dt;
+                if dirty {
+                    // the preview shows who plays where under the current colors
+                    let occ = h.occupied();
+                    let (_tv, cv) =
+                        lobby_layout(&occ, menu.players, settings.team_cfg(), &lobby_picks, settings.color);
+                    let mut g = gen_map(menu.seed, menu.players, 1, menu.difficulty, TeamCfg::default());
+                    apply_position_swap(&mut g, &cv);
+                    menu.preview = g;
+                }
                 if dirty || lobby_sync_t >= 1.5 {
                     lobby_sync_t = 0.0;
                     let line = lobby_line(h, &menu, &settings, &lobby_picks);
@@ -6364,6 +6390,7 @@ async fn main() {
                 if cancel {
                     host = None;
                     lobby_name_edit = false;
+                    menu.regen(); // back to the solo color layout
                     screen = Screen::Menu;
                 }
             }
@@ -6419,16 +6446,16 @@ async fn main() {
                                 let teams = it.next().map(parse_csv_usize).unwrap_or_default();
                                 let colors = it.next().map(parse_csv_usize).unwrap_or_default();
                                 let names = it.next().map(parse_names_csv).unwrap_or_default();
-                                if join.preview_key != (seed, players) {
-                                    join.preview = Some(gen_map(
-                                        seed,
-                                        players.clamp(2, MAX_PLAYERS),
-                                        1,
-                                        Difficulty::Normal,
-                                        TeamCfg::default(),
-                                    ));
-                                    join.preview_key = (seed, players);
-                                }
+                                let mut pg = gen_map(
+                                    seed,
+                                    players.clamp(2, MAX_PLAYERS),
+                                    1,
+                                    Difficulty::Normal,
+                                    TeamCfg::default(),
+                                );
+                                apply_position_swap(&mut pg, &colors);
+                                join.preview = Some(pg);
+                                join.preview_key = (seed, players);
                                 join.view = Some(LobbyView {
                                     players,
                                     diff,
@@ -6786,9 +6813,9 @@ mod tests {
     #[test]
     fn color_pick_swaps_position_not_the_map() {
         apply_local_colors(0);
-        let base = gen_map(777, 6, 1, Difficulty::Normal, TeamCfg::default());
+        let base = gen_map_local(777, 6, 1, Difficulty::Normal, TeamCfg::default());
         apply_local_colors(4); // pick a middle slot (sky)
-        let g = gen_map(777, 6, 1, Difficulty::Normal, TeamCfg::default());
+        let g = gen_map_local(777, 6, 1, Difficulty::Normal, TeamCfg::default());
         for i in 0..base.terrs.len() {
             // every territory keeps its on-screen color...
             assert_eq!(color_map(g.terrs[i].owner), base.terrs[i].owner);
