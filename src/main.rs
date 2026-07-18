@@ -322,17 +322,19 @@ const PLAYER_BASE: [Color; MAX_PLAYERS] = [
     Color::new(0.79, 0.66, 0.50, 1.0), // cocoa
 ];
 
-// Okabe-Ito inspired alternative with much larger hue separation
+// Okabe-Ito colors, plus a neutral gray and deep midnight. The ninth color is
+// deliberately very dark instead of another red/brown hue, which collapses
+// into vermillion for many players with red-green color-vision deficiencies.
 const PLAYER_BASE_CB: [Color; MAX_PLAYERS] = [
-    Color::new(0.94, 0.89, 0.26, 1.0), // you: yellow
-    Color::new(0.80, 0.47, 0.65, 1.0), // lavender -> reddish purple
-    Color::new(0.84, 0.37, 0.00, 1.0), // rose -> vermillion
-    Color::new(0.00, 0.62, 0.45, 1.0), // mint -> bluish green
-    Color::new(0.34, 0.71, 0.91, 1.0), // sky -> sky blue
-    Color::new(0.90, 0.62, 0.00, 1.0), // peach -> orange
-    Color::new(0.00, 0.45, 0.70, 1.0), // teal -> blue
-    Color::new(0.45, 0.45, 0.48, 1.0), // plum -> gray
-    Color::new(0.55, 0.40, 0.22, 1.0), // cocoa -> brown
+    Color::new(0.941, 0.894, 0.259, 1.0), // yellow
+    Color::new(0.800, 0.475, 0.655, 1.0), // reddish purple
+    Color::new(0.835, 0.369, 0.000, 1.0), // vermillion
+    Color::new(0.000, 0.620, 0.451, 1.0), // bluish green
+    Color::new(0.337, 0.706, 0.914, 1.0), // sky blue
+    Color::new(0.902, 0.624, 0.000, 1.0), // orange
+    Color::new(0.000, 0.447, 0.698, 1.0), // blue
+    Color::new(0.302, 0.302, 0.302, 1.0), // charcoal
+    Color::new(0.063, 0.063, 0.188, 1.0), // midnight
 ];
 
 static COLORBLIND: AtomicBool = AtomicBool::new(false);
@@ -374,14 +376,19 @@ fn base_color(i: usize) -> Color {
 fn palette(player: usize) -> Palette {
     let idx = color_map(player % MAX_PLAYERS);
     if colorblind_mode() {
-        // vivid, original-Dice-Wars-style saturation with Okabe-Ito hues
+        // Keep the accessible hues vivid; the midnight dice use pale pips so
+        // their face values remain readable on both light and dark themes.
         let base = PLAYER_BASE_CB[idx];
         Palette {
-            fill: mix(base, WHITE, 0.20),
+            fill: mix(base, WHITE, 0.16),
             mid: base,
             dark: darken(base, 0.66),
             light: mix(base, WHITE, 0.40),
-            pip: Color::new(0.13, 0.13, 0.22, 1.0),
+            pip: if idx == MAX_PLAYERS - 1 {
+                Color::new(0.94, 0.95, 1.0, 1.0)
+            } else {
+                Color::new(0.13, 0.13, 0.22, 1.0)
+            },
         }
     } else {
         let base = PLAYER_BASE[idx];
@@ -994,8 +1001,20 @@ impl Game {
             while (N_SEEDS - holes_n) % players != 0 {
                 holes_n += 1;
             }
+            let mut region_sizes = [0usize; N_SEEDS];
+            for &t in &cell_terr {
+                region_sizes[t as usize] += 1;
+            }
+            if region_sizes.iter().filter(|&&size| size < 3).count() > holes_n {
+                continue 'gen;
+            }
             let mut ids: Vec<i32> = (0..N_SEEDS as i32).collect();
             shuffle(&mut ids);
+            // Tiny regions cannot hold a readable dice tower. Always spend
+            // the available holes on those first instead of repeatedly
+            // rebuilding the entire map until a random shuffle happens to
+            // remove every one of them.
+            ids.sort_by_key(|&id| region_sizes[id as usize] >= 3);
             let holes: HashSet<i32> = ids[..holes_n].iter().copied().collect();
             let mut remap = vec![-1i32; N_SEEDS];
             for (new_id, &old) in ids[holes_n..].iter().enumerate() {
@@ -1370,6 +1389,13 @@ impl Game {
             return; // pure replays never end the game themselves
         }
 
+        self.check_game_over();
+    }
+
+    fn check_game_over(&mut self) {
+        if self.over.is_some() {
+            return;
+        }
         let humans_alive = (0..self.humans).filter(|&p| self.count(p) > 0).count();
         if humans_alive == 0 {
             self.over = Some(if self.humans == 1 {
@@ -1518,9 +1544,27 @@ impl Game {
 
     // -------- guest-side application of host events
 
-    fn net_apply_attack(&mut self, a: usize, d: usize, ra: u32, rd: u32, captured: bool) {
-        if a >= self.terrs.len() || d >= self.terrs.len() {
-            return;
+    fn valid_net_attack(&self, a: usize, d: usize, ra: u32, rd: u32, captured: bool) -> bool {
+        let (Some(atk), Some(def)) = (self.terrs.get(a), self.terrs.get(d)) else {
+            return false;
+        };
+        let attacker = atk.owner;
+        a != d
+            && atk.dice > 1
+            && atk.dice <= MAX_DICE
+            && def.dice >= 1
+            && def.dice <= MAX_DICE
+            && attacker == self.current
+            && self.can_target(attacker, def.owner)
+            && atk.neighbors.contains(&d)
+            && (atk.dice..=atk.dice * 6).contains(&ra)
+            && (def.dice..=def.dice * 6).contains(&rd)
+            && captured == (ra > rd)
+    }
+
+    fn net_apply_attack(&mut self, a: usize, d: usize, ra: u32, rd: u32, captured: bool) -> bool {
+        if !self.valid_net_attack(a, d, ra, rd, captured) {
+            return false;
         }
         let ad = split_sum(ra, self.terrs[a].dice);
         let dd = split_sum(rd, self.terrs[d].dice);
@@ -1542,12 +1586,20 @@ impl Game {
         self.selected = None;
         self.turn_timer = TURN_SECS;
         self.snd.push(Snd::Roll);
+        true
     }
 
     // instant attack used while replaying a reconnect backlog
-    fn net_apply_attack_fast(&mut self, a: usize, d: usize, ra: u32, rd: u32, captured: bool) {
-        if a >= self.terrs.len() || d >= self.terrs.len() {
-            return;
+    fn net_apply_attack_fast(
+        &mut self,
+        a: usize,
+        d: usize,
+        ra: u32,
+        rd: u32,
+        captured: bool,
+    ) -> bool {
+        if !self.valid_net_attack(a, d, ra, rd, captured) {
+            return false;
         }
         if self.recording {
             self.events.push(RepEvent::Attack { a, d, ra, rd, captured });
@@ -1557,11 +1609,35 @@ impl Game {
             self.terrs[d].dice = self.terrs[a].dice.saturating_sub(1).max(1);
         }
         self.terrs[a].dice = 1;
+        let sound_count = self.snd.len();
+        self.check_game_over();
+        self.snd.truncate(sound_count);
+        true
     }
 
-    fn net_apply_reinforce(&mut self, player: usize, lands: Vec<usize>) {
+    fn net_apply_reinforce(&mut self, player: usize, lands: Vec<usize>) -> bool {
+        if player >= self.players
+            || player >= self.reserve.len()
+            || player != self.current
+        {
+            return false;
+        }
         // mirror the host's stock arithmetic so displays stay in sync
         let n = self.largest_region(player) + self.reserve[player];
+        if lands.len() > n as usize {
+            return false;
+        }
+        let mut additions: HashMap<usize, u32> = HashMap::new();
+        for &t in &lands {
+            let Some(terr) = self.terrs.get(t) else {
+                return false;
+            };
+            let add = additions.entry(t).or_insert(0);
+            *add += 1;
+            if terr.owner != player || terr.dice.saturating_add(*add) > MAX_DICE {
+                return false;
+            }
+        }
         let mut placed = 0u32;
         let mut placed_list: Vec<usize> = Vec::new();
         for t in lands {
@@ -1584,6 +1660,7 @@ impl Game {
             self.snd.push(Snd::Reinforce);
         }
         self.advance_turn();
+        true
     }
 
     // Pick the AI's next attack based on its personality and the difficulty.
@@ -1607,6 +1684,14 @@ impl Game {
         if self.difficulty == Difficulty::Hard {
             // hard bots keep the pressure up regardless of temperament
             min_adv = (min_adv - 1).max(0);
+        }
+        // a saturated board must never stall: with every stack full (or a
+        // reserve overflowing) the bot attacks even at even odds
+        let stuck = self.reserve[cur] >= 8
+            || (0..self.terrs.len())
+                .all(|t| self.terrs[t].owner != cur || self.terrs[t].dice == MAX_DICE);
+        if stuck {
+            min_adv = min_adv.min(0);
         }
 
         // who is currently winning (for the schemer and the shared instinct):
@@ -1665,10 +1750,12 @@ impl Game {
                 let adv = ta.dice as i32 - td.dice as i32;
                 // big stacks may gamble on even odds when bold enough
                 let allow_even = adv == 0
-                    && self.difficulty != Difficulty::Easy
-                    && (ta.dice == MAX_DICE
-                        || (self.difficulty == Difficulty::Hard && ta.dice >= 6))
-                    && (persona == Persona::Aggressive || self.difficulty == Difficulty::Hard);
+                    && ((stuck && ta.dice == MAX_DICE)
+                        || (self.difficulty != Difficulty::Easy
+                            && (ta.dice == MAX_DICE
+                                || (self.difficulty == Difficulty::Hard && ta.dice >= 6))
+                            && (persona == Persona::Aggressive
+                                || self.difficulty == Difficulty::Hard)));
                 if adv < min_adv && !allow_even {
                     continue;
                 }
@@ -1677,6 +1764,7 @@ impl Game {
                 if threat > 0.45
                     && !is_lead(td.owner)
                     && adv < 2
+                    && !stuck
                     && self.difficulty != Difficulty::Easy
                 {
                     continue;
@@ -2720,14 +2808,55 @@ fn draw_game(game: &Game, ui: &Ui, settings: &Settings) {
 // broadcasts the resulting events (the same RepEvents replays use).
 
 const NET_PORT_DEFAULT: u16 = 7777;
-const NET_PROTO: &str = "6"; // bumped whenever map generation or messages change
+const NET_PROTO: &str = "7"; // bumped whenever map generation or messages change
+const NET_ROOM_CODE_LEN: usize = 6;
+const NET_AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const NET_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(75);
+const NET_EVENT_QUEUE: usize = 256;
+const NET_MAX_INTENTS_PER_SEC: u32 = 60;
+const NET_MAX_TRACKED_IPS: usize = 4096;
+const NET_AUTH_STATE_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+fn secure_random<const N: usize>() -> std::io::Result<[u8; N]> {
+    let mut bytes = [0u8; N];
+    getrandom::fill(&mut bytes).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("operating-system random source failed: {e}"),
+        )
+    })?;
+    Ok(bytes)
+}
+
+fn new_room_code() -> std::io::Result<String> {
+    let value = u32::from_le_bytes(secure_random::<4>()?) % 1_000_000;
+    Ok(format!("{:0width$}", value, width = NET_ROOM_CODE_LEN))
+}
+
+fn new_reconnect_token() -> std::io::Result<String> {
+    Ok(secure_random::<16>()?
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
 
 fn csv_usize(v: &[usize]) -> String {
     v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
 }
 
 fn parse_csv_usize(s: &str) -> Vec<usize> {
-    s.split(',').filter_map(|x| x.parse().ok()).collect()
+    s.split(',')
+        .take(MAX_PLAYERS)
+        .filter_map(|x| x.parse().ok())
+        .collect()
+}
+
+fn parse_reinforcement_lands(s: &str) -> Option<Vec<usize>> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() > N_SEEDS * MAX_DICE as usize {
+        return None;
+    }
+    parts.into_iter().map(|x| x.parse().ok()).collect()
 }
 
 // what every human picked in the lobby, keyed by 1-based lobby seat
@@ -2792,28 +2921,37 @@ fn idx_diff(i: usize) -> Difficulty {
     }
 }
 
-fn send_net_line(stream: &mut std::net::TcpStream, line: &str) {
+fn write_net_line(stream: &mut std::net::TcpStream, line: &str) -> std::io::Result<()> {
     use std::io::Write;
-    let _ = stream.write_all(line.as_bytes());
-    let _ = stream.write_all(b"\n");
+    stream
+        .write_all(line.as_bytes())
+        .and_then(|_| stream.write_all(b"\n"))
 }
 
-// read one newline-terminated line with a hard length cap; transient
-// errors (interrupted syscalls, spurious timeouts on Windows) are retried
-// rather than treated as a dead connection
-fn read_net_line(r: &mut std::io::BufReader<std::net::TcpStream>, cap: usize) -> Option<String> {
+fn send_net_line(stream: &mut std::net::TcpStream, line: &str) {
+    let _ = write_net_line(stream, line);
+}
+
+// Read one newline-terminated line with a hard length cap. Interrupted
+// syscalls are retried, but timeouts end the read so a peer cannot occupy a
+// connection slot forever by sending an authentication line one byte at a time.
+fn read_net_line_inner(
+    r: &mut std::io::BufReader<std::net::TcpStream>,
+    cap: usize,
+    deadline: Option<std::time::Instant>,
+) -> Option<String> {
     use std::io::Read;
     let mut buf = Vec::new();
     loop {
+        if let Some(deadline) = deadline {
+            let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
+            r.get_ref().set_read_timeout(Some(remaining)).ok()?;
+        }
         let mut byte = [0u8; 1];
         match r.read(&mut byte) {
             Ok(0) => return None,
-            Err(e) => match e.kind() {
-                std::io::ErrorKind::Interrupted
-                | std::io::ErrorKind::WouldBlock
-                | std::io::ErrorKind::TimedOut => continue,
-                _ => return None,
-            },
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
             Ok(_) => {
                 if byte[0] == b'\n' {
                     return String::from_utf8(buf).ok();
@@ -2825,6 +2963,18 @@ fn read_net_line(r: &mut std::io::BufReader<std::net::TcpStream>, cap: usize) ->
             }
         }
     }
+}
+
+fn read_net_line(r: &mut std::io::BufReader<std::net::TcpStream>, cap: usize) -> Option<String> {
+    read_net_line_inner(r, cap, None)
+}
+
+fn read_net_line_before(
+    r: &mut std::io::BufReader<std::net::TcpStream>,
+    cap: usize,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    read_net_line_inner(r, cap, Some(std::time::Instant::now() + timeout))
 }
 
 enum HostMsg {
@@ -2841,6 +2991,7 @@ struct HostShared {
     banned: HashSet<std::net::IpAddr>,
     attempts: HashMap<std::net::IpAddr, u32>,
     last_try: HashMap<std::net::IpAddr, std::time::Instant>,
+    last_auth_cleanup: std::time::Instant,
     conns: usize,
     started: bool,
 }
@@ -2850,7 +3001,7 @@ struct HostShared {
 struct HostSession {
     code: String,
     shared: std::sync::Arc<std::sync::Mutex<HostShared>>,
-    tx: std::sync::mpsc::Sender<HostMsg>,
+    tx: std::sync::mpsc::SyncSender<HostMsg>,
 }
 
 static HOST_SLOT: std::sync::OnceLock<
@@ -2891,6 +3042,7 @@ impl HostNet {
                 match listener.accept() {
                     Ok((stream, peer)) => {
                         let ip = peer.ip();
+                        let _ = stream.set_write_timeout(Some(NET_WRITE_TIMEOUT));
                         let session = {
                             let guard = slot.lock().unwrap();
                             match guard.as_ref() {
@@ -2903,11 +3055,25 @@ impl HostNet {
                         let (code, shared, tx) = session;
                         {
                             let mut sh = shared.lock().unwrap();
+                            if sh.last_auth_cleanup.elapsed() >= std::time::Duration::from_secs(60) {
+                                sh.last_try.retain(|_, t| t.elapsed() < NET_AUTH_STATE_TTL);
+                                let live: HashSet<std::net::IpAddr> =
+                                    sh.last_try.keys().copied().collect();
+                                sh.attempts.retain(|addr, _| live.contains(addr));
+                                sh.banned.retain(|addr| live.contains(addr));
+                                sh.last_auth_cleanup = std::time::Instant::now();
+                            }
                             // bans, connection cap, 1/sec per-IP rate limit
                             let too_fast = sh.last_try.get(&ip).map_or(false, |t| {
                                 t.elapsed() < std::time::Duration::from_secs(1)
                             });
-                            if sh.banned.contains(&ip) || sh.conns >= 10 || too_fast {
+                            let tracking_full = !sh.last_try.contains_key(&ip)
+                                && sh.last_try.len() >= NET_MAX_TRACKED_IPS;
+                            if sh.banned.contains(&ip)
+                                || sh.conns >= 10
+                                || too_fast
+                                || tracking_full
+                            {
                                 continue;
                             }
                             sh.last_try.insert(ip, std::time::Instant::now());
@@ -2927,8 +3093,8 @@ impl HostNet {
                 }
             });
         }
-        let code = format!("{:04}", gen_range(0, 10000));
-        let (tx, rx) = std::sync::mpsc::channel();
+        let code = new_room_code()?;
+        let (tx, rx) = std::sync::mpsc::sync_channel(NET_EVENT_QUEUE);
         let shared = std::sync::Arc::new(std::sync::Mutex::new(HostShared {
             seats: (0..guests).map(|_| None).collect(),
             gens: vec![0; guests],
@@ -2936,6 +3102,7 @@ impl HostNet {
             banned: HashSet::new(),
             attempts: HashMap::new(),
             last_try: HashMap::new(),
+            last_auth_cleanup: std::time::Instant::now(),
             conns: 0,
             started: false,
         }));
@@ -2991,12 +3158,14 @@ impl HostNet {
     }
 
     fn broadcast(&mut self, line: &str) {
-        use std::io::Write;
         let mut sh = self.shared.lock().unwrap();
         for slot in sh.seats.iter_mut().flatten() {
-            let _ = slot
-                .write_all(line.as_bytes())
-                .and_then(|_| slot.write_all(b"\n"));
+            if write_net_line(slot, line).is_err() {
+                // Wake the client handler so it can clean up the seat and
+                // notify the game loop. A peer that stops reading must never
+                // freeze the render/input thread indefinitely.
+                let _ = slot.shutdown(std::net::Shutdown::Both);
+            }
         }
     }
 
@@ -3012,7 +3181,6 @@ impl HostNet {
         host_color: usize,
         host_name: &str,
     ) -> (usize, Vec<usize>, Vec<usize>, Vec<String>) {
-        use std::io::Write;
         let mut sh = self.shared.lock().unwrap();
         sh.started = true;
         let occupied: Vec<usize> = sh
@@ -3049,8 +3217,7 @@ impl HostNet {
         for (k, &seat) in occupied.iter().enumerate() {
             self.remap.insert(seat, k + 1);
             if let Some(s) = sh.seats[seat - 1].as_mut() {
-                let _ = writeln!(
-                    s,
+                let line = format!(
                     "START {} {} {} {} {} {}",
                     seed,
                     players,
@@ -3059,6 +3226,9 @@ impl HostNet {
                     k + 1,
                     line_tail
                 );
+                if write_net_line(s, &line).is_err() {
+                    let _ = s.shutdown(std::net::Shutdown::Both);
+                }
             }
         }
         let names_clean = names
@@ -3070,7 +3240,6 @@ impl HostNet {
 
     // resend everything a reattached guest missed, then mark it synced
     fn send_resume(&mut self, lobby_seat: usize, g: &Game, seed: u64, diff: Difficulty) {
-        use std::io::Write;
         let mut sh = self.shared.lock().unwrap();
         let Some(&game_seat) = self.remap.get(&lobby_seat) else {
             return;
@@ -3084,8 +3253,7 @@ impl HostNet {
             .collect();
         let absent: Vec<usize> = g.absent.iter().map(|&a| a as usize).collect();
         if let Some(s) = sh.seats[lobby_seat - 1].as_mut() {
-            let _ = writeln!(
-                s,
+            let header = format!(
                 "RESUME {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
                 seed,
                 g.players,
@@ -3102,6 +3270,10 @@ impl HostNet {
                 names.join(","),
                 csv_usize(&absent)
             );
+            if write_net_line(s, &header).is_err() {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+                return;
+            }
             for ev in &g.events {
                 let line = match ev {
                     RepEvent::Attack {
@@ -3117,9 +3289,14 @@ impl HostNet {
                         format!("REINF {} {}", player, ls.join(","))
                     }
                 };
-                let _ = writeln!(s, "{}", line);
+                if write_net_line(s, &line).is_err() {
+                    let _ = s.shutdown(std::net::Shutdown::Both);
+                    return;
+                }
             }
-            let _ = writeln!(s, "SYNCED");
+            if write_net_line(s, "SYNCED").is_err() {
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
         }
     }
 
@@ -3183,12 +3360,11 @@ fn host_handle_client(
     ip: std::net::IpAddr,
     code: String,
     shared: std::sync::Arc<std::sync::Mutex<HostShared>>,
-    tx: std::sync::mpsc::Sender<HostMsg>,
+    tx: std::sync::mpsc::SyncSender<HostMsg>,
 ) {
     let release = |sh: &std::sync::Arc<std::sync::Mutex<HostShared>>| {
         sh.lock().unwrap().conns -= 1;
     };
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
     let mut reader = match stream.try_clone() {
         Ok(s) => std::io::BufReader::new(s),
         Err(_) => return release(&shared),
@@ -3197,7 +3373,7 @@ fn host_handle_client(
     // auth: JOIN <code> for a fresh seat, REJOIN <code> <token> to reclaim one
     let mut rejoin_seat: Option<usize> = None;
     let mut join_name = String::new();
-    let ok = match read_net_line(&mut reader, NET_MAX_LINE) {
+    let ok = match read_net_line_before(&mut reader, NET_MAX_LINE, NET_AUTH_TIMEOUT) {
         Some(l) => {
             let mut it = l.split_whitespace();
             match it.next() {
@@ -3246,6 +3422,18 @@ fn host_handle_client(
         send_net_line(&mut w, "BYE wrong code");
         return;
     }
+    shared.lock().unwrap().attempts.remove(&ip);
+    let fresh_token = if rejoin_seat.is_none() {
+        match new_reconnect_token() {
+            Ok(token) => Some(token),
+            Err(_) => {
+                send_net_line(&mut w, "BYE secure random source unavailable");
+                return release(&shared);
+            }
+        }
+    } else {
+        None
+    };
     let seat = if let Some(s) = rejoin_seat {
         Some(s)
     } else {
@@ -3277,11 +3465,7 @@ fn host_handle_client(
     } else {
         // fresh join: issue the reconnect token
         let token = {
-            let t = format!(
-                "{:08x}{:08x}",
-                gen_range(0u32, u32::MAX),
-                gen_range(0u32, u32::MAX)
-            );
+            let t = fresh_token.expect("fresh joins always create a token");
             let mut sh = shared.lock().unwrap();
             sh.tokens.insert(t.clone(), seat);
             t
@@ -3289,6 +3473,8 @@ fn host_handle_client(
         send_net_line(&mut w, &format!("WELCOME {} {}", seat, token));
         let _ = tx.send(HostMsg::Joined(seat, join_name));
     }
+    let mut intent_window = std::time::Instant::now();
+    let mut intents_in_window = 0u32;
     loop {
         use std::io::Read;
         let mut buf = Vec::new();
@@ -3325,8 +3511,18 @@ fn host_handle_client(
             eprintln!("CLIENT_READ_END seat {} reason {}", seat, why);
             break;
         }
-        if let Ok(l) = String::from_utf8(buf) {
-            let _ = tx.send(HostMsg::Intent(seat, l));
+        if intent_window.elapsed() >= std::time::Duration::from_secs(1) {
+            intent_window = std::time::Instant::now();
+            intents_in_window = 0;
+        }
+        intents_in_window += 1;
+        let Ok(l) = String::from_utf8(buf) else {
+            break;
+        };
+        if intents_in_window > NET_MAX_INTENTS_PER_SEC
+            || tx.try_send(HostMsg::Intent(seat, l)).is_err()
+        {
+            break;
         }
     }
     {
@@ -3358,6 +3554,15 @@ struct GuestNet {
     rec_rx: Option<std::sync::mpsc::Receiver<Result<NetParts, String>>>,
 }
 
+fn reject_invalid_host_data(g: &mut Game, gn: &mut GuestNet) {
+    gn.pending.clear();
+    gn.catching_up = false;
+    let _ = gn.stream.shutdown(std::net::Shutdown::Both);
+    g.battle = None;
+    g.over = Some("Disconnected — host sent invalid game data".to_string());
+    g.banner_t = 0.0;
+}
+
 // spawn a reader thread over a connected socket, yielding its line channel
 fn spawn_reader(
     stream: &std::net::TcpStream,
@@ -3365,7 +3570,10 @@ fn spawn_reader(
     let mut reader = std::io::BufReader::new(
         stream.try_clone().map_err(|_| "Socket error".to_string())?,
     );
-    let (tx, rx) = std::sync::mpsc::channel();
+    // Bound host-to-guest buffering so an untrusted host cannot grow the
+    // client's memory without limit. Blocking this background reader applies
+    // ordinary TCP backpressure and never stalls the render thread.
+    let (tx, rx) = std::sync::mpsc::sync_channel(NET_EVENT_QUEUE);
     std::thread::spawn(move || loop {
         match read_net_line(&mut reader, NET_MAX_HOST_LINE) {
             Some(l) => {
@@ -3404,11 +3612,14 @@ fn spawn_reconnect(
                 &sock,
                 std::time::Duration::from_secs(3),
             ) {
+                let _ = stream.set_write_timeout(Some(NET_WRITE_TIMEOUT));
                 let mut w = match stream.try_clone() {
                     Ok(w) => w,
                     Err(_) => continue,
                 };
-                send_net_line(&mut w, &format!("REJOIN {} {}", code, token));
+                if write_net_line(&mut w, &format!("REJOIN {} {}", code, token)).is_err() {
+                    continue;
+                }
                 if let Ok(lines) = spawn_reader(&stream) {
                     let _ = tx.send(Ok((w, lines)));
                     return;
@@ -3431,12 +3642,18 @@ fn guest_connect(addr: &str, code: &str, name: &str) -> Result<GuestNet, String>
     let sock: std::net::SocketAddr = full.parse().map_err(|_| "Bad address".to_string())?;
     let stream = std::net::TcpStream::connect_timeout(&sock, std::time::Duration::from_secs(5))
         .map_err(|_| "Could not connect — wrong address, or firewall blocking port 7777".to_string())?;
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(8)));
+    let _ = stream.set_write_timeout(Some(NET_WRITE_TIMEOUT));
     let mut w = stream.try_clone().map_err(|_| "Socket error".to_string())?;
-    send_net_line(&mut w, &format!("JOIN {} {} {}", code, NET_PROTO, clean_name(name)));
+    write_net_line(&mut w, &format!("JOIN {} {} {}", code, NET_PROTO, clean_name(name)))
+        .map_err(|_| "Could not send join request".to_string())?;
     let mut reader =
         std::io::BufReader::new(stream.try_clone().map_err(|_| "Socket error".to_string())?);
-    let hello = read_net_line(&mut reader, NET_MAX_HOST_LINE).ok_or_else(|| {
+    let hello = read_net_line_before(
+        &mut reader,
+        NET_MAX_HOST_LINE,
+        std::time::Duration::from_secs(8),
+    )
+    .ok_or_else(|| {
         "Host unreachable — check the code, and the host's firewall (port 7777)".to_string()
     })?;
     let mut it = hello.split_whitespace();
@@ -3469,38 +3686,53 @@ fn guest_connect(addr: &str, code: &str, name: &str) -> Result<GuestNet, String>
     })
 }
 
+fn spawn_guest_connect(
+    addr: String,
+    code: String,
+    name: String,
+) -> std::sync::mpsc::Receiver<Result<GuestNet, String>> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(guest_connect(&addr, &code, &name));
+    });
+    rx
+}
+
 // miniquad's clipboard is flaky on Linux desktops; fall back to the
 // standard clipboard tools when they exist
 fn copy_to_clipboard(text: &str) {
     miniquad::window::clipboard_set(text);
     #[cfg(target_os = "linux")]
     {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-        for (cmd, args) in [
-            ("xclip", vec!["-selection", "clipboard"]),
-            ("wl-copy", vec![]),
-            ("xsel", vec!["-ib"]),
-        ] {
-            if let Ok(mut child) = Command::new(cmd)
-                .args(&args)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                let ok = child
-                    .stdin
-                    .as_mut()
-                    .map(|s| s.write_all(text.as_bytes()).is_ok())
-                    .unwrap_or(false);
-                drop(child.stdin.take());
-                let _ = child.wait();
-                if ok {
-                    return;
+        let text = text.to_string();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+            for (cmd, args) in [
+                ("xclip", vec!["-selection", "clipboard"]),
+                ("wl-copy", vec![]),
+                ("xsel", vec!["-ib"]),
+            ] {
+                if let Ok(mut child) = Command::new(cmd)
+                    .args(&args)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                {
+                    let ok = child
+                        .stdin
+                        .as_mut()
+                        .map(|s| s.write_all(text.as_bytes()).is_ok())
+                        .unwrap_or(false);
+                    drop(child.stdin.take());
+                    let _ = child.wait();
+                    if ok {
+                        break;
+                    }
                 }
             }
-        }
+        });
     }
 }
 
@@ -4867,10 +5099,13 @@ struct JoinUi {
     my_color: Option<usize>,
     preview: Option<Game>,
     preview_key: (u64, usize),
+    preview_colors: Vec<usize>,
+    connect_rx: Option<std::sync::mpsc::Receiver<Result<GuestNet, String>>>,
 }
 
 fn parse_names_csv(s: &str) -> Vec<String> {
     s.split(',')
+        .take(MAX_PLAYERS)
         .map(|n| if n == "-" { String::new() } else { clean_name(n) })
         .collect()
 }
@@ -4905,17 +5140,21 @@ fn build_guest_game(
     team_v: Vec<usize>,
     names: Vec<String>,
 ) -> Game {
-    let mut g = gen_map(seed, players.clamp(2, MAX_PLAYERS), humans, idx_diff(di), teams);
+    let players = players.clamp(2, MAX_PLAYERS);
+    let humans = humans.clamp(1, players);
+    let mut teams = teams;
+    teams.count = teams.count.clamp(2, MAX_TEAMS);
+    let mut g = gen_map(seed % SEED_MOD, players, humans, idx_diff(di), teams);
     if team_v.len() == g.players {
-        g.team = team_v;
+        g.team = team_v.into_iter().map(|t| t % teams.count).collect();
     }
-    g.names = names;
+    g.names = names.into_iter().take(humans).map(|n| clean_name(&n)).collect();
     apply_colors(colors);
     if g.humans > 1 {
         apply_position_swap(&mut g, colors);
     }
     g.net_guest = true;
-    g.my_seat = seat;
+    g.my_seat = seat.min(players - 1);
     g
 }
 
@@ -5750,7 +5989,8 @@ async fn main() {
                     if do_ping {
                         h.broadcast("PING");
                     }
-                    while let Ok(msg) = h.rx.try_recv() {
+                    for _ in 0..NET_EVENT_QUEUE {
+                        let Ok(msg) = h.rx.try_recv() else { break };
                         match msg {
                             HostMsg::Intent(lobby_seat, line) => {
                                 let Some(&seat) = h.remap.get(&lobby_seat) else {
@@ -5854,13 +6094,17 @@ async fn main() {
                             }
                         }
                     }
-                    while let Ok(l) = gn.rx.try_recv() {
+                    for _ in 0..NET_EVENT_QUEUE {
+                        let Ok(l) = gn.rx.try_recv() else { break };
                         let mut it = l.split_whitespace();
                         match it.next() {
                             Some("ATK") => {
-                                let v: Vec<u32> =
-                                    it.filter_map(|x| x.parse().ok()).collect();
-                                if v.len() == 5 {
+                                let v: Result<Vec<u32>, _> = it.map(str::parse).collect();
+                                if let Ok(v) = v {
+                                    if v.len() != 5 || v[4] > 1 {
+                                        reject_invalid_host_data(g, gn);
+                                        break;
+                                    }
                                     gn.pending.push_back(RepEvent::Attack {
                                         a: v[0] as usize,
                                         d: v[1] as usize,
@@ -5868,20 +6112,25 @@ async fn main() {
                                         rd: v[3],
                                         captured: v[4] == 1,
                                     });
+                                } else {
+                                    reject_invalid_host_data(g, gn);
+                                    break;
                                 }
                             }
                             Some("REINF") => {
-                                let player: usize =
-                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-                                let lands: Vec<usize> = it
-                                    .next()
-                                    .map(|csv| {
-                                        csv.split(',')
-                                            .filter_map(|x| x.parse().ok())
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
-                                gn.pending.push_back(RepEvent::Reinforce { player, lands });
+                                let player = it.next().and_then(|v| v.parse::<usize>().ok());
+                                let lands = match it.next() {
+                                    Some(csv) => parse_reinforcement_lands(csv),
+                                    None => Some(Vec::new()),
+                                };
+                                if let (Some(player), Some(lands), None) =
+                                    (player, lands, it.next())
+                                {
+                                    gn.pending.push_back(RepEvent::Reinforce { player, lands });
+                                } else {
+                                    reject_invalid_host_data(g, gn);
+                                    break;
+                                }
                             }
                             Some("PING") => {}
                             Some("RESUME") => {
@@ -5900,11 +6149,11 @@ async fn main() {
                                     parse_start_tail(&mut it);
                                 let absent: Vec<usize> =
                                     it.next().map(parse_csv_usize).unwrap_or_default();
-                                gn.seat = seat;
                                 let mut ng = build_guest_game(
                                     seed, players, humans, di, seat, &colors, teams,
                                     team_v, names,
                                 );
+                                gn.seat = ng.my_seat;
                                 if absent.len() == ng.players {
                                     ng.absent = absent.iter().map(|&a| a == 1).collect();
                                 }
@@ -5929,13 +6178,14 @@ async fn main() {
                                     it.next().and_then(|v| v.parse().ok()).unwrap_or(gn.seat);
                                 let (colors, teams, team_v, names) =
                                     parse_start_tail(&mut it);
-                                gn.seat = seat;
                                 gn.pending.clear();
                                 gn.catching_up = false;
-                                *g = build_guest_game(
+                                let ng = build_guest_game(
                                     seed, players, humans, di, seat, &colors, teams,
                                     team_v, names,
                                 );
+                                gn.seat = ng.my_seat;
+                                *g = ng;
                                 g.push_log("The host started a new round!".to_string());
                                 g.snd.push(Snd::Turn);
                             }
@@ -5984,20 +6234,24 @@ async fn main() {
                         // while catching up, apply events instantly
                         if gn.catching_up {
                             while let Some(ev) = gn.pending.pop_front() {
-                                match ev {
+                                let valid = match ev {
                                     RepEvent::Attack { a, d, ra, rd, captured } => {
                                         g.net_apply_attack_fast(a, d, ra, rd, captured)
                                     }
                                     RepEvent::Reinforce { player, lands } => {
                                         g.net_apply_reinforce(player, lands)
                                     }
+                                };
+                                if !valid {
+                                    reject_invalid_host_data(g, gn);
+                                    break;
                                 }
                             }
                         }
                     }
                     if g.battle.is_none() && g.over.is_none() {
                         if let Some(ev) = gn.pending.pop_front() {
-                            match ev {
+                            let valid = match ev {
                                 RepEvent::Attack {
                                     a,
                                     d,
@@ -6008,6 +6262,9 @@ async fn main() {
                                 RepEvent::Reinforce { player, lands } => {
                                     g.net_apply_reinforce(player, lands)
                                 }
+                            };
+                            if !valid {
+                                reject_invalid_host_data(g, gn);
                             }
                         }
                     }
@@ -6174,7 +6431,8 @@ async fn main() {
                 }
                 let h = host.as_mut().unwrap();
                 let mut dirty = false;
-                while let Ok(msg) = h.rx.try_recv() {
+                for _ in 0..NET_EVENT_QUEUE {
+                    let Ok(msg) = h.rx.try_recv() else { break };
                     match msg {
                         HostMsg::Joined(seat, name) => {
                             if !name.is_empty() {
@@ -6458,8 +6716,34 @@ async fn main() {
                 let mut drop_guest = false;
                 let click = is_mouse_button_pressed(MouseButton::Left);
                 let m = mouse_virtual();
+                let connect_done = join.connect_rx.as_ref().and_then(|rx| match rx.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Some(Err("Connection attempt failed".to_string()))
+                    }
+                });
+                if let Some(result) = connect_done {
+                    join.connect_rx = None;
+                    match result {
+                        Ok(mut g) => {
+                            send_net_line(&mut g.stream, &format!("COLOR {}", settings.color));
+                            send_net_line(
+                                &mut g.stream,
+                                &format!("TEAM {}", settings.team_mine),
+                            );
+                            guest = Some(g);
+                            settings.last_addr = join.addr.clone();
+                            save_settings(&settings);
+                            join.status =
+                                "Connected — waiting for the host to start...".to_string();
+                        }
+                        Err(e) => join.status = e,
+                    }
+                }
                 if let Some(gn) = guest.as_mut() {
-                    while let Ok(l) = gn.rx.try_recv() {
+                    for _ in 0..NET_EVENT_QUEUE {
+                        let Ok(l) = gn.rx.try_recv() else { break };
                         let mut it = l.split_whitespace();
                         match it.next() {
                             Some("START") => {
@@ -6471,49 +6755,85 @@ async fn main() {
                                     it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
                                 let di: usize =
                                     it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
-                                if let Some(s) = it.next().and_then(|v| v.parse().ok()) {
-                                    gn.seat = s;
-                                }
+                                let seat = it
+                                    .next()
+                                    .and_then(|v| v.parse().ok())
+                                    .unwrap_or(gn.seat);
                                 let (colors, teams, team_v, names) =
                                     parse_start_tail(&mut it);
                                 let g = build_guest_game(
-                                    seed, players, humans, di, gn.seat, &colors, teams,
+                                    seed, players, humans, di, seat, &colors, teams,
                                     team_v, names,
                                 );
+                                gn.seat = g.my_seat;
                                 game = Some(g);
                                 screen = Screen::Play;
                                 snd_queue.push(Snd::Turn);
                             }
                             Some("LOBBY") => {
-                                let seed: u64 =
-                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-                                let players: usize =
-                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
-                                let diff: usize =
-                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+                                let seed = it
+                                    .next()
+                                    .and_then(|v| v.parse::<u64>().ok())
+                                    .unwrap_or(0)
+                                    % SEED_MOD;
+                                let players = it
+                                    .next()
+                                    .and_then(|v| v.parse::<usize>().ok())
+                                    .unwrap_or(2)
+                                    .clamp(2, MAX_PLAYERS);
+                                let diff = it
+                                    .next()
+                                    .and_then(|v| v.parse::<usize>().ok())
+                                    .unwrap_or(1)
+                                    .min(2);
                                 let ton = it.next() == Some("1");
                                 let thvb = it.next() == Some("1");
-                                let tcount: usize =
-                                    it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
+                                let tcount = it
+                                    .next()
+                                    .and_then(|v| v.parse::<usize>().ok())
+                                    .unwrap_or(2)
+                                    .clamp(2, MAX_TEAMS);
                                 let tff = it.next() == Some("1");
                                 let tbridge = it.next() == Some("1");
-                                let occupied = it
+                                let mut occupied = it
                                     .next()
                                     .map(|x| if x == "-" { Vec::new() } else { parse_csv_usize(x) })
                                     .unwrap_or_default();
-                                let teams = it.next().map(parse_csv_usize).unwrap_or_default();
-                                let colors = it.next().map(parse_csv_usize).unwrap_or_default();
+                                occupied.retain(|&seat| seat > 0 && seat < players);
+                                occupied.sort_unstable();
+                                occupied.dedup();
+                                let teams: Vec<usize> = it
+                                    .next()
+                                    .map(parse_csv_usize)
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .take(players)
+                                    .map(|team| team % tcount)
+                                    .collect();
+                                let colors: Vec<usize> = it
+                                    .next()
+                                    .map(parse_csv_usize)
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .take(players)
+                                    .map(|color| color % MAX_PLAYERS)
+                                    .collect();
                                 let names = it.next().map(parse_names_csv).unwrap_or_default();
-                                let mut pg = gen_map(
-                                    seed,
-                                    players.clamp(2, MAX_PLAYERS),
-                                    1,
-                                    Difficulty::Normal,
-                                    TeamCfg::default(),
-                                );
-                                apply_position_swap(&mut pg, &colors);
-                                join.preview = Some(pg);
-                                join.preview_key = (seed, players);
+                                if join.preview_key != (seed, players)
+                                    || join.preview_colors != colors
+                                {
+                                    let mut pg = gen_map(
+                                        seed,
+                                        players,
+                                        1,
+                                        Difficulty::Normal,
+                                        TeamCfg::default(),
+                                    );
+                                    apply_position_swap(&mut pg, &colors);
+                                    join.preview = Some(pg);
+                                    join.preview_key = (seed, players);
+                                    join.preview_colors = colors.clone();
+                                }
                                 join.view = Some(LobbyView {
                                     players,
                                     diff,
@@ -6614,8 +6934,11 @@ async fn main() {
                     if paste {
                         if let Some(t) = paste_from_clipboard() {
                             if join.focus == 1 {
-                                join.code =
-                                    t.chars().filter(|c| c.is_ascii_digit()).take(4).collect();
+                                join.code = t
+                                    .chars()
+                                    .filter(|c| c.is_ascii_digit())
+                                    .take(NET_ROOM_CODE_LEN)
+                                    .collect();
                             } else if join.focus == 0 {
                                 join.addr = t
                                     .trim()
@@ -6636,7 +6959,7 @@ async fn main() {
                             continue; // don't type the 'v' from ctrl+v
                         }
                         if join.focus == 1 {
-                            if c.is_ascii_digit() && join.code.len() < 4 {
+                            if c.is_ascii_digit() && join.code.len() < NET_ROOM_CODE_LEN {
                                 join.code.push(c);
                             }
                         } else if join.focus == 2 {
@@ -6676,24 +6999,16 @@ async fn main() {
                     if click && r_join_name().contains(m) {
                         join.focus = 2;
                     }
-                    if (click && r_join_go().contains(m)) || is_key_pressed(KeyCode::Enter) {
+                    if join.connect_rx.is_none()
+                        && ((click && r_join_go().contains(m))
+                            || is_key_pressed(KeyCode::Enter))
+                    {
                         join.status = "Connecting...".to_string();
-                        match guest_connect(&join.addr, &join.code, &settings.name) {
-                            Ok(mut g) => {
-                                // apply saved preferences in the new lobby
-                                send_net_line(&mut g.stream, &format!("COLOR {}", settings.color));
-                                send_net_line(
-                                    &mut g.stream,
-                                    &format!("TEAM {}", settings.team_mine),
-                                );
-                                guest = Some(g);
-                                settings.last_addr = join.addr.clone();
-                                save_settings(&settings);
-                                join.status =
-                                    "Connected — waiting for the host to start...".to_string();
-                            }
-                            Err(e) => join.status = e,
-                        }
+                        join.connect_rx = Some(spawn_guest_connect(
+                            join.addr.clone(),
+                            join.code.clone(),
+                            settings.name.clone(),
+                        ));
                     }
                     if click && r_join_back().contains(m) {
                         back = true;
@@ -6711,6 +7026,7 @@ async fn main() {
                 if back {
                     guest = None;
                     join.view = None;
+                    join.connect_rx = None;
                     lobby_name_edit = false;
                     screen = Screen::Menu;
                 }
@@ -6849,6 +7165,10 @@ mod tests {
         }
     }
 
+    // gen_map and the color table are process-global: tests touching them
+    // must not run concurrently
+    static GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     const TEAMS_FF: TeamCfg = TeamCfg {
         on: true,
         count: 2,
@@ -6878,6 +7198,7 @@ mod tests {
 
     #[test]
     fn color_pick_swaps_position_not_the_map() {
+        let _g = GLOBALS.lock().unwrap();
         apply_local_colors(0);
         let base = gen_map_local(777, 6, 1, Difficulty::Normal, TeamCfg::default());
         apply_local_colors(4); // pick a middle slot (sky)
@@ -6889,6 +7210,41 @@ mod tests {
             assert_eq!(g.terrs[i].owner == 0, base.terrs[i].owner == 4);
         }
         apply_local_colors(0);
+    }
+
+    #[test]
+    fn saturated_bot_never_stalls() {
+        let mut g = mk_game(&[1, 0], &[(0, 1)], 2, TeamCfg::default());
+        g.current = 1;
+        g.personas[1] = Persona::Defensive; // the most hesitant temperament
+        for t in g.terrs.iter_mut() {
+            t.dice = MAX_DICE;
+        }
+        assert_eq!(g.best_ai_attack(), Some((0, 1)));
+    }
+
+    // the strongest verification: a passive human who only stacks dice must
+    // still be ground down — bots may never deadlock a saturated board
+    #[test]
+    fn bots_always_finish_the_game() {
+        let _g = GLOBALS.lock().unwrap();
+        apply_local_colors(0);
+        let mut g = gen_map(31337, 4, 1, Difficulty::Normal, TeamCfg::default());
+        for _ in 0..30_000 {
+            if g.over.is_some() {
+                break;
+            }
+            if g.current == HUMAN {
+                g.end_turn(); // the human never attacks, only hoards
+            } else if let Some((a, d)) = g.best_ai_attack() {
+                g.begin_attack(a, d);
+                let b = g.battle.take().unwrap();
+                g.apply_battle(b);
+            } else {
+                g.end_turn();
+            }
+        }
+        assert!(g.over.is_some(), "the bots stalled out the game");
     }
 
     #[test]
