@@ -322,19 +322,19 @@ const PLAYER_BASE: [Color; MAX_PLAYERS] = [
     Color::new(0.79, 0.66, 0.50, 1.0), // cocoa
 ];
 
-// Okabe-Ito colors, plus a neutral gray and deep midnight. The ninth color is
-// deliberately very dark instead of another red/brown hue, which collapses
-// into vermillion for many players with red-green color-vision deficiencies.
-const PLAYER_BASE_CB: [Color; MAX_PLAYERS] = [
-    Color::new(0.941, 0.894, 0.259, 1.0), // yellow
-    Color::new(0.800, 0.475, 0.655, 1.0), // reddish purple
-    Color::new(0.835, 0.369, 0.000, 1.0), // vermillion
-    Color::new(0.000, 0.620, 0.451, 1.0), // bluish green
-    Color::new(0.337, 0.706, 0.914, 1.0), // sky blue
-    Color::new(0.902, 0.624, 0.000, 1.0), // orange
-    Color::new(0.000, 0.447, 0.698, 1.0), // blue
-    Color::new(0.302, 0.302, 0.302, 1.0), // charcoal
-    Color::new(0.063, 0.063, 0.188, 1.0), // midnight
+// Protan-safe colors optimized for separation after a full-protanopia
+// simulation. Blue/yellow position and luminance carry the distinctions that
+// would otherwise be lost when reds are perceived weakly.
+const PLAYER_BASE_PROTAN: [Color; MAX_PLAYERS] = [
+    Color::from_rgba(0x90, 0xF0, 0x10, 0xFF), // bright yellow to protan vision
+    Color::from_rgba(0xB0, 0xD0, 0xF0, 0xFF), // pale blue
+    Color::from_rgba(0xF0, 0x30, 0x70, 0xFF), // neutral mid-tone to protan vision
+    Color::from_rgba(0x50, 0x90, 0x10, 0xFF), // ochre to protan vision
+    Color::from_rgba(0x10, 0x90, 0xF0, 0xFF), // sky blue
+    Color::from_rgba(0xF0, 0xB0, 0x90, 0xFF), // pale sand
+    Color::from_rgba(0x10, 0x10, 0xF0, 0xFF), // cobalt
+    Color::from_rgba(0x70, 0x10, 0x70, 0xFF), // deep blue to protan vision
+    Color::from_rgba(0x70, 0x30, 0x10, 0xFF), // dark ochre to protan vision
 ];
 
 static COLORBLIND: AtomicBool = AtomicBool::new(false);
@@ -367,7 +367,7 @@ fn darken(c: Color, f: f32) -> Color {
 
 fn base_color(i: usize) -> Color {
     if colorblind_mode() {
-        PLAYER_BASE_CB[i]
+        PLAYER_BASE_PROTAN[i]
     } else {
         PLAYER_BASE[i]
     }
@@ -376,15 +376,25 @@ fn base_color(i: usize) -> Color {
 fn palette(player: usize) -> Palette {
     let idx = color_map(player % MAX_PLAYERS);
     if colorblind_mode() {
-        // Keep the accessible hues vivid; the midnight dice use pale pips so
-        // their face values remain readable on both light and dark themes.
-        let base = PLAYER_BASE_CB[idx];
+        // Keep the accessible hues vivid. Pale pips on the darker protan-safe
+        // hues preserve face-value contrast on the shaded sides of each die.
+        let base = PLAYER_BASE_PROTAN[idx];
+        let pale_pips = matches!(idx, 2 | 3 | 4 | 6 | 7 | 8);
+        // `fill` is also used behind dark UI labels, so lift darker hues until
+        // those labels remain legible without flattening every map color.
+        let fill_mix = match idx {
+            6 => 0.50,
+            7 => 0.48,
+            8 => 0.43,
+            2 => 0.30,
+            _ => 0.16,
+        };
         Palette {
-            fill: mix(base, WHITE, 0.16),
+            fill: mix(base, WHITE, fill_mix),
             mid: base,
             dark: darken(base, 0.66),
             light: mix(base, WHITE, 0.40),
-            pip: if idx == MAX_PLAYERS - 1 {
+            pip: if pale_pips {
                 Color::new(0.94, 0.95, 1.0, 1.0)
             } else {
                 Color::new(0.13, 0.13, 0.22, 1.0)
@@ -1564,7 +1574,8 @@ impl Game {
             return false;
         };
         let attacker = atk.owner;
-        a != d
+        self.over.is_none()
+            && a != d
             && atk.dice > 1
             && atk.dice <= MAX_DICE
             && def.dice >= 1
@@ -1631,7 +1642,8 @@ impl Game {
     }
 
     fn net_apply_reinforce(&mut self, player: usize, lands: Vec<usize>) -> bool {
-        if player >= self.players
+        if self.over.is_some()
+            || player >= self.players
             || player >= self.reserve.len()
             || player != self.current
         {
@@ -2279,11 +2291,17 @@ fn draw_board(game: &Game, ui: &Ui, chances: bool) {
         let attackable = game.selected.map_or(false, |s| {
             game.can_target(game.current, terr.owner) && game.terrs[s].neighbors.contains(&t)
         });
+        let protected_ally = terr.owner != game.current && game.same_team(game.current, terr.owner);
         if game.selected == Some(t) {
             col = lighten(col, 0.38 + 0.1 * (game.time * 6.0).sin());
         } else if game.selected.is_some() && !attackable {
-            // invalid tiles go fully white, only valid targets keep color
-            col = SRF();
+            // Teammates remain identifiable while choosing a target, but are
+            // visibly subdued when friendly fire does not make them valid.
+            col = if protected_ally {
+                mix(col, SRF(), 0.58)
+            } else {
+                SRF()
+            };
         } else if hover == Some(t) && (attackable || selectable) {
             col = lighten(col, 0.2);
         }
@@ -2381,7 +2399,7 @@ fn draw_board(game: &Game, ui: &Ui, chances: bool) {
                 if !game.can_target(game.current, game.terrs[d].owner) {
                     continue;
                 }
-                let c = win_chance(game.terrs[sel].dice, game.terrs[d].dice);
+                let c = win_chance_cached(game.terrs[sel].dice, game.terrs[d].dice);
                 let txt = format!("{:.0}%", c * 100.0);
                 let p = game.terrs[d].anchor + vec2(0.0, 32.0);
                 let tw = ui.width(&txt, 12.0);
@@ -2479,7 +2497,7 @@ fn draw_panel(game: &Game, ui: &Ui, settings: &Settings) {
         });
         if let Some(tgt) = target {
             if chances {
-                let c = win_chance(game.terrs[sel].dice, game.terrs[tgt].dice);
+                let c = win_chance_cached(game.terrs[sel].dice, game.terrs[tgt].dice);
                 format!(
                     "You: {} dice  vs  {}: {} dice — {:.0}% win chance. Click to attack!",
                     game.terrs[sel].dice,
@@ -2558,66 +2576,135 @@ fn draw_panel(game: &Game, ui: &Ui, settings: &Settings) {
         ui.text_centered(label, r.x + r.w * 0.5, r.y + 21.0, 13.0, INK());
     }
 
-    draw_player_cards(game, ui, py + 110.0, 0.0);
+    let cards_y = py + if game.teams.on { 123.0 } else { 110.0 };
+    draw_player_cards(game, ui, cards_y, 0.0);
 }
 
-// player cards: symbol, land count, and a stored-dice badge
+// Player cards are grouped spatially in team games. The shared neutral frame
+// and explicit team heading carry alliance information without inventing a
+// second set of team hues.
 fn draw_player_cards(game: &Game, ui: &Ui, cy: f32, right_margin: f32) {
     let chip_w = 88.0;
     let chip_h = 48.0;
-    let gap = 8.0;
-    let total = game.players as f32 * chip_w + (game.players as f32 - 1.0) * gap;
-    let x0 = ((WIN_W - right_margin - total) * 0.5 + 12.0).max(20.0);
-    for p in 0..game.players {
-        let cx = x0 + p as f32 * (chip_w + gap);
-        let alive = game.count(p) > 0;
-        let is_cur = p == game.current && game.over.is_none();
-        if is_cur {
-            draw_round_frame(cx, cy, chip_w, chip_h, 14.0, 3.0, palette(p).fill, BORDER());
-        } else {
-            draw_round_frame(cx, cy, chip_w, chip_h, 14.0, 2.0, SRF(), CARD_EDGE());
-        }
-        let a = if alive { 1.0 } else { 0.25 };
-        draw_symbol(cx + 26.0, cy + 24.0, 9.0, p, with_alpha(palette(p).dark, a));
-        if game.teams.on {
-            // team letter in the card corner so alliances are always visible
-            let ink = if is_cur { INK_ON_FILL } else { INK() };
-            ui.text(
-                team_letter(game.team_of(p)),
-                cx + 7.0,
-                cy + 43.0,
-                11.0,
-                with_alpha(ink, 0.55 * a),
+    let card_gap = if game.teams.on { 6.0 } else { 8.0 };
+    let group_gap = 18.0;
+    let groups: Vec<(Option<usize>, Vec<usize>)> = if game.teams.on {
+        (0..MAX_TEAMS)
+            .filter_map(|team| {
+                let players: Vec<usize> = (0..game.players)
+                    .filter(|&p| game.team_of(p) % MAX_TEAMS == team)
+                    .collect();
+                (!players.is_empty()).then_some((Some(team), players))
+            })
+            .collect()
+    } else {
+        vec![(None, (0..game.players).collect())]
+    };
+    let group_width = |members: &[usize]| {
+        members.len() as f32 * chip_w
+            + members.len().saturating_sub(1) as f32 * card_gap
+    };
+    let total: f32 = groups
+        .iter()
+        .map(|(_, members)| group_width(members))
+        .sum::<f32>()
+        + groups.len().saturating_sub(1) as f32 * group_gap;
+    let center_nudge = if game.teams.on { 0.0 } else { 12.0 };
+    let mut gx = ((WIN_W - right_margin - total) * 0.5 + center_nudge).max(20.0);
+
+    for (team, members) in groups {
+        let gw = group_width(&members);
+        if let Some(team) = team {
+            draw_round_frame(
+                gx - 5.0,
+                cy - 13.0,
+                gw + 10.0,
+                chip_h + 18.0,
+                16.0,
+                1.5,
+                SRF(),
+                with_alpha(BORDER(), 0.62),
             );
+            let label = format!("TEAM {}", team_letter(team));
+            let lw = ui.width(&label, 10.0) + 12.0;
+            draw_round_rect(gx + 8.0, cy - 19.0, lw, 14.0, 7.0, SRF());
+            ui.text_centered(&label, gx + 8.0 + lw * 0.5, cy - 8.0, 10.0, INK());
         }
-        if game.humans > 1 && p == game.my_seat {
-            let bw_ = ui.width("YOU", 10.0) + 10.0;
-            draw_round_rect(cx - 4.0, cy - 8.0, bw_, 16.0, 8.0, BORDER());
-            ui.text_centered("YOU", cx - 4.0 + bw_ * 0.5, cy + 4.0, 10.0, SRF());
-        }
-        if alive {
-            ui.text(
-                &format!("{}", game.count(p)),
-                cx + 46.0,
-                cy + 32.0,
-                24.0,
-                if is_cur { INK_ON_FILL } else { INK() },
-            );
-            if game.reserve[p] > 0 {
-                // stored dice as a small badge on the card corner
-                let bt = format!("+{}", game.reserve[p]);
-                let bw_ = ui.width(&bt, 11.0) + 10.0;
-                let bx = cx + chip_w - bw_ + 6.0;
-                let by = cy - 8.0;
-                draw_round_rect(bx, by, bw_, 17.0, 8.5, palette(p).dark);
-                ui.text_centered(&bt, bx + bw_ * 0.5, by + 13.0, 11.0, WHITE);
+
+        for (slot, p) in members.into_iter().enumerate() {
+            let cx = gx + slot as f32 * (chip_w + card_gap);
+            let alive = game.count(p) > 0;
+            let is_cur = p == game.current && game.over.is_none();
+            if is_cur {
+                draw_round_frame(cx, cy, chip_w, chip_h, 14.0, 3.0, palette(p).fill, BORDER());
+            } else {
+                draw_round_frame(cx, cy, chip_w, chip_h, 14.0, 2.0, SRF(), CARD_EDGE());
+            }
+            let a = if alive { 1.0 } else { 0.25 };
+            draw_symbol(cx + 26.0, cy + 24.0, 9.0, p, with_alpha(palette(p).dark, a));
+            if game.humans > 1 && p == game.my_seat {
+                let bw_ = ui.width("YOU", 10.0) + 10.0;
+                let (bx, by) = if game.teams.on {
+                    (cx + 4.0, cy + chip_h - 12.0)
+                } else {
+                    (cx - 4.0, cy - 8.0)
+                };
+                draw_round_rect(bx, by, bw_, 16.0, 8.0, BORDER());
+                ui.text_centered("YOU", bx + bw_ * 0.5, by + 12.0, 10.0, SRF());
+            }
+            if alive {
+                ui.text(
+                    &format!("{}", game.count(p)),
+                    cx + 46.0,
+                    cy + 32.0,
+                    24.0,
+                    if is_cur { INK_ON_FILL } else { INK() },
+                );
+                if game.reserve[p] > 0 {
+                    // Keep corner badges inside the shared team frame.
+                    let bt = format!("+{}", game.reserve[p]);
+                    let bw_ = ui.width(&bt, 11.0) + 10.0;
+                    let (bx, by) = if game.teams.on {
+                        (cx + chip_w - bw_ - 4.0, cy + chip_h - 12.0)
+                    } else {
+                        (cx + chip_w - bw_ + 6.0, cy - 8.0)
+                    };
+                    draw_round_rect(bx, by, bw_, 17.0, 8.5, palette(p).dark);
+                    ui.text_centered(&bt, bx + bw_ * 0.5, by + 13.0, 11.0, WHITE);
+                }
             }
         }
+        gx += gw + group_gap;
     }
 }
 
 fn r_icon(i: usize) -> Rect {
     Rect::new(WIN_W - 240.0 + i as f32 * 44.0, 18.0, 40.0, 28.0)
+}
+
+fn handle_icon_bar_click(settings: &mut Settings, snd: &mut Vec<Snd>, m: Vec2) -> bool {
+    for i in 0..5 {
+        if !r_icon(i).contains(m) {
+            continue;
+        }
+        match i {
+            0 => settings.muted = !settings.muted,
+            1 => settings.chances = !settings.chances,
+            2 => {
+                settings.colorblind = !settings.colorblind;
+                COLORBLIND.store(settings.colorblind, Ordering::Relaxed);
+            }
+            3 => settings.speed = if settings.speed > 1.5 { 1.0 } else { 2.0 },
+            _ => {
+                settings.dark = !settings.dark;
+                DARK.store(settings.dark, Ordering::Relaxed);
+            }
+        }
+        save_settings(settings);
+        snd.push(Snd::Click);
+        return true;
+    }
+    false
 }
 
 fn draw_icon_bar(settings: &Settings, ui: &Ui, mp: Vec2) {
@@ -2819,6 +2906,8 @@ const NET_ROOM_CODE_LEN: usize = 6;
 const NET_AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const NET_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(75);
 const NET_EVENT_QUEUE: usize = 256;
+const NET_MAX_PENDING_EVENTS: usize = 512;
+const NET_MESSAGES_PER_FRAME: usize = 32;
 const NET_MAX_INTENTS_PER_SEC: u32 = 60;
 const NET_MAX_TRACKED_IPS: usize = 4096;
 const NET_AUTH_STATE_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -2826,17 +2915,26 @@ const NET_AUTH_STATE_TTL: std::time::Duration = std::time::Duration::from_secs(1
 fn secure_random<const N: usize>() -> std::io::Result<[u8; N]> {
     let mut bytes = [0u8; N];
     getrandom::fill(&mut bytes).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("operating-system random source failed: {e}"),
-        )
+        std::io::Error::other(format!("operating-system random source failed: {e}"))
     })?;
     Ok(bytes)
 }
 
 fn new_room_code() -> std::io::Result<String> {
-    let value = u32::from_le_bytes(secure_random::<4>()?) % 1_000_000;
-    Ok(format!("{:0width$}", value, width = NET_ROOM_CODE_LEN))
+    const CODES: u32 = 1_000_000;
+    // Rejection sampling avoids making the lower room codes more likely when
+    // the 32-bit random range is reduced to six decimal digits.
+    const UNBIASED_RANGE: u32 = u32::MAX - u32::MAX % CODES;
+    loop {
+        let value = u32::from_le_bytes(secure_random::<4>()?);
+        if value < UNBIASED_RANGE {
+            return Ok(format!(
+                "{:0width$}",
+                value % CODES,
+                width = NET_ROOM_CODE_LEN
+            ));
+        }
+    }
 }
 
 fn new_reconnect_token() -> std::io::Result<String> {
@@ -3687,7 +3785,16 @@ fn guest_connect(addr: &str, code: &str, name: &str) -> Result<GuestNet, String>
         .next()
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| "Bad reply".to_string())?;
-    let token = it.next().unwrap_or("").to_string();
+    let token = it.next().unwrap_or("");
+    if seat == 0
+        || seat >= MAX_PLAYERS
+        || token.len() != 32
+        || !token.bytes().all(|b| b.is_ascii_hexdigit())
+        || it.next().is_some()
+    {
+        return Err("Bad reply".to_string());
+    }
+    let token = token.to_string();
     let _ = stream.set_read_timeout(None);
     drop(reader);
     let rx = spawn_reader(&stream)?;
@@ -3761,26 +3868,38 @@ fn paste_from_clipboard() -> Option<String> {
             return Some(t);
         }
     }
-    #[cfg(target_os = "linux")]
-    {
-        use std::process::Command;
-        for (cmd, args) in [
-            ("xclip", vec!["-selection", "clipboard", "-o"]),
-            ("wl-paste", vec!["-n"]),
-            ("xsel", vec!["-ob"]),
-        ] {
-            if let Ok(out) = Command::new(cmd).args(&args).output() {
-                if out.status.success() {
-                    if let Ok(s) = String::from_utf8(out.stdout) {
-                        if !s.trim().is_empty() {
-                            return Some(s);
+    None
+}
+
+// External Linux clipboard tools can wait on a slow clipboard owner. Keep
+// that fallback off the render/input thread, just like network connects.
+fn spawn_clipboard_paste() -> std::sync::mpsc::Receiver<Option<String>> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut text = None;
+        #[cfg(target_os = "linux")]
+        {
+            use std::process::Command;
+            for (cmd, args) in [
+                ("xclip", vec!["-selection", "clipboard", "-o"]),
+                ("wl-paste", vec!["-n"]),
+                ("xsel", vec!["-ob"]),
+            ] {
+                if let Ok(out) = Command::new(cmd).args(&args).output() {
+                    if out.status.success() && out.stdout.len() <= 4096 {
+                        if let Ok(s) = String::from_utf8(out.stdout) {
+                            if !s.trim().is_empty() {
+                                text = Some(s);
+                                break;
+                            }
                         }
                     }
                 }
             }
         }
-    }
-    None
+        let _ = tx.send(text);
+    });
+    rx
 }
 
 // figure out the LAN address to show in the host lobby; cached because it
@@ -3806,8 +3925,9 @@ struct Replay {
     events: Vec<RepEvent>,
     idx: usize,
     timer: f32,
-    saving: bool,          // gif-capture mode: no animations, one frame per event
-    frames: Vec<Vec<u8>>,  // 216-color indexed frames
+    saving: bool, // gif-capture mode: no animations, one frame per event
+    gif: Option<GifWriter>,
+    frame_count: usize,
     rt: Option<RenderTarget>,
     saved: Option<String>, // status message once the gif is written
 }
@@ -3818,19 +3938,29 @@ impl Replay {
         g.names = src.names.clone();
         g.recording = false;
         g.banner_t = 0.0;
+        let (gif, saved) = if saving {
+            let path = replay_file(&format!("replay-{:08}.gif", src.seed));
+            match GifWriter::create(&path, GIF_W as u16, GIF_H as u16, 12) {
+                Ok(gif) => (Some(gif), None),
+                Err(_) => (None, Some("Could not create the GIF".to_string())),
+            }
+        } else {
+            (None, None)
+        };
         Replay {
             g,
             events: src.events.clone(),
             idx: 0,
             timer: 0.0,
             saving,
-            frames: Vec::new(),
-            rt: if saving {
+            gif,
+            frame_count: 0,
+            rt: if saving && saved.is_none() {
                 Some(render_target(GIF_W * 2, GIF_H * 2))
             } else {
                 None
             },
-            saved: None,
+            saved,
         }
     }
 
@@ -3995,7 +4125,7 @@ fn gif_lzw(data: &[u8]) -> Vec<u8> {
     };
     let clear: u16 = 256;
     let end: u16 = 257;
-    let mut dict: HashMap<(u16, u8), u16> = HashMap::new();
+    let mut dict: HashMap<(u16, u8), u16> = HashMap::with_capacity(4096);
     let mut code_size: u32 = 9;
     let mut next: u16 = 258;
     bw.put(clear, code_size);
@@ -4033,40 +4163,155 @@ fn gif_lzw(data: &[u8]) -> Vec<u8> {
     bw.out
 }
 
-fn gif_save(path: &str, w: u16, h: u16, frames: &[Vec<u8>], delay_cs: u16) -> std::io::Result<()> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"GIF89a");
-    out.extend_from_slice(&w.to_le_bytes());
-    out.extend_from_slice(&h.to_le_bytes());
-    out.extend_from_slice(&[0xF7, 0, 0]); // global 256-color table
-    for i in 0..256usize {
-        if i < 216 {
-            out.push((i / 36 * 51) as u8);
-            out.push((i / 6 % 6 * 51) as u8);
-            out.push((i % 6 * 51) as u8);
-        } else {
-            out.extend_from_slice(&[0, 0, 0]);
+// Write replay frames as they are captured instead of retaining up to 600
+// full-size indexed frames in memory. A dropped, unfinished writer removes its
+// partial file so cancelled exports do not leave corrupt GIFs behind.
+struct GifWriter {
+    out: Option<std::io::BufWriter<std::fs::File>>,
+    path: String,
+    partial_path: String,
+    w: u16,
+    h: u16,
+    delay_cs: u16,
+    finished: bool,
+}
+
+impl GifWriter {
+    fn create(path: &str, w: u16, h: u16, delay_cs: u16) -> std::io::Result<Self> {
+        if w == 0 || h == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "GIF dimensions must be non-zero",
+            ));
+        }
+        // Never truncate an earlier export. Pick a numbered destination when
+        // needed, and stream into a private partial file that is renamed only
+        // after the GIF trailer has been flushed successfully.
+        let requested = std::path::Path::new(path);
+        let mut final_path = requested.to_path_buf();
+        if final_path.exists() {
+            let parent = requested.parent().unwrap_or_else(|| std::path::Path::new(""));
+            let stem = requested
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("replay");
+            let extension = requested.extension().and_then(|s| s.to_str()).unwrap_or("gif");
+            final_path = (2..=10_000)
+                .map(|n| parent.join(format!("{stem}-{n}.{extension}")))
+                .find(|candidate| !candidate.exists())
+                .ok_or_else(|| std::io::Error::other("too many replay GIFs"))?;
+        }
+        let final_path = final_path.to_string_lossy().into_owned();
+        let (partial_path, file) = loop {
+            let suffix: String = secure_random::<8>()?
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let partial_path = format!("{final_path}.{suffix}.part");
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&partial_path)
+            {
+                Ok(file) => break (partial_path, file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        };
+        let mut writer = Self {
+            out: Some(std::io::BufWriter::new(file)),
+            path: final_path,
+            partial_path,
+            w,
+            h,
+            delay_cs,
+            finished: false,
+        };
+        writer.write_header()?;
+        Ok(writer)
+    }
+
+    fn out(&mut self) -> std::io::Result<&mut std::io::BufWriter<std::fs::File>> {
+        self.out
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("GIF writer is closed"))
+    }
+
+    fn write_header(&mut self) -> std::io::Result<()> {
+        use std::io::Write;
+
+        let w = self.w;
+        let h = self.h;
+        let out = self.out()?;
+        out.write_all(b"GIF89a")?;
+        out.write_all(&w.to_le_bytes())?;
+        out.write_all(&h.to_le_bytes())?;
+        out.write_all(&[0xF7, 0, 0])?; // global 256-color table
+        for i in 0..256usize {
+            if i < 216 {
+                out.write_all(&[
+                    (i / 36 * 51) as u8,
+                    (i / 6 % 6 * 51) as u8,
+                    (i % 6 * 51) as u8,
+                ])?;
+            } else {
+                out.write_all(&[0, 0, 0])?;
+            }
+        }
+        // loop forever
+        out.write_all(&[0x21, 0xFF, 0x0B])?;
+        out.write_all(b"NETSCAPE2.0")?;
+        out.write_all(&[3, 1, 0, 0, 0])
+    }
+
+    fn write_frame(&mut self, frame: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+
+        if frame.len() != usize::from(self.w) * usize::from(self.h) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "GIF frame dimensions do not match the canvas",
+            ));
+        }
+        let compressed = gif_lzw(frame);
+        let w = self.w;
+        let h = self.h;
+        let delay_cs = self.delay_cs;
+        let out = self.out()?;
+        out.write_all(&[0x21, 0xF9, 4, 0])?;
+        out.write_all(&delay_cs.to_le_bytes())?;
+        out.write_all(&[0, 0, 0x2C, 0, 0, 0, 0])?;
+        out.write_all(&w.to_le_bytes())?;
+        out.write_all(&h.to_le_bytes())?;
+        out.write_all(&[0, 8])?; // no local table, 8-bit codes
+        for chunk in compressed.chunks(255) {
+            out.write_all(&[chunk.len() as u8])?;
+            out.write_all(chunk)?;
+        }
+        out.write_all(&[0])
+    }
+
+    fn finish(mut self) -> std::io::Result<String> {
+        use std::io::Write;
+
+        let path = self.path.clone();
+        let out = self.out()?;
+        out.write_all(&[0x3B])?;
+        out.flush()?;
+        self.out.take();
+        std::fs::rename(&self.partial_path, &self.path)?;
+        self.finished = true;
+        Ok(path)
+    }
+}
+
+impl Drop for GifWriter {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.out.take();
+            let _ = std::fs::remove_file(&self.partial_path);
         }
     }
-    // loop forever
-    out.extend_from_slice(&[0x21, 0xFF, 0x0B]);
-    out.extend_from_slice(b"NETSCAPE2.0");
-    out.extend_from_slice(&[3, 1, 0, 0, 0]);
-    for f in frames {
-        out.extend_from_slice(&[0x21, 0xF9, 4, 0]);
-        out.extend_from_slice(&delay_cs.to_le_bytes());
-        out.extend_from_slice(&[0, 0, 0x2C, 0, 0, 0, 0]);
-        out.extend_from_slice(&w.to_le_bytes());
-        out.extend_from_slice(&h.to_le_bytes());
-        out.extend_from_slice(&[0, 8]); // no local table, 8-bit codes
-        for chunk in gif_lzw(f).chunks(255) {
-            out.push(chunk.len() as u8);
-            out.extend_from_slice(chunk);
-        }
-        out.push(0);
-    }
-    out.push(0x3B);
-    std::fs::write(path, out)
 }
 
 // a flat die face: rounded square with the given value's pips
@@ -4615,25 +4860,8 @@ fn update_menu(menu: &mut Menu, settings: &mut Settings, snd: &mut Vec<Snd>, dt:
         snd.push(Snd::Click);
         return MenuAction::None;
     }
-    for i in 0..5 {
-        if r_icon(i).contains(m) {
-            match i {
-                0 => settings.muted = !settings.muted,
-                1 => settings.chances = !settings.chances,
-                2 => {
-                    settings.colorblind = !settings.colorblind;
-                    COLORBLIND.store(settings.colorblind, Ordering::Relaxed);
-                }
-                3 => settings.speed = if settings.speed > 1.5 { 1.0 } else { 2.0 },
-                _ => {
-                    settings.dark = !settings.dark;
-                    DARK.store(settings.dark, Ordering::Relaxed);
-                }
-            }
-            save_settings(settings);
-            snd.push(Snd::Click);
-            return MenuAction::None;
-        }
+    if handle_icon_bar_click(settings, snd, m) {
+        return MenuAction::None;
     }
     let bm_off = menu.bm_scroll as usize;
     for i in 0..menu.bookmarks.len().saturating_sub(bm_off).min(BM_SHOWN) {
@@ -4859,7 +5087,7 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     for i in 0..MAX_PLAYERS {
         let r = r_color(i);
         let base = if colorblind_mode() {
-            PLAYER_BASE_CB[i]
+            PLAYER_BASE_PROTAN[i]
         } else {
             PLAYER_BASE[i]
         };
@@ -5120,6 +5348,27 @@ struct JoinUi {
     preview_key: (u64, usize),
     preview_colors: Vec<usize>,
     connect_rx: Option<std::sync::mpsc::Receiver<Result<GuestNet, String>>>,
+    paste_rx: Option<std::sync::mpsc::Receiver<Option<String>>>,
+    paste_focus: usize,
+}
+
+fn apply_join_paste(join: &mut JoinUi, focus: usize, text: &str) {
+    if focus == 1 {
+        join.code = text
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .take(NET_ROOM_CODE_LEN)
+            .collect();
+    } else if focus == 0 {
+        join.addr = text
+            .trim()
+            .chars()
+            .filter(|c| {
+                c.is_ascii_alphanumeric() || *c == '.' || *c == ':' || *c == '-'
+            })
+            .take(40)
+            .collect();
+    }
 }
 
 fn parse_names_csv(s: &str) -> Vec<String> {
@@ -5212,7 +5461,7 @@ fn r_lobby_ff() -> Rect {
     Rect::new(COL_L - 130.0, 598.0, 170.0, 24.0)
 }
 fn r_lobby_bridge() -> Rect {
-    Rect::new(COL_L + 56.0, 598.0, 190.0, 24.0)
+    Rect::new(COL_L + 40.0, 598.0, 200.0, 24.0)
 }
 fn r_lobby_copy() -> Rect {
     Rect::new(COL_R + 104.0, 152.0, 72.0, 26.0)
@@ -5340,7 +5589,7 @@ fn draw_lobby_settings(
         }
         for (r, label, on) in [
             (r_lobby_ff(), "FRIENDLY FIRE", cfg.ff),
-            (r_lobby_bridge(), "ISLANDS LINK VIA ALLIES", cfg.bridge),
+            (r_lobby_bridge(), "ISLAND LINKS", cfg.bridge),
         ] {
             draw_toggle(r, label, on, ui, if live { m } else { vec2(-1.0, -1.0) });
         }
@@ -5360,6 +5609,7 @@ fn draw_host_lobby(
     draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
     let m = mouse_virtual();
     ui.text_centered("HOSTING", WIN_W * 0.5, 52.0, 32.0, INK());
+    draw_icon_bar(settings, ui, m);
 
     // ---- left: the map and every game setting
     let pv = Rect::new(COL_L - 230.0, 74.0, 460.0, 190.0);
@@ -5973,25 +6223,7 @@ async fn main() {
                 let mut go_menu = false;
                 let click = is_mouse_button_pressed(MouseButton::Left);
                 if click && g.over.is_none() && confirm.is_none() {
-                    let m = mouse_virtual();
-                    if r_icon(0).contains(m) {
-                        settings.muted = !settings.muted;
-                        save_settings(&settings);
-                    } else if r_icon(1).contains(m) {
-                        settings.chances = !settings.chances;
-                        save_settings(&settings);
-                    } else if r_icon(2).contains(m) {
-                        settings.colorblind = !settings.colorblind;
-                        COLORBLIND.store(settings.colorblind, Ordering::Relaxed);
-                        save_settings(&settings);
-                    } else if r_icon(3).contains(m) {
-                        settings.speed = if settings.speed > 1.5 { 1.0 } else { 2.0 };
-                        save_settings(&settings);
-                    } else if r_icon(4).contains(m) {
-                        settings.dark = !settings.dark;
-                        DARK.store(settings.dark, Ordering::Relaxed);
-                        save_settings(&settings);
-                    }
+                    handle_icon_bar_click(&mut settings, &mut snd_queue, mouse_virtual());
                 }
 
                 if autoend && g.current == 0 && g.battle.is_none() && g.over.is_none() {
@@ -6008,7 +6240,7 @@ async fn main() {
                     if do_ping {
                         h.broadcast("PING");
                     }
-                    for _ in 0..NET_EVENT_QUEUE {
+                    for _ in 0..NET_MESSAGES_PER_FRAME {
                         let Ok(msg) = h.rx.try_recv() else { break };
                         match msg {
                             HostMsg::Intent(lobby_seat, line) => {
@@ -6113,7 +6345,7 @@ async fn main() {
                             }
                         }
                     }
-                    for _ in 0..NET_EVENT_QUEUE {
+                    for _ in 0..NET_MESSAGES_PER_FRAME {
                         let Ok(l) = gn.rx.try_recv() else { break };
                         let mut it = l.split_whitespace();
                         match it.next() {
@@ -6121,6 +6353,10 @@ async fn main() {
                                 let v: Result<Vec<u32>, _> = it.map(str::parse).collect();
                                 if let Ok(v) = v {
                                     if v.len() != 5 || v[4] > 1 {
+                                        reject_invalid_host_data(g, gn);
+                                        break;
+                                    }
+                                    if gn.pending.len() >= NET_MAX_PENDING_EVENTS {
                                         reject_invalid_host_data(g, gn);
                                         break;
                                     }
@@ -6145,6 +6381,10 @@ async fn main() {
                                 if let (Some(player), Some(lands), None) =
                                     (player, lands, it.next())
                                 {
+                                    if gn.pending.len() >= NET_MAX_PENDING_EVENTS {
+                                        reject_invalid_host_data(g, gn);
+                                        break;
+                                    }
                                     gn.pending.push_back(RepEvent::Reinforce { player, lands });
                                 } else {
                                     reject_invalid_host_data(g, gn);
@@ -6152,13 +6392,17 @@ async fn main() {
                                 }
                             }
                             Some("RECONNECTED") => {
-                                let _lobby_seat =
+                                let lobby_seat =
                                     it.next().and_then(|v| v.parse::<usize>().ok());
                                 let token = it.next();
-                                if let Some(token) = token.filter(|token| {
-                                    token.len() == 32
-                                        && token.bytes().all(|b| b.is_ascii_hexdigit())
-                                }) {
+                                if let (Some(_), Some(token), None) = (
+                                    lobby_seat.filter(|&seat| seat > 0 && seat < MAX_PLAYERS),
+                                    token.filter(|token| {
+                                        token.len() == 32
+                                            && token.bytes().all(|b| b.is_ascii_hexdigit())
+                                    }),
+                                    it.next(),
+                                ) {
                                     gn.token = token.to_string();
                                 } else {
                                     reject_invalid_host_data(g, gn);
@@ -6464,7 +6708,7 @@ async fn main() {
                 }
                 let h = host.as_mut().unwrap();
                 let mut dirty = false;
-                for _ in 0..NET_EVENT_QUEUE {
+                for _ in 0..NET_MESSAGES_PER_FRAME {
                     let Ok(msg) = h.rx.try_recv() else { break };
                     match msg {
                         HostMsg::Joined(seat, name) => {
@@ -6552,6 +6796,7 @@ async fn main() {
                     while get_char_pressed().is_some() {}
                 }
                 if click2 {
+                    handle_icon_bar_click(&mut settings, &mut snd_queue, m2);
                     if r_lobby_copy().contains(m2) {
                         copy_to_clipboard(&format!("{}:{}", local_ip(), net_port()));
                         copied_t = 1.5;
@@ -6749,6 +6994,20 @@ async fn main() {
                 let mut drop_guest = false;
                 let click = is_mouse_button_pressed(MouseButton::Left);
                 let m = mouse_virtual();
+                let paste_done = join.paste_rx.as_ref().and_then(|rx| match rx.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
+                });
+                if let Some(text) = paste_done {
+                    join.paste_rx = None;
+                    if let Some(text) = text {
+                        let focus = join.paste_focus;
+                        apply_join_paste(&mut join, focus, &text);
+                    } else {
+                        join.status = "Could not read the clipboard".to_string();
+                    }
+                }
                 let connect_done = join.connect_rx.as_ref().and_then(|rx| match rx.try_recv() {
                     Ok(result) => Some(result),
                     Err(std::sync::mpsc::TryRecvError::Empty) => None,
@@ -6775,7 +7034,7 @@ async fn main() {
                     }
                 }
                 if let Some(gn) = guest.as_mut() {
-                    for _ in 0..NET_EVENT_QUEUE {
+                    for _ in 0..NET_MESSAGES_PER_FRAME {
                         let Ok(l) = gn.rx.try_recv() else { break };
                         let mut it = l.split_whitespace();
                         match it.next() {
@@ -6966,24 +7225,13 @@ async fn main() {
                     }
                     if paste {
                         if let Some(t) = paste_from_clipboard() {
-                            if join.focus == 1 {
-                                join.code = t
-                                    .chars()
-                                    .filter(|c| c.is_ascii_digit())
-                                    .take(NET_ROOM_CODE_LEN)
-                                    .collect();
-                            } else if join.focus == 0 {
-                                join.addr = t
-                                    .trim()
-                                    .chars()
-                                    .filter(|c| {
-                                        c.is_ascii_alphanumeric()
-                                            || *c == '.'
-                                            || *c == ':'
-                                            || *c == '-'
-                                    })
-                                    .take(40)
-                                    .collect();
+                            let focus = join.focus;
+                            apply_join_paste(&mut join, focus, &t);
+                        } else if join.paste_rx.is_none() {
+                            join.paste_focus = join.focus;
+                            join.paste_rx = Some(spawn_clipboard_paste());
+                            if cfg!(target_os = "linux") {
+                                join.status = "Reading clipboard...".to_string();
                             }
                         }
                     }
@@ -7077,32 +7325,40 @@ async fn main() {
                     r.step_watch(dt * speed);
                 }
                 if r.saving && r.saved.is_none() {
-                    if r.idx >= r.events.len() {
-                        let path = replay_file(&format!("replay-{:08}.gif", r.g.seed));
-                        r.saved = Some(
-                            match gif_save(&path, GIF_W as u16, GIF_H as u16, &r.frames, 12) {
-                                Ok(()) => format!("Saved {}", path),
-                                Err(_) => "Could not save the GIF".to_string(),
-                            },
-                        );
-                        snd_queue.push(Snd::Reinforce);
-                    } else if let Some(rt) = r.rt.clone() {
-                        // render the frame offscreen and read it back; capturing
-                        // the live screen mid-frame corrupts macroquad's batching
-                        set_camera(&Camera2D {
-                            target: vec2(WIN_W * 0.5, WIN_H * 0.5),
-                            zoom: vec2(2.0 / WIN_W, 2.0 / WIN_H),
-                            render_target: Some(rt.clone()),
-                            ..Default::default()
-                        });
-                        clear_background(BG());
-                        draw_board(&r.g, &ui, false);
-                        draw_panel_replay(&r.g, &ui);
-                        set_camera(&view_camera());
-                        if r.frames.len() < 600 {
+                    if r.frame_count < r.idx.min(600) {
+                        if let Some(rt) = r.rt.clone() {
+                            // Render the frame offscreen and read it back;
+                            // capturing the live screen mid-frame corrupts
+                            // macroquad's batching.
+                            set_camera(&Camera2D {
+                                target: vec2(WIN_W * 0.5, WIN_H * 0.5),
+                                zoom: vec2(2.0 / WIN_W, 2.0 / WIN_H),
+                                render_target: Some(rt.clone()),
+                                ..Default::default()
+                            });
+                            clear_background(BG());
+                            draw_board(&r.g, &ui, false);
+                            draw_panel_replay(&r.g, &ui);
+                            set_camera(&view_camera());
                             let ss = downsample(&rt.texture.get_texture_data(), 2);
-                            r.frames.push(quantize_image(&ss));
+                            let frame = quantize_image(&ss);
+                            match r.gif.as_mut().map(|gif| gif.write_frame(&frame)) {
+                                Some(Ok(())) => r.frame_count += 1,
+                                _ => {
+                                    r.gif.take();
+                                    r.saved = Some("Could not save the GIF".to_string());
+                                }
+                            }
+                        } else {
+                            r.gif.take();
+                            r.saved = Some("Could not render the GIF".to_string());
                         }
+                    } else if r.idx >= r.events.len() {
+                        r.saved = Some(match r.gif.take().map(GifWriter::finish) {
+                            Some(Ok(path)) => format!("Saved {}", path),
+                            _ => "Could not save the GIF".to_string(),
+                        });
+                        snd_queue.push(Snd::Reinforce);
                     }
                 }
                 draw_board(&r.g, &ui, false);
@@ -7247,6 +7503,7 @@ mod tests {
 
     #[test]
     fn saturated_bot_never_stalls() {
+        let _g = GLOBALS.lock().unwrap();
         let mut g = mk_game(&[1, 0], &[(0, 1)], 2, TeamCfg::default());
         g.current = 1;
         g.personas[1] = Persona::Defensive; // the most hesitant temperament
@@ -7285,6 +7542,66 @@ mod tests {
         // host picked slot 2, guest wanted 2 too late (None), other guest 0
         let picks = [Some(2), None, Some(0)];
         assert_eq!(resolve_colors(5, 3, &picks), vec![2, 1, 0, 3, 4]);
+    }
+
+    #[test]
+    fn colorblind_palette_keeps_labels_and_die_pips_contrasting() {
+        let _g = GLOBALS.lock().unwrap();
+        let previous = COLORBLIND.swap(true, Ordering::Relaxed);
+        apply_colors(&(0..MAX_PLAYERS).collect::<Vec<_>>());
+        let luma = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+        let srgb_to_linear = |channel: f32| {
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let linear_to_srgb = |channel: f32| {
+            let encoded = if channel <= 0.003_130_8 {
+                12.92 * channel
+            } else {
+                1.055 * channel.max(0.0).powf(1.0 / 2.4) - 0.055
+            };
+            encoded.clamp(0.0, 1.0)
+        };
+        // Full-severity Machado protanopia transform, applied in linear RGB.
+        let simulate_protan = |c: Color| {
+            let r = srgb_to_linear(c.r);
+            let g = srgb_to_linear(c.g);
+            let b = srgb_to_linear(c.b);
+            Color::new(
+                linear_to_srgb(0.152_286 * r + 1.052_583 * g - 0.204_868 * b),
+                linear_to_srgb(0.114_503 * r + 0.786_281 * g + 0.099_216 * b),
+                linear_to_srgb(-0.003_882 * r - 0.048_116 * g + 1.051_998 * b),
+                1.0,
+            )
+        };
+        let distance = |a: Color, b: Color| {
+            ((a.r - b.r).powi(2) + (a.g - b.g).powi(2) + (a.b - b.b).powi(2)).sqrt()
+        };
+        for player in 0..MAX_PLAYERS {
+            let pal = palette(player);
+            assert!(luma(pal.fill) >= 0.55, "player {player} has a dark label fill");
+            assert!(
+                (luma(pal.mid) - luma(pal.pip)).abs() >= 0.35,
+                "player {player} has low-contrast die pips"
+            );
+        }
+        for (a, &ca) in PLAYER_BASE_PROTAN.iter().enumerate() {
+            for (b, &cb) in PLAYER_BASE_PROTAN.iter().enumerate().skip(a + 1) {
+                assert!(
+                    distance(ca, cb) >= 0.38,
+                    "palette slots {a} and {b} are too similar normally"
+                );
+                assert!(
+                    distance(simulate_protan(ca), simulate_protan(cb)) >= 0.39,
+                    "palette slots {a} and {b} collapse under protanopia"
+                );
+            }
+        }
+        COLORBLIND.store(previous, Ordering::Relaxed);
+        apply_local_colors(0);
     }
 
     #[test]
@@ -7341,5 +7658,297 @@ mod tests {
             t: 0.0,
         });
         assert!(g.over.is_some());
+    }
+
+    #[test]
+    fn generated_maps_keep_core_invariants() {
+        let _g = GLOBALS.lock().unwrap();
+        apply_local_colors(0);
+        for players in 2..=MAX_PLAYERS {
+            for seed in [0, 1, 777, SEED_MOD - 1] {
+                let g = gen_map(seed, players, 1, Difficulty::Normal, TeamCfg::default());
+                let expected = g.terrs.len() / players;
+                assert!(!g.terrs.is_empty());
+                assert_eq!(expected * players, g.terrs.len());
+                for player in 0..players {
+                    assert_eq!(g.count(player), expected);
+                }
+                let mut cells_per_territory = vec![0usize; g.terrs.len()];
+                for &territory in &g.cell_terr {
+                    if territory >= 0 {
+                        cells_per_territory[territory as usize] += 1;
+                    }
+                }
+                assert!(cells_per_territory.iter().all(|&count| count >= 3));
+
+                let mut seen = vec![false; g.terrs.len()];
+                let mut stack = vec![0usize];
+                seen[0] = true;
+                while let Some(t) = stack.pop() {
+                    for &neighbor in &g.terrs[t].neighbors {
+                        if !seen[neighbor] {
+                            seen[neighbor] = true;
+                            stack.push(neighbor);
+                        }
+                    }
+                }
+                assert!(seen.into_iter().all(|reached| reached));
+            }
+        }
+    }
+
+    #[test]
+    fn guest_rejects_invalid_host_events_without_panicking() {
+        let _g = GLOBALS.lock().unwrap();
+        let game = || mk_game(&[0, 1], &[(0, 1)], 2, TeamCfg::default());
+
+        let mut g = game();
+        assert!(!g.net_apply_attack(usize::MAX, 1, 7, 6, true));
+        assert!(g.battle.is_none());
+
+        let mut g = game();
+        assert!(!g.net_apply_attack(0, 1, 1, 6, false));
+        assert!(!g.net_apply_attack(0, 1, 7, 6, false));
+        assert!(g.net_apply_attack(0, 1, 7, 6, true));
+
+        let mut g = game();
+        assert!(!g.net_apply_reinforce(usize::MAX, vec![0]));
+        assert!(!g.net_apply_reinforce(0, vec![1]));
+        assert!(g.net_apply_reinforce(0, vec![0]));
+        assert_eq!(g.terrs[0].dice, 3);
+
+        let mut g = game();
+        g.over = Some("finished".to_string());
+        assert!(!g.net_apply_attack(0, 1, 7, 6, true));
+        assert!(!g.net_apply_reinforce(0, vec![0]));
+    }
+
+    #[test]
+    fn reconnect_backlog_detects_the_final_win() {
+        let mut g = mk_game(&[0, 1], &[(0, 1)], 2, TeamCfg::default());
+        g.net_guest = true;
+        assert!(g.net_apply_attack_fast(0, 1, 7, 6, true));
+        assert!(g.over.is_some());
+    }
+
+    #[test]
+    fn hostile_guest_setup_values_are_normalized() {
+        let _g = GLOBALS.lock().unwrap();
+        let teams = TeamCfg {
+            on: true,
+            count: usize::MAX,
+            ..TeamCfg::default()
+        };
+        let g = build_guest_game(
+            u64::MAX,
+            usize::MAX,
+            usize::MAX,
+            usize::MAX,
+            usize::MAX,
+            &[usize::MAX; MAX_PLAYERS],
+            teams,
+            vec![usize::MAX; MAX_PLAYERS],
+            vec!["name-with-invalid-characters!".to_string(); MAX_PLAYERS + 4],
+        );
+        assert_eq!(g.players, MAX_PLAYERS);
+        assert_eq!(g.humans, MAX_PLAYERS);
+        assert_eq!(g.my_seat, MAX_PLAYERS - 1);
+        assert_eq!(g.names.len(), MAX_PLAYERS);
+        assert!(g.team.iter().all(|&team| team < MAX_TEAMS));
+        assert!(g.names.iter().all(|name| name.len() <= 12));
+    }
+
+    #[test]
+    fn credentials_use_fixed_length_os_random_values() {
+        let room = new_room_code().unwrap();
+        assert_eq!(room.len(), NET_ROOM_CODE_LEN);
+        assert!(room.bytes().all(|b| b.is_ascii_digit()));
+
+        let token = new_reconnect_token().unwrap();
+        assert_eq!(token.len(), 32);
+        assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn gif_writer_streams_frames_and_removes_cancelled_exports() {
+        let unique = new_reconnect_token().unwrap();
+        let path = std::env::temp_dir().join(format!("dice-wars-{unique}.gif"));
+        let path_text = path.to_string_lossy();
+        let mut writer = GifWriter::create(&path_text, 2, 2, 12).unwrap();
+        let temporary = writer.partial_path.clone();
+        assert!(writer.write_frame(&[0, 1, 2]).is_err());
+        writer.write_frame(&[0, 1, 2, 3]).unwrap();
+        assert_eq!(writer.finish().unwrap(), path_text);
+        assert!(!std::path::Path::new(&temporary).exists());
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(b"GIF89a"));
+        assert_eq!(bytes.last(), Some(&0x3B));
+        std::fs::remove_file(&path).unwrap();
+
+        let partial = std::env::temp_dir().join(format!("dice-wars-partial-{unique}.gif"));
+        {
+            let partial_text = partial.to_string_lossy();
+            let mut writer = GifWriter::create(&partial_text, 1, 1, 1).unwrap();
+            writer.write_frame(&[0]).unwrap();
+            let temporary = writer.partial_path.clone();
+            drop(writer);
+            assert!(!std::path::Path::new(&temporary).exists());
+        }
+        assert!(!partial.exists());
+
+        std::fs::write(&path, b"previous export").unwrap();
+        let writer = GifWriter::create(&path_text, 1, 1, 1).unwrap();
+        let numbered_path = writer.path.clone();
+        assert_ne!(numbered_path, path_text);
+        drop(writer);
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous export");
+        assert!(!std::path::Path::new(&numbered_path).exists());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn guest_rejects_malformed_welcome_credentials() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let fake_host = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            assert!(read_net_line_before(
+                &mut reader,
+                NET_MAX_LINE,
+                std::time::Duration::from_secs(1),
+            )
+            .is_some());
+            write_net_line(
+                &mut stream,
+                "WELCOME 999 00000000000000000000000000000000 trailing",
+            )
+            .unwrap();
+        });
+        let result = guest_connect(&addr.to_string(), "123456", "Player");
+        assert!(matches!(result, Err(message) if message == "Bad reply"));
+        fake_host.join().unwrap();
+    }
+
+    #[test]
+    fn host_and_guest_complete_secure_handshake() {
+        let _g = GLOBALS.lock().unwrap();
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        std::env::set_var("DW_PORT", port.to_string());
+
+        let host = HostNet::start(1).unwrap();
+        let guest = guest_connect("127.0.0.1", &host.code, "Test_Player").unwrap();
+        assert_eq!(guest.seat, 1);
+        assert_eq!(guest.token.len(), 32);
+        assert!(guest.token.bytes().all(|b| b.is_ascii_hexdigit()));
+        match host.rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(HostMsg::Joined(1, name)) => assert_eq!(name, "Test_Player"),
+            _ => panic!("host did not receive the authenticated join"),
+        }
+
+        let old_token = guest.token.clone();
+        let _ = guest.stream.shutdown(std::net::Shutdown::Both);
+        drop(guest);
+
+        // A reconnect rotates the bearer token. Replaying the prior token must
+        // no longer be able to take the seat away from its current occupant.
+        host.shared
+            .lock()
+            .unwrap()
+            .last_try
+            .remove(&"127.0.0.1".parse().unwrap());
+        let mut rejoined = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write_net_line(
+            &mut rejoined,
+            &format!("REJOIN {} {}", host.code, old_token),
+        )
+        .unwrap();
+        let mut reply = std::io::BufReader::new(rejoined.try_clone().unwrap());
+        let line = read_net_line_before(
+            &mut reply,
+            NET_MAX_HOST_LINE,
+            std::time::Duration::from_secs(2),
+        )
+        .unwrap();
+        let mut fields = line.split_whitespace();
+        assert_eq!(fields.next(), Some("RECONNECTED"));
+        assert_eq!(fields.next(), Some("1"));
+        let new_token = fields.next().unwrap();
+        assert_ne!(new_token, old_token);
+
+        host.shared
+            .lock()
+            .unwrap()
+            .last_try
+            .remove(&"127.0.0.1".parse().unwrap());
+        let mut replay = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write_net_line(
+            &mut replay,
+            &format!("REJOIN {} {}", host.code, old_token),
+        )
+        .unwrap();
+        let mut rejected = std::io::BufReader::new(replay.try_clone().unwrap());
+        let line = read_net_line_before(
+            &mut rejected,
+            NET_MAX_HOST_LINE,
+            std::time::Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(line.starts_with("BYE "));
+
+        let _ = rejoined.shutdown(std::net::Shutdown::Both);
+        let _ = replay.shutdown(std::net::Shutdown::Both);
+        drop(host);
+        std::env::remove_var("DW_PORT");
+    }
+
+    #[test]
+    fn reinforcement_parser_is_strict_and_bounded() {
+        assert_eq!(parse_reinforcement_lands("1,2,3"), Some(vec![1, 2, 3]));
+        assert_eq!(parse_reinforcement_lands("1,nope,3"), None);
+        let oversized = vec!["0"; N_SEEDS * MAX_DICE as usize + 1].join(",");
+        assert_eq!(parse_reinforcement_lands(&oversized), None);
+    }
+
+    #[test]
+    fn pasted_connection_fields_are_sanitized_and_bounded() {
+        let mut join = JoinUi::default();
+        apply_join_paste(&mut join, 1, "room: 12-34-56-789");
+        assert_eq!(join.code, "123456");
+        apply_join_paste(
+            &mut join,
+            0,
+            " example.invalid:7777/ignored-and-way-too-long-for-the-field ",
+        );
+        assert_eq!(join.addr, "example.invalid:7777ignored-and-way-too-");
+        assert!(join.addr.len() <= 40);
+    }
+
+    #[test]
+    fn authentication_line_has_an_absolute_deadline() {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut stream = std::net::TcpStream::connect(addr).unwrap();
+            stream.write_all(b"J").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = std::io::BufReader::new(stream);
+        let started = std::time::Instant::now();
+        assert_eq!(
+            read_net_line_before(
+                &mut reader,
+                NET_MAX_LINE,
+                std::time::Duration::from_millis(40),
+            ),
+            None
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
+        peer.join().unwrap();
     }
 }

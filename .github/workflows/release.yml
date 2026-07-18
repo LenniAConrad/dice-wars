@@ -5,79 +5,75 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   linux:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Build
         run: cargo build --release
       - name: Package
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           mkdir -p stage
           cp target/release/dicegame stage/dice-wars
           cp README.md LICENSE assets/icon.png stage/
-          tar -czf dice-wars-${{ github.ref_name }}-linux-x86_64.tar.gz -C stage dice-wars README.md LICENSE icon.png
-      - name: Clean stray drafts
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for id in $(gh api "repos/${{ github.repository }}/releases" --jq '.[] | select(.draft) | .id'); do
-            gh api -X DELETE "repos/${{ github.repository }}/releases/$id" || true
-          done
+          tar -czf "dice-wars-${RELEASE_TAG}-linux-x86_64.tar.gz" -C stage dice-wars README.md LICENSE icon.png
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release view "${{ github.ref_name }}" >/dev/null 2>&1 || \
-            gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" --notes-file RELEASE_NOTES.md
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file RELEASE_NOTES.md
       - name: Upload asset
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release upload "${{ github.ref_name }}" "dice-wars-${{ github.ref_name }}-linux-x86_64.tar.gz" --clobber
-      - name: Report error
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          {
-            echo "== view"; gh release view "${{ github.ref_name }}" 2>&1 || true
-            echo "== create verbose"; gh release create "${{ github.ref_name }}" --title "dbg" --notes "dbg" 2>&1 || true
-            echo "== releases"; gh api "repos/${{ github.repository }}/releases" 2>&1 | head -60 || true
-          } > ci-error.txt
-          git config user.name ci
-          git config user.email ci@localhost
-          git checkout -B ci-debug
-          git add ci-error.txt
-          git commit -m "ci debug output"
-          git push -f origin ci-debug
+          gh release upload "$RELEASE_TAG" "dice-wars-${RELEASE_TAG}-linux-x86_64.tar.gz" --clobber
 
   windows:
     needs: linux
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
       - name: Build
         run: cargo build --release
       - name: Package
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           New-Item -ItemType Directory -Force stage | Out-Null
           Copy-Item target/release/dicegame.exe stage/DiceWars.exe
           Copy-Item README.md,LICENSE,assets/icon.ico stage/
-          Compress-Archive -Path stage/* -DestinationPath "dice-wars-${{ github.ref_name }}-windows-x86_64.zip"
+          Compress-Archive -Path stage/* -DestinationPath "dice-wars-$env:RELEASE_TAG-windows-x86_64.zip"
       - name: Upload to release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           for i in 1 2 3 4 5; do
-            if gh release upload "${{ github.ref_name }}" "dice-wars-${{ github.ref_name }}-windows-x86_64.zip" --clobber; then
+            if gh release upload "$RELEASE_TAG" "dice-wars-${RELEASE_TAG}-windows-x86_64.zip" --clobber; then
               exit 0
             fi
             echo "upload attempt $i failed; retrying" >&2

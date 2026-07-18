@@ -29,20 +29,24 @@ All scripts bootstrap everything needed to build from scratch (rustup, compiler)
 ## Start screen
 
 - **Your color** — click a swatch in the band under the title to pick the color you play as; your current pick is highlighted.
-- **Players / Humans** — choose 2–8 total players. Pick any color for yourself with the swatch band; every player has a unique color and symbol. For multiplayer, host a lobby — joined players get the first seats and AI fills the rest.
+- **Players / Humans** — choose 2–9 total players. Pick any color for yourself with the swatch band; every player has a unique color and symbol. For multiplayer, host a lobby — joined players get the first seats and AI fills the rest.
 - **Difficulty** — EASY bots hesitate, need a big advantage, and pick sloppy targets; NORMAL plays by personality; HARD bots gamble on even odds, consolidate territory, reinforce their frontlines, and gang up on humans.
 - **Mode** — FREE-FOR-ALL is the classic last-player-standing game. TEAMS ends the game when only one team is left alive: pick 2–4 teams and which one you play on (bots spread evenly across the rest), or choose HUMANS VS BOTS to put every human on one side. Everyone still plays for themselves — no shared dice or reinforcements. Two extra rules are toggleable: **Friendly fire** (teammates may attack each other, on by default) and **Islands link via allies** (your separated islands count as one connected region when teammate land bridges them, which boosts END TURN reinforcements — off by default). Bots never attack their own team. Everything persists in `settings.txt` and applies to hosted online games too.
 - **Map preview** — the generated map is shown live. Deals are fairness-balanced: every player starts with a comparable largest cluster, equal territory counts, and the first player is decided by the seed.
 - **Seed** — maps are deterministic: the same 8-digit seed and player count always produce the same map. Click the seed to type one in, use `<` / `>` to step through neighboring seeds, or `NEW` (or `N`) to skip to a random map.
 - **Bookmark map** — saves the current seed + player count to `bookmarks.txt`; click a bookmark to load it, or its `x` to delete it.
-- **Chances / Colorblind toggles** — show or hide win-probability hints, and switch to an accessibility mode with a colorblind-safe (Okabe-Ito) palette and owner-symbol badges on every territory. Both persist in `settings.txt`.
+- **Chances / Colorblind toggles** — show or hide win-probability hints, and switch to an accessibility mode tuned for protan color vision with blue/yellow and luminance-separated colors plus owner-symbol badges on every territory. Both persist in `settings.txt`.
 - **START GAME** (or `ENTER`) plays the previewed map.
 
 ## Online play
 
 **HOST GAME** opens a lobby on TCP port 7777 with a random 6-digit room code and shows your LAN address (with a copy button). Guests join with **JOIN GAME** (address + code); the host presses START whenever ready — connected players get the first seats (host is P1) and AI fills every remaining slot. Works on a LAN or VPN out of the box; across the internet the host needs port 7777 forwarded.
 
-The host is authoritative: guests send intents, the host validates them, rolls the dice, and broadcasts results. Basic hardening is built in — five wrong codes ban that address for the session, connections are rate-limited and capped, and messages are strictly length-limited.
+The host lobby keeps the sound, win-chance, protan accessibility, speed, and dark-mode toolbar available while players join.
+
+The host is authoritative: guests send intents, the host validates them, rolls the dice, and broadcasts results. Basic hardening is built in — five wrong codes temporarily block that address, connections are rate-limited and capped, and messages are strictly length-limited.
+
+Network traffic is not encrypted, so use a trusted LAN or a private VPN such as Tailscale. Directly forwarding port 7777 exposes room codes and reconnect tokens to anyone able to observe that connection.
 
 **Can't connect on the same network?** The host's firewall is usually the culprit — on Ubuntu/Mint run `sudo ufw allow 7777/tcp` once. Guest-WiFi networks with "client isolation" also block device-to-device connections. For playing across the internet, either forward TCP 7777 on the host's router or use a VPN like Tailscale (easiest).
 
@@ -58,7 +62,7 @@ All sound effects are synthesized procedurally at startup (no audio asset files)
 
 Each AI has a hidden personality, rolled from the map seed — some attack recklessly, some wait for a clear advantage, some scheme against whoever is winning. All bots share a survival instinct: when one player grows dominant, they stop wearing each other down and gang up on the leader.
 
-Win by conquering the whole map — or, in team mode, by being on the last team standing. Player cards show each player's symbol and land count (plus a small +N when they have dice stored off-board, and their team letter in team mode).
+Win by conquering the whole map — or, in team mode, by being on the last team standing. Player cards show each player's symbol and land count (plus a small +N when they have dice stored off-board). In team mode, cards are grouped inside shared `TEAM A` / `TEAM B` outlines, and protected allied lands stay colored but dimmed while you choose an attack target.
 
 ## Replays
 
