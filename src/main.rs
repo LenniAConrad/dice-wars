@@ -130,9 +130,12 @@ fn apply_colors(v: &[usize]) {
     }
 }
 
-// solo / menu: the local player's pick plus defaults for everyone else
+// solo / menu: a pure swap — you take the picked color's slot and it takes
+// yours, every other player keeps its color, so the map never re-shuffles
 fn apply_local_colors(my_color: usize) {
-    apply_colors(&resolve_colors(MAX_PLAYERS, 1, &[Some(my_color)]));
+    let mut v: Vec<usize> = (0..MAX_PLAYERS).collect();
+    v.swap(0, my_color % MAX_PLAYERS);
+    apply_colors(&v);
 }
 
 
@@ -4338,16 +4341,9 @@ fn draw_map_mini(game: &Game, area: Rect) {
         y0 = y0.min(p.y - HEX);
         y1 = y1.max(p.y + HEX);
     }
-    for t in &game.terrs {
-        // tallest column of the stack, in die widths (see draw_stack)
-        let front = (t.dice.min(4) as f32 - 1.0) * 0.62 + 1.14;
-        let back = if t.dice > 4 {
-            (t.dice as f32 - 5.0) * 0.62 + 1.40
-        } else {
-            0.0
-        };
-        y0 = y0.min(t.anchor.y + 4.0 - DIE_W * front.max(back));
-    }
+    // constant headroom for the tallest possible stack, so the preview
+    // scale never shifts with the dice actually dealt
+    y0 -= DIE_W * 3.3;
     let (bx, by, bw, bh) = (x0, y0, x1 - x0, y1 - y0);
     let k = (area.w / bw).min(area.h / bh);
     let ox = area.x + (area.w - bw * k) * 0.5 - bx * k;

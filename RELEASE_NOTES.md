@@ -1,6 +1,11 @@
-# Dice Wars v1.3.0
+# Dice Wars v1.3.1
 
 Multiplayer lobby release. Online players must both update (older versions are told so).
+
+## v1.3.1 fixes
+
+- Solo color picking is now a clean position swap: every other player keeps its color and the map never re-shuffles.
+- The menu map preview no longer changes scale with the dealt dice heights.
 
 ## Lobby
 
@@ -23,5 +28,5 @@ Multiplayer lobby release. Online players must both update (older versions are t
 
 ## Downloads
 
-- **Linux**: `dice-wars-v1.3.0-linux-x86_64.tar.gz`
-- **Windows**: `dice-wars-v1.3.0-windows-x86_64.zip`
+- **Linux**: `dice-wars-v1.3.1-linux-x86_64.tar.gz`
+- **Windows**: `dice-wars-v1.3.1-windows-x86_64.zip`
