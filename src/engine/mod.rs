@@ -198,7 +198,8 @@ struct Runtime {
     actions: Vec<(usize, Vec<String>)>,
     input_dirty: bool,
     painted: bool,
-    profile: Option<Vec<f64>>,
+    profile: Option<Vec<[f64; 4]>>,
+    layer_blit_ms: f64,
 }
 thread_local! { static RUNTIME: RefCell<Option<Runtime>> = const { RefCell::new(None) }; }
 
@@ -253,6 +254,7 @@ pub fn init(title: &str, width: usize, height: usize) -> Result<(), String> {
         surface: raster::Surface::new(rw, rh),
         presentation: raster::Surface::new(width, height),
         previous_raster: Vec::new(),
+        layer_blit_ms: 0.0,
         camera: None,
         input: Input {
             size: (width, height),
@@ -558,7 +560,15 @@ pub fn cached_layer(id: u8, key: u64, draw: impl FnOnce()) {
             r.layers.insert(id, (full_key, target.clone()));
         });
     }
+    let profiling = RUNTIME.with(|r| r.borrow().as_ref().unwrap().profile.is_some());
+    let started = profiling.then(Instant::now);
     paint(|surface, _| surface.blit(&target.texture.surface.borrow()));
+    if let Some(started) = started {
+        RUNTIME.with(|r| {
+            r.borrow_mut().as_mut().unwrap().layer_blit_ms +=
+                started.elapsed().as_secs_f64() * 1000.0
+        });
+    }
 }
 
 /// Cache a small repeated illustration at the current raster scale. Movement
@@ -676,6 +686,12 @@ pub fn next_frame() -> bool {
             return false;
         }
         r.frames += 1;
+        let draw_ms = r
+            .profile
+            .as_ref()
+            .map(|_| r.started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let resolve_started = r.profile.as_ref().map(|_| Instant::now());
         let last = r.frame_limit.is_some_and(|limit| r.frames >= limit);
         let mut damage = if r.painted {
             r.surface
@@ -687,6 +703,9 @@ pub fn next_frame() -> bool {
             damage.clear();
             damage.push((0, 0, r.presentation.width, r.presentation.height));
         }
+        let resolve_ms = resolve_started
+            .map(|s| s.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
         if (last || r.capture_frames.contains(&r.frames)) && r.capture.is_some() {
             let path = r.capture.as_ref().unwrap();
             let path = if last {
@@ -711,9 +730,15 @@ pub fn next_frame() -> bool {
         r.painted = false;
         if let Some(samples) = &mut r.profile {
             if r.frames > 5 && samples.len() < 6000 {
-                samples.push(r.started.elapsed().as_secs_f64() * 1000.0);
+                samples.push([
+                    r.started.elapsed().as_secs_f64() * 1000.0,
+                    draw_ms,
+                    resolve_ms,
+                    r.layer_blit_ms,
+                ]);
             }
         }
+        r.layer_blit_ms = 0.0;
         if last {
             return false;
         }
@@ -765,13 +790,15 @@ pub fn shutdown() {
     RUNTIME.with(|r| {
         if let Some(rt) = r.borrow_mut().take() {
             if let Some(mut samples) = rt.profile.filter(|s| !s.is_empty()) {
-                let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-                samples.sort_by(f64::total_cmp);
+                let means: [f64; 4] = std::array::from_fn(|i| samples.iter().map(|s| s[i]).sum::<f64>() / samples.len() as f64);
+                let mean = means[0];
+                samples.sort_by(|a, b| a[0].total_cmp(&b[0]));
                 eprintln!(
                     "Frame work: mean {mean:.2} ms, p95 {:.2} ms ({} frames)",
-                    samples[(samples.len() * 95 / 100).min(samples.len() - 1)],
+                    samples[(samples.len() * 95 / 100).min(samples.len() - 1)][0],
                     samples.len()
                 );
+                eprintln!("Frame stages: update/draw {:.2} ms (layer copies {:.2}), resolve {:.2} ms, present/capture {:.2} ms", means[1], means[3], means[2], (means[0] - means[1] - means[2]).max(0.0));
             }
         }
     });

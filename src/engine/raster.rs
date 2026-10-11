@@ -58,6 +58,14 @@ fn blend(pixel: &mut [u8], color: [u8; 4]) {
     }
     let a = color[3] as u32;
     let old_a = pixel[3] as u32;
+    if old_a == 255 {
+        // The on-screen canvas is opaque: keep its alpha and avoid three
+        // divisions by a variable output alpha for every translucent pixel.
+        for ch in 0..3 {
+            pixel[ch] = ((color[ch] as u32 * a + pixel[ch] as u32 * (255 - a) + 127) / 255) as u8;
+        }
+        return;
+    }
     let out_a = a + (old_a * (255 - a) + 127) / 255;
     for ch in 0..3 {
         pixel[ch] = ((color[ch] as u32 * a
@@ -80,35 +88,62 @@ impl Surface {
             previous.clone_from(&self.pixels);
             return vec![(0, 0, output.width, output.height)];
         }
+        let columns = self.width.div_ceil(64);
+        let mut dirty = vec![false; columns * self.height.div_ceil(32)];
+        let stride = self.width * 4;
+        for (y, (current, prior)) in self
+            .pixels
+            .chunks_exact(stride)
+            .zip(previous.chunks_exact_mut(stride))
+            .enumerate()
+        {
+            // Most animation rows are identical. One wide comparison replaces
+            // up to dozens of tiny comparisons per unchanged row.
+            if current == prior {
+                continue;
+            }
+            for (x, (current, prior)) in current
+                .chunks(64 * 4)
+                .zip(prior.chunks_mut(64 * 4))
+                .enumerate()
+            {
+                let tile = y / 32 * columns + x;
+                if dirty[tile] || current != prior {
+                    dirty[tile] = true;
+                    prior.copy_from_slice(current);
+                }
+            }
+        }
         let mut regions = Vec::new();
         for y in (0..self.height).step_by(32) {
             let y1 = (y + 32).min(self.height);
-            for x in (0..self.width).step_by(64) {
-                let x1 = (x + 64).min(self.width);
-                let changed = (y..y1).any(|row| {
-                    let a = (row * self.width + x) * 4;
-                    let b = (row * self.width + x1) * 4;
-                    self.pixels[a..b] != previous[a..b]
-                });
-                if changed {
+            let mut column = 0;
+            while column < columns {
+                if dirty[y / 32 * columns + column] {
+                    let x = column * 64;
+                    while column < columns && dirty[y / 32 * columns + column] {
+                        column += 1;
+                    }
+                    let x1 = (column * 64).min(self.width);
                     regions.push((
                         (x * output.width / self.width).saturating_sub(2),
                         (y * output.height / self.height).saturating_sub(2),
                         ((x1 * output.width).div_ceil(self.width) + 2).min(output.width),
                         ((y1 * output.height).div_ceil(self.height) + 2).min(output.height),
                     ));
+                } else {
+                    column += 1;
                 }
             }
         }
         if !regions.is_empty() {
-            if regions.len() > (self.width.div_ceil(64) * self.height.div_ceil(32)) / 2 {
+            if dirty.iter().filter(|&&tile| tile).count() > dirty.len() / 2 {
                 self.resolve_into(output);
                 regions.clear();
                 regions.push((0, 0, output.width, output.height));
             } else {
                 self.resolve_regions(output, &regions);
             }
-            previous.copy_from_slice(&self.pixels);
         }
         regions
     }
@@ -504,6 +539,17 @@ impl Surface {
 mod tests {
     use super::*;
     #[test]
+    fn opaque_blending_preserves_coverage_for_every_alpha() {
+        for alpha in 0..=255u32 {
+            let mut pixel = [17, 139, 241, 255];
+            blend(&mut pixel, [243, 83, 7, alpha as u8]);
+            let expected: [u8; 3] = std::array::from_fn(|ch| {
+                (([17, 139, 241][ch] * (255 - alpha) + [243, 83, 7][ch] * alpha + 127) / 255) as u8
+            });
+            assert_eq!(pixel, [expected[0], expected[1], expected[2], 255]);
+        }
+    }
+    #[test]
     fn partial_resolve_matches_full_filter_at_tile_and_window_edges() {
         for (sw, sh, ow, oh) in [(256, 128, 128, 64), (191, 99, 257, 131), (191, 99, 117, 67)] {
             let mut source = Surface::new(sw, sh);
@@ -524,7 +570,14 @@ mod tests {
                 let mut full = Surface::new(ow, oh);
                 source.resolve_into(&mut full);
                 assert_eq!(partial.pixels, full.pixels);
+                assert_eq!(prior, source.pixels);
             }
+            source.clear(super::super::WHITE);
+            source.resolve_changed_into(&mut partial, &mut prior);
+            let mut full = Surface::new(ow, oh);
+            source.resolve_into(&mut full);
+            assert_eq!(partial.pixels, full.pixels);
+            assert_eq!(prior, source.pixels);
         }
     }
     #[test]

@@ -11,14 +11,17 @@ import time
 root = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser()
 parser.add_argument("--binary", type=Path, default=root / "target/release/dicegame")
-parser.add_argument("--native", action="store_true", help="open two short native-window checks")
+parser.add_argument("--native", action="store_true", help="open three short native-window checks")
 args = parser.parse_args()
 
 with tempfile.TemporaryDirectory(prefix="dice-wars-runtime-") as data:
     base = {k: v for k, v in os.environ.items() if not k.startswith("DW_")}
     base.update(XDG_DATA_HOME=data, APPDATA=data, DW_SEED="31337", DW_PROFILE="1")
-    cases = [("idle", None, {}), ("battle", None, {"DW_AUTOSTART": "1", "DW_BATTLE": "1"})] if args.native else [
+    hover = {"DW_INPUT": ";".join(f"{i}:move:{440 if i % 2 else 390}:{560 if i % 2 else 708}" for i in range(1, 121))}
+    cases = [("idle", None, {}), ("menu-hover", None, hover), ("battle", None, {"DW_AUTOSTART": "1", "DW_BATTLE": "1"})] if args.native else [
         ("idle", "930x820", {}),
+        ("menu-hover", "930x820", hover),
+        ("selection", "930x820", {"DW_AUTOSTART": "1", "DW_SCENE": "selection"}),
         *[("battle", size, {"DW_AUTOSTART": "1", "DW_BATTLE": "1"})
           for size in ["930x820", "1920x1080", "2560x1600", "3840x2160"]],
     ]

@@ -2485,6 +2485,7 @@ fn draw_board(game: &Game, ui: &Ui, chances: bool) {
 
 fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
     // the whole canvas is the play surface
+    clear_background(BG());
     draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
 
     let hover = board_hover(game);
@@ -2513,17 +2514,12 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
         let attackable = game.selected.map_or(false, |s| {
             game.can_target(game.current, terr.owner) && game.terrs[s].neighbors.contains(&t)
         });
-        let protected_ally = terr.owner != game.current && game.same_team(game.current, terr.owner);
         if game.selected == Some(t) {
             col = lighten(col, 0.38);
         } else if game.selected.is_some() && !attackable {
-            // Teammates remain identifiable while choosing a target, but are
-            // visibly subdued when friendly fire does not make them valid.
-            col = if protected_ally {
-                mix(col, SRF(), 0.58)
-            } else {
-                SRF()
-            };
+            // Selection is a map treatment, independent of the interface
+            // theme. Dice and owner badges still identify these territories.
+            col = WHITE;
         } else if hover == Some(t) && (attackable || selectable) {
             col = lighten(col, 0.2);
         }
@@ -2609,9 +2605,9 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
                     tw + 12.0,
                     16.0,
                     8.0,
-                    with_alpha(SRF(), 0.75),
+                    SRF(),
                 );
-                ui.text_centered(&txt, p.x, p.y + 0.5, 12.0, with_alpha(col, 0.85));
+                ui.text_centered(&txt, p.x, p.y + 0.5, 12.0, col);
             }
         }
     }
@@ -2942,8 +2938,11 @@ fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
         ui.text_centered(label, r.x + r.w * 0.5, r.y + 21.0, 13.0, INK());
     }
 
-    let cards_y = py + if game.teams.on { 123.0 } else { 110.0 };
-    draw_player_cards(game, ui, cards_y, 0.0);
+    draw_player_cards(game, ui, player_cards_y(game), 0.0);
+}
+
+fn player_cards_y(game: &Game) -> f32 {
+    632.0 + if game.teams.on { 123.0 } else { 110.0 }
 }
 
 // Player cards are grouped spatially in team games. The shared neutral frame
@@ -3265,7 +3264,7 @@ fn draw_panel_replay(game: &Game, ui: &Ui) {
             with_alpha(INK(), 0.7),
         );
     }
-    draw_player_cards(game, ui, py + 70.0, 0.0);
+    draw_player_cards(game, ui, player_cards_y(game), 0.0);
 }
 
 fn draw_banner(game: &Game, ui: &Ui) {
@@ -5706,38 +5705,56 @@ fn menu_button(r: Rect, fill: Color, edge: Color, hovered: bool) {
 fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     let m = mouse_virtual();
 
-    draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
-
-    // chunky extruded logo
-    let title = "DICE WARS";
-    let tw = ui.width(title, 58.0);
-    let tx = WIN_W * 0.5 - tw * 0.5;
-    // many faint offset copies blend into one soft drop shadow
-    let sh = with_alpha(
-        th(INK_ON_FILL, BLACK),
-        if dark_mode() { 0.12 } else { 0.055 },
-    );
-    for (dx, dy) in [
-        (2.5, 3.5),
-        (4.0, 4.5),
-        (5.5, 5.5),
-        (3.0, 5.5),
-        (5.0, 3.5),
-        (4.0, 6.5),
-        (2.5, 5.0),
-        (5.5, 4.5),
-    ] {
-        ui.text(title, tx + dx, 86.0 + dy, 58.0, sh);
+    // Keep the large outlined title, decorative dice, and map out of hover
+    // redraws. Theme and palette changes still invalidate on the input frame.
+    use std::hash::{Hash, Hasher};
+    let mut art_key = std::collections::hash_map::DefaultHasher::new();
+    (menu.seed, menu.players, dark_mode(), colorblind_mode()).hash(&mut art_key);
+    for player in 0..MAX_PLAYERS {
+        color_map(player).hash(&mut art_key);
     }
-    ui.text_outlined(
-        title,
-        tx,
-        86.0,
-        58.0,
-        mix(PLAYER_BASE[0], WHITE, 0.2),
-        INK_ON_FILL,
-    );
-    draw_menu_hero();
+    engine::cached_layer(3, art_key.finish(), || {
+        clear_background(BG());
+        draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
+
+        // chunky extruded logo
+        let title = "DICE WARS";
+        let tw = ui.width(title, 58.0);
+        let tx = WIN_W * 0.5 - tw * 0.5;
+        // many faint offset copies blend into one soft drop shadow
+        let sh = with_alpha(
+            th(INK_ON_FILL, BLACK),
+            if dark_mode() { 0.12 } else { 0.055 },
+        );
+        for (dx, dy) in [
+            (2.5, 3.5),
+            (4.0, 4.5),
+            (5.5, 5.5),
+            (3.0, 5.5),
+            (5.0, 3.5),
+            (4.0, 6.5),
+            (2.5, 5.0),
+            (5.5, 4.5),
+        ] {
+            ui.text(title, tx + dx, 86.0 + dy, 58.0, sh);
+        }
+        ui.text_outlined(
+            title,
+            tx,
+            86.0,
+            58.0,
+            mix(PLAYER_BASE[0], WHITE, 0.2),
+            INK_ON_FILL,
+        );
+        draw_menu_hero();
+        // map preview
+        let pv = r_preview();
+        draw_round_frame(pv.x, pv.y, pv.w, pv.h, 14.0, 2.0, SRF(), CARD_EDGE());
+        draw_map_mini(
+            &menu.preview,
+            Rect::new(pv.x + 8.0, pv.y + 8.0, pv.w - 16.0, pv.h - 16.0),
+        );
+    });
     // the accent band doubles as the pick-your-color control
     for i in 0..MAX_PLAYERS {
         let r = r_color(i);
@@ -5778,14 +5795,6 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     .map(|(k, (l, d))| (r_diff(k), l, menu.difficulty == d))
     .collect();
     seg_row(ui, m, true, "DIFFICULTY", &row, 15.0);
-
-    // map preview
-    let pv = r_preview();
-    draw_round_frame(pv.x, pv.y, pv.w, pv.h, 14.0, 2.0, SRF(), CARD_EDGE());
-    draw_map_mini(
-        &menu.preview,
-        Rect::new(pv.x + 8.0, pv.y + 8.0, pv.w - 16.0, pv.h - 16.0),
-    );
 
     // seed row
     let (rp, rs, rn, rr) = (r_prev(), r_seedbox(), r_next(), r_new());
@@ -7069,8 +7078,45 @@ fn main() {
 
     // Deterministic audit scenes; screenshot scripts use a temporary data directory.
     match std::env::var("DW_SCENE").as_deref() {
+        Ok("battle-replay") => {
+            if let Some(g) = &game {
+                let mut r = Replay::new(g, false);
+                if let Some(b) = &g.battle {
+                    r.g.current = g.current;
+                    r.g.terrs[b.a].dice = 8;
+                    r.g.terrs[b.d].dice = 8;
+                    r.g.battle = Some(Battle {
+                        a: b.a,
+                        d: b.d,
+                        ra: 21,
+                        rd: 12,
+                        ad: split_sum(21, 8),
+                        dd: split_sum(12, 8),
+                        captured: true,
+                        t: b.t,
+                    });
+                }
+                replay = Some(r);
+                screen = Screen::Replay;
+            }
+        }
         Ok("join") => screen = Screen::JoinLobby,
         Ok("confirm") => confirm = Some(Confirm::Menu),
+        Ok("selection") => {
+            if let Some(g) = &mut game {
+                if let Some(a) = g.terrs.iter().position(|t| {
+                    t.owner == g.my_seat
+                        && t.neighbors
+                            .iter()
+                            .any(|&d| g.can_target(g.my_seat, g.terrs[d].owner))
+                }) {
+                    g.current = g.my_seat;
+                    g.terrs[a].dice = g.terrs[a].dice.max(2);
+                    g.selected = Some(a);
+                    g.banner_t = 0.0;
+                }
+            }
+        }
         Ok("over") => {
             if let Some(g) = &mut game {
                 g.over = Some("Buttercup wins!".to_string());

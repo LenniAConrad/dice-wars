@@ -80,6 +80,26 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
 
     render("keyboard-focus", DW_AUTOSTART="1", DW_INPUT="1:key:Right;2:key:Enter")
     render("reduced-motion", DW_AUTOSTART="1", DW_BATTLE="1", DW_INPUT="1:key:F8")
+    for theme in ("light", "dark"):
+        path = render(f"selection-{theme}", DW_AUTOSTART="1", DW_SCENE="selection", DW_THEME=theme)
+        with Image.open(path) as image:
+            board = image.crop((30, 80, 900, 615)).convert("RGB")
+            white_pixels = sum(pixel == (255, 255, 255) for pixel in board.getdata())
+            assert white_pixels > 100000, f"non-target territories are not white in {theme} mode"
+        for players in ("2", "9"):
+            path = render(f"battle-replay-{players}-{theme}", DW_AUTOSTART="1", DW_BATTLE="1",
+                          DW_SCENE="battle-replay", DW_TEAMS="1", DW_PLAYERS=players, DW_THEME=theme)
+            with Image.open(path) as image:
+                # Results end above this gap; team labels begin below it.
+                gap = image.crop((420, 727, 570, 734))
+                assert len(gap.getcolors(gap.width * gap.height) or []) == 1, "replay result overlaps team cards"
+    render("menu-refresh", DW_FRAME_LIMIT="5", DW_CAPTURE_FRAMES="1,2,3,4",
+           DW_INPUT="2:click:384:574;3:key:F9;4:click:368:106")
+    with Image.open(out / "menu-refresh-1.png") as first, Image.open(out / "menu-refresh-2.png") as seed, Image.open(out / "menu-refresh-3.png") as assist, Image.open(out / "menu-refresh-4.png") as color:
+        region = (157, 335, 445, 513)
+        assert first.crop(region).tobytes() != seed.crop(region).tobytes(), "cached preview ignored seed change"
+        assert seed.crop(region).tobytes() != assist.crop(region).tobytes(), "cached preview ignored color assist"
+        assert assist.getpixel((100, 710)) != color.getpixel((100, 710)), "color selection ignored"
     # Move without clicking: catch invisible neutral hover fills, selected
     # options that fail to react, and stale status-panel caches in both themes.
     for theme in ("light", "dark"):
@@ -116,4 +136,4 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
                                                 before.getpixel((497, 330)))) <= 2, "uneven star fill"
         with Image.open(out / f"{scene}-3.png") as saved, Image.open(out / f"{scene}-4.png") as hovered:
             assert saved.getpixel((854, 330)) != hovered.getpixel((854, 330)), "delete hover invisible"
-    print(f"Verified 29 scenes, button hover feedback in both themes, bookmark states, native output resolution, immediate theme switching, and GIF orientation. Screenshots: {out}")
+    print(f"Verified 36 scenes, replay battle layout, menu cache refresh, white non-target territories and hover feedback in both themes, bookmark states, native output resolution, immediate theme switching, and GIF orientation. Screenshots: {out}")

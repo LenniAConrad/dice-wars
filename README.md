@@ -71,9 +71,11 @@ All sound effects are synthesized procedurally at startup (no audio asset files)
 
 Each AI has a hidden personality, rolled from the map seed — some attack recklessly, some wait for a clear advantage, some scheme against whoever is winning. All bots share a survival instinct: when one player grows dominant, they stop wearing each other down and gang up on the leader.
 
-Win by conquering the whole map — or, in team mode, by being on the last team standing. Player cards show each player's symbol and land count (plus a small +N when they have dice stored off-board). In team mode, cards are grouped inside shared `TEAM A` / `TEAM B` outlines, and protected allied lands stay colored but dimmed while you choose an attack target.
+Win by conquering the whole map — or, in team mode, by being on the last team standing. Player cards show each player's symbol and land count (plus a small +N when they have dice stored off-board). In team mode, cards are grouped inside shared `TEAM A` / `TEAM B` outlines. Non-target territories turn white while you choose an attack target, in both light and dark mode. Their dice and owner badges keep their player colors. [Dark-mode selection screenshot](assets/screenshot-selection-dark.png).
 
 ## Replays
+
+Battle rolls and result text stay above the player cards, using the same spacing as gameplay, including team labels. [Team replay screenshot](assets/screenshot-replay-teams.png).
 
 The game-over screen offers **WATCH REPLAY** — an animated playback of every battle and reinforcement of the finished game — and **SAVE GIF**, which fast-forwards through the replay and writes a timelapse `replay-<seed>.gif` (up to 600 frames sampled across the entire match, including the ending; self-contained GIF encoder, no external tools).
 
@@ -82,9 +84,9 @@ The UI font is DejaVu Sans Bold, embedded as coverage masks (Bitstream Vera lice
 ## Responsiveness and resource use
 
 - Input is polled at up to 60 Hz. Animated frames are capped at 60 fps; unfocused windows use 15 Hz.
-- Unchanged menus and idle single-player human turns reuse the previous frame. Boards, previews, status panels, and dice illustrations use bounded caches; moving effects render separately. Moving the cursor inside the same territory keeps the map cache.
+- Unchanged menus and idle single-player human turns reuse the previous frame. Boards, previews, static menu artwork, status panels, and dice illustrations use bounded caches; moving effects render separately. Moving the cursor inside the same territory keeps the map cache.
 - Normal windows use 2× rendering in each dimension for smooth dice, hex borders, and text. Raster work is capped at four million pixels; the filtered output retains the window resolution, including 2560 × 1600 and 4K. Larger windows use fewer subpixels within that budget. Offscreen exports have explicit size limits.
-- Only changed tiles are filtered again. Linux uploads the changed rectangles and skips identical frames, avoiding full-window copies for a small dice animation. Exposed windows receive a complete repaint.
+- Unchanged raster rows skip tile comparisons. Changed chunks update the prior raster without a full-frame copy; adjacent dirty tiles share an upload rectangle. Opaque-canvas alpha blending uses a faster path with the same pixel output. Only changed tiles are filtered again. Linux uploads the changed rectangles and skips identical frames, avoiding full-window copies for a small dice animation. Exposed windows receive a complete repaint.
 - Dice illustrations have a 16 MiB cache limit. The previous raster used for change detection stays within the four-million-pixel budget.
 - Audio uses one worker, at most 16 simultaneous voices, and a bounded request queue. Missing audio devices leave the game silent.
 - Maps retain the seeded PCG stream used before the engine migration, preserving existing seeds and bookmarks.
@@ -96,18 +98,20 @@ cargo test --release -j 1 -- --test-threads=1
 cargo check --target x86_64-pc-windows-gnu --all-targets -j 1  # optional cross-platform check
 python3 scripts/audit-ui.py                               # requires Pillow
 python3 scripts/audit-runtime.py                          # Linux: bounded, isolated frame-time checks
-python3 scripts/audit-runtime.py --native                 # opens two short test windows
+python3 scripts/audit-runtime.py --native                 # opens three short test windows
 python3 scripts/audit-audio.py                            # Linux: requires pactl + parec
 python3 scripts/pack-assets.py                            # only after changing font/icon sources
 ```
 
-Version 1.4.2 passed 42 automated tests and 29 screenshot scenarios on Linux. The Windows backend passed cross-compilation checks; Windows runtime testing is still outstanding.
+Version 1.4.3 passed 43 automated tests and 36 screenshot scenarios on Linux. The Windows backend passed cross-compilation checks; Windows runtime testing is still outstanding.
 
-The UI audit uses temporary settings, bounded headless runs, and reproducible seeds. It captures light/dark menus and battles, team setup, accessibility, dialogs, join/replay screens, and small/wide/high-resolution layouts; it verifies native screenshot dimensions, mouse and keyboard theme changes on the input frame, unchanged pastel map art when switching themes, visible button hover fills in both themes, bookmark states and uniform star fills, and upright GIFs. Each scene uses separate temporary preferences.
+The UI audit uses temporary settings, bounded headless runs, and reproducible seeds. It captures light/dark menus and battles, team setup, accessibility, dialogs, join/replay screens, and small/wide/high-resolution layouts; it verifies native screenshot dimensions, mouse and keyboard theme changes on the input frame, unchanged pastel map art when switching themes, white non-target territories and visible button hover fills in both themes, bookmark states and uniform star fills, and upright GIFs. It also checks replay battle results against the team-card area and verifies cached menu refresh after seed and color-assist changes. Each scene uses separate temporary preferences.
 
-The runtime audit reports frame work separately from the 60/15 Hz cap and measures CPU time. Its results depend on background load and power settings; the cap does not guarantee 60 fps on every device. The audio audit routes only its test game's output into a temporary sink and verifies two short effects separated by silence, then removes the sink. It does not record a microphone or change the default audio output. This regression check fails against 1.4.0 and passes against 1.4.1.
+The runtime audit reports update/draw, layer copies, filtering, and presentation work separately from the 60/15 Hz cap, and measures CPU time. It covers idle screens, menu hover changes, selected-map animation, and battles at multiple resolutions. Its results depend on background load and power settings; the cap does not guarantee 60 fps on every device. The audio audit routes only its test game's output into a temporary sink and verifies two short effects separated by silence, then removes the sink. It does not record a microphone or change the default audio output. This regression check fails against 1.4.0 and passes against 1.4.1.
 
 In the Linux native battle check (120 frames with background CPU load), 1.4.1 used **2.31 seconds of CPU time**, compared with **6.65 seconds** for 1.4.0. Wall time fell from 6.85 to 2.82 seconds. These are measurements from one device, rather than a guaranteed frame rate.
+
+In the 1.4.3 optimization checks (60 headless frames on this device), mean menu hover work fell from about **84 to 12 ms**, selected-map animation from **14 to 4 ms**, and battle work from **20 to 6 ms**. The subsequent native-window audit (120 frames each) measured mean work of **14.3 ms for menu hover** and **10.8 ms for battle**, with CPU time of 1.76 s and 1.38 s respectively. These results include background load and should not be treated as a frame-rate guarantee.
 
 For a bounded desktop smoke test:
 
