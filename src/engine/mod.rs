@@ -180,6 +180,8 @@ pub struct Mesh {
 
 struct Runtime {
     surface: raster::Surface,
+    presentation: raster::Surface,
+    previous_raster: Vec<u8>,
     camera: Option<Camera2D>,
     input: Input,
     native: Option<platform::Window>,
@@ -191,9 +193,12 @@ struct Runtime {
     headless: bool,
     capture_frames: Vec<usize>,
     layers: std::collections::HashMap<u8, (u64, RenderTarget)>,
+    sprites: std::collections::HashMap<u64, RenderTarget>,
+    sprite_bytes: usize,
     actions: Vec<(usize, Vec<String>)>,
     input_dirty: bool,
     painted: bool,
+    profile: Option<Vec<f64>>,
 }
 thread_local! { static RUNTIME: RefCell<Option<Runtime>> = const { RefCell::new(None) }; }
 
@@ -202,6 +207,18 @@ pub fn now() -> f64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+// Four subpixels per display pixel at normal window sizes. Larger windows
+// retain their native output resolution while raster work stays bounded.
+fn raster_size(w: usize, h: usize) -> (usize, usize) {
+    let scale = 2.0f64
+        .min((4_000_000.0 / (w as f64 * h as f64)).sqrt())
+        .min(4096.0 / w as f64)
+        .min(4096.0 / h as f64);
+    (
+        (w as f64 * scale).floor().max(1.0) as usize,
+        (h as f64 * scale).floor().max(1.0) as usize,
+    )
 }
 pub fn init(title: &str, width: usize, height: usize) -> Result<(), String> {
     let headless = std::env::var_os("DW_HEADLESS").is_some();
@@ -231,8 +248,11 @@ pub fn init(title: &str, width: usize, height: usize) -> Result<(), String> {
         .split(',')
         .filter_map(|v| v.parse().ok())
         .collect();
+    let (rw, rh) = raster_size(width, height);
     let mut rt = Runtime {
-        surface: raster::Surface::new(width, height),
+        surface: raster::Surface::new(rw, rh),
+        presentation: raster::Surface::new(width, height),
+        previous_raster: Vec::new(),
         camera: None,
         input: Input {
             size: (width, height),
@@ -248,8 +268,11 @@ pub fn init(title: &str, width: usize, height: usize) -> Result<(), String> {
         headless,
         capture_frames,
         layers: std::collections::HashMap::new(),
+        sprites: std::collections::HashMap::new(),
+        sprite_bytes: 0,
         input_dirty: true,
         painted: false,
+        profile: std::env::var_os("DW_PROFILE").map(|_| Vec::new()),
         actions: std::env::var("DW_INPUT")
             .unwrap_or_default()
             .split(';')
@@ -538,6 +561,80 @@ pub fn cached_layer(id: u8, key: u64, draw: impl FnOnce()) {
     paint(|surface, _| surface.blit(&target.texture.surface.borrow()));
 }
 
+/// Cache a small repeated illustration at the current raster scale. Movement
+/// changes its destination, not its geometry. The cache has a 16 MiB ceiling.
+pub fn cached_sprite(key: u64, bounds: Rect, draw: impl FnOnce()) {
+    use std::hash::{Hash, Hasher};
+    let (camera, scale, full_key, cached) = RUNTIME.with(|r| {
+        let guard = r.borrow();
+        let r = guard.as_ref().unwrap();
+        let camera = r.camera.clone();
+        let (w, h) = camera
+            .as_ref()
+            .and_then(|c| c.render_target.as_ref())
+            .map(|rt| {
+                let s = rt.texture.surface.borrow();
+                (s.width, s.height)
+            })
+            .unwrap_or((r.surface.width, r.surface.height));
+        let t = raster::Transform::camera(camera.as_ref(), r.input.size.0, r.input.size.1, w, h);
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        (
+            key,
+            t.sx.to_bits(),
+            t.sy.to_bits(),
+            bounds.w.to_bits(),
+            bounds.h.to_bits(),
+        )
+            .hash(&mut hash);
+        let full_key = hash.finish();
+        (
+            camera,
+            (t.sx, t.sy),
+            full_key,
+            r.sprites.get(&full_key).cloned(),
+        )
+    });
+    let (sx, sy) = scale;
+    let w = (bounds.w * sx).ceil() as u32;
+    let h = (bounds.h * sy).ceil() as u32;
+    if sx <= 0.0 || sy <= 0.0 || w == 0 || h == 0 || w > 512 || h > 512 {
+        draw();
+        return;
+    }
+    let target = cached.unwrap_or_else(|| {
+        let target = render_target(w, h);
+        set_camera(&Camera2D {
+            target: vec2(
+                bounds.x + w as f32 / (2.0 * sx),
+                bounds.y + h as f32 / (2.0 * sy),
+            ),
+            zoom: vec2(2.0 * sx / w as f32, 2.0 * sy / h as f32),
+            render_target: Some(target.clone()),
+        });
+        draw();
+        RUNTIME.with(|r| {
+            let mut guard = r.borrow_mut();
+            let r = guard.as_mut().unwrap();
+            r.camera = camera;
+            let bytes = w as usize * h as usize * 4;
+            if r.sprite_bytes + bytes > 16 * 1024 * 1024 || r.sprites.len() >= 1024 {
+                r.sprites.clear();
+                r.sprite_bytes = 0;
+            }
+            r.sprite_bytes += bytes;
+            r.sprites.insert(full_key, target.clone());
+        });
+        target
+    });
+    paint(|surface, t| {
+        surface.blit_at(
+            &target.texture.surface.borrow(),
+            t.point(vec2(bounds.x, bounds.y)),
+        )
+    });
+}
+
 fn apply_actions(r: &mut Runtime) {
     for (_, action) in r.actions.iter().filter(|(frame, _)| *frame == r.frames + 1) {
         match action.first().map(String::as_str) {
@@ -580,6 +677,16 @@ pub fn next_frame() -> bool {
         }
         r.frames += 1;
         let last = r.frame_limit.is_some_and(|limit| r.frames >= limit);
+        let mut damage = if r.painted {
+            r.surface
+                .resolve_changed_into(&mut r.presentation, &mut r.previous_raster)
+        } else {
+            Vec::new()
+        };
+        if r.input.repaint {
+            damage.clear();
+            damage.push((0, 0, r.presentation.width, r.presentation.height));
+        }
         if (last || r.capture_frames.contains(&r.frames)) && r.capture.is_some() {
             let path = r.capture.as_ref().unwrap();
             let path = if last {
@@ -588,20 +695,25 @@ pub fn next_frame() -> bool {
                 format!("{}-{}.png", path.trim_end_matches(".png"), r.frames)
             };
             let image = Image {
-                width: r.surface.width as u16,
-                height: r.surface.height as u16,
-                bytes: r.surface.pixels.clone(),
+                width: r.presentation.width as u16,
+                height: r.presentation.height as u16,
+                bytes: r.presentation.pixels.clone(),
             };
             if let Err(e) = image.export_png(&path) {
                 eprintln!("Capture failed: {e}");
             }
         }
-        if r.painted {
+        if !damage.is_empty() {
             if let Some(w) = &mut r.native {
-                w.present(&r.surface);
+                w.present(&r.presentation, &damage);
             }
         }
         r.painted = false;
+        if let Some(samples) = &mut r.profile {
+            if r.frames > 5 && samples.len() < 6000 {
+                samples.push(r.started.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
         if last {
             return false;
         }
@@ -636,20 +748,32 @@ pub fn next_frame() -> bool {
         r.input_dirty |= r.input.repaint;
         // Limit render memory and work even on giant desktop resolutions.
         let (w, h) = r.input.size;
-        let scale = (1600.0 / w as f32).min(1400.0 / h as f32).min(1.0);
-        let size = (
-            (w as f32 * scale).round().max(1.0) as usize,
-            (h as f32 * scale).round().max(1.0) as usize,
-        );
+        let size = raster_size(w, h);
         if size != (r.surface.width, r.surface.height) {
             r.surface = raster::Surface::new(size.0, size.1);
+            r.previous_raster.clear();
+        }
+        let output_size = (w.clamp(1, 4096), h.clamp(1, 4096));
+        if output_size != (r.presentation.width, r.presentation.height) {
+            r.presentation = raster::Surface::new(output_size.0, output_size.1);
+            r.previous_raster.clear();
         }
         !r.input.closed
     })
 }
 pub fn shutdown() {
     RUNTIME.with(|r| {
-        r.borrow_mut().take();
+        if let Some(rt) = r.borrow_mut().take() {
+            if let Some(mut samples) = rt.profile.filter(|s| !s.is_empty()) {
+                let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+                samples.sort_by(f64::total_cmp);
+                eprintln!(
+                    "Frame work: mean {mean:.2} ms, p95 {:.2} ms ({} frames)",
+                    samples[(samples.len() * 95 / 100).min(samples.len() - 1)],
+                    samples.len()
+                );
+            }
+        }
     });
 }
 pub fn clipboard_set(text: &str) {
@@ -662,6 +786,16 @@ pub fn clipboard_get() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn antialiasing_budget_scales_with_window_size() {
+        assert_eq!(raster_size(930, 820), (1860, 1640));
+        for (w, h) in [(1920, 1080), (3840, 2160), (4096, 4096), (1201, 821)] {
+            let (rw, rh) = raster_size(w, h);
+            assert!(rw * rh <= 4_000_000);
+            assert!(rw <= 4096 && rh <= 4096);
+            assert!(rw > 1600);
+        }
+    }
     #[test]
     fn readback_keeps_top_down_rows_for_exports() {
         let target = render_target(2, 2);

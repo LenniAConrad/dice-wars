@@ -307,7 +307,7 @@ impl Window {
             }
         }
     }
-    pub fn present(&mut self, surface: &Surface) {
+    pub fn present(&mut self, surface: &Surface, _damage: &[(usize, usize, usize, usize)]) {
         self.pixels.resize(surface.width * surface.height, 0);
         for (pixel, rgba) in self.pixels.iter_mut().zip(surface.pixels.chunks_exact(4)) {
             *pixel = (rgba[0] as u32) << 16 | (rgba[1] as u32) << 8 | rgba[2] as u32;

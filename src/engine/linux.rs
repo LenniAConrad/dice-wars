@@ -375,15 +375,33 @@ impl Window {
             }
         }
     }
-    pub fn present(&mut self, surface: &Surface) {
+    pub fn present(&mut self, surface: &Surface, damage: &[(usize, usize, usize, usize)]) {
         let (w, h) = (self.size.0.min(4096), self.size.1.min(4096));
         self.pixels.resize(w * h, 0);
-        for y in 0..h {
-            for x in 0..w {
-                let p = (y * surface.height / h * surface.width + x * surface.width / w) * 4;
-                self.pixels[y * w + x] = (surface.pixels[p] as u32) << 16
-                    | (surface.pixels[p + 1] as u32) << 8
-                    | surface.pixels[p + 2] as u32;
+        let fallback = [(0, 0, w, h)];
+        let damage = if (w, h) == (surface.width, surface.height) {
+            damage
+        } else {
+            &fallback
+        };
+        for &(x0, y0, x1, y1) in damage {
+            for y in y0..y1.min(h) {
+                if (w, h) == (surface.width, surface.height) {
+                    // Avoid integer scaling divisions on every native pixel.
+                    let src = &surface.pixels[(y * w + x0) * 4..(y * w + x1) * 4];
+                    let dst = &mut self.pixels[y * w + x0..y * w + x1];
+                    for (dst, rgba) in dst.iter_mut().zip(src.chunks_exact(4)) {
+                        *dst = (rgba[0] as u32) << 16 | (rgba[1] as u32) << 8 | rgba[2] as u32;
+                    }
+                } else {
+                    for x in x0..x1.min(w) {
+                        let p =
+                            (y * surface.height / h * surface.width + x * surface.width / w) * 4;
+                        self.pixels[y * w + x] = (surface.pixels[p] as u32) << 16
+                            | (surface.pixels[p + 1] as u32) << 8
+                            | surface.pixels[p + 2] as u32;
+                    }
+                }
             }
         }
         // SAFETY: XPutImage copies the buffer before returning. Detach Vec-owned data before XDestroyImage.
@@ -401,18 +419,20 @@ impl Window {
                 (w * 4) as c_int,
             );
             if !image.is_null() {
-                XPutImage(
-                    self.display,
-                    self.window,
-                    self.gc,
-                    image,
-                    0,
-                    0,
-                    0,
-                    0,
-                    w as u32,
-                    h as u32,
-                );
+                for &(x0, y0, x1, y1) in damage {
+                    XPutImage(
+                        self.display,
+                        self.window,
+                        self.gc,
+                        image,
+                        x0 as c_int,
+                        y0 as c_int,
+                        x0 as c_int,
+                        y0 as c_int,
+                        (x1 - x0) as u32,
+                        (y1 - y0) as u32,
+                    );
+                }
                 (*image).data = ptr::null_mut();
                 XDestroyImage(image);
                 // Bound queued X requests: a slow display server cannot accumulate frames indefinitely.

@@ -66,7 +66,7 @@ Network traffic is not encrypted, so use a trusted LAN or a private VPN such as 
 - **END TURN** (or `SPACE`) ends your turn: you receive one die per territory in your largest connected region, distributed randomly. Dice that don't fit (all territories full) are stored off-board — up to 64, like the original — and return on later turns. The button shows your total incoming dice.
 - `R` opens the new-map confirmation. `M` toggles sound outside text fields, `F10` switches light/dark mode, `F9` toggles color assist, and `F8` toggles reduced motion. `ENTER` or `ESC` dismisses a destructive-action confirmation and keeps playing.
 
-All sound effects are synthesized procedurally at startup (no audio asset files).
+All sound effects are synthesized procedurally at startup (no audio asset files). Linux output automatically re-buffers after silence so short clicks and later battle effects are audible. Audio device failures are reported to stderr.
 
 Each AI has a hidden personality, rolled from the map seed — some attack recklessly, some wait for a clear advantage, some scheme against whoever is winning. All bots share a survival instinct: when one player grows dominant, they stop wearing each other down and gang up on the leader.
 
@@ -81,8 +81,10 @@ The UI font is DejaVu Sans Bold, embedded as coverage masks (Bitstream Vera lice
 ## Responsiveness and resource use
 
 - Input is polled at up to 60 Hz. Animated frames are capped at 60 fps; unfocused windows use 15 Hz.
-- Unchanged menus and idle single-player human turns reuse the previous frame. Static boards and map previews also reuse cached raster layers.
-- On-screen rendering is capped at 1600 × 1400 pixels and scales to larger windows. Offscreen exports have explicit size limits.
+- Unchanged menus and idle single-player human turns reuse the previous frame. Boards, previews, status panels, and dice illustrations use bounded caches; moving effects render separately. Moving the cursor inside the same territory keeps the map cache.
+- Normal windows use 2× rendering in each dimension for smooth dice, hex borders, and text. Raster work is capped at four million pixels; the filtered output retains the window resolution, including 2560 × 1600 and 4K. Larger windows use fewer subpixels within that budget. Offscreen exports have explicit size limits.
+- Only changed tiles are filtered again. Linux uploads the changed rectangles and skips identical frames, avoiding full-window copies for a small dice animation. Exposed windows receive a complete repaint.
+- Dice illustrations have a 16 MiB cache limit. The previous raster used for change detection stays within the four-million-pixel budget.
 - Audio uses one worker, at most 16 simultaneous voices, and a bounded request queue. Missing audio devices leave the game silent.
 - Maps retain the seeded PCG stream used before the engine migration, preserving existing seeds and bookmarks.
 
@@ -92,12 +94,19 @@ The UI font is DejaVu Sans Bold, embedded as coverage masks (Bitstream Vera lice
 cargo test --release -j 1 -- --test-threads=1
 cargo check --target x86_64-pc-windows-gnu --all-targets -j 1  # optional cross-platform check
 python3 scripts/audit-ui.py                               # requires Pillow
+python3 scripts/audit-runtime.py                          # Linux: bounded, isolated frame-time checks
+python3 scripts/audit-runtime.py --native                 # opens two short test windows
+python3 scripts/audit-audio.py                            # Linux: requires pactl + parec
 python3 scripts/pack-assets.py                            # only after changing font/icon sources
 ```
 
-This release passed 37 automated tests and the screenshot audit on Linux. The Windows backend passed cross-compilation checks; Windows runtime testing is still outstanding.
+Version 1.4.1 passed 42 automated tests and 19 screenshot scenarios on Linux. The Windows backend passed cross-compilation checks; Windows runtime testing is still outstanding.
 
-The UI audit uses temporary settings, bounded headless runs, and reproducible seeds. It captures light/dark menus and battles, team setup, accessibility, dialogs, join/replay screens, and small/wide layouts; it verifies that both mouse and keyboard theme changes reach the input frame and that exported GIFs are upright.
+The UI audit uses temporary settings, bounded headless runs, and reproducible seeds. It captures light/dark menus and battles, team setup, accessibility, dialogs, join/replay screens, and small/wide/high-resolution layouts; it verifies native screenshot dimensions, mouse and keyboard theme changes on the input frame, and upright GIFs.
+
+The runtime audit reports frame work separately from the 60/15 Hz cap and measures CPU time. Its results depend on background load and power settings; the cap does not guarantee 60 fps on every device. The audio audit routes only its test game's output into a temporary sink and verifies two short effects separated by silence, then removes the sink. It does not record a microphone or change the default audio output. This regression check fails against 1.4.0 and passes against 1.4.1.
+
+In the Linux native battle check (120 frames with background CPU load), 1.4.1 used **2.31 seconds of CPU time**, compared with **6.65 seconds** for 1.4.0. Wall time fell from 6.85 to 2.82 seconds. These are measurements from one device, rather than a guaranteed frame rate.
 
 For a bounded desktop smoke test:
 

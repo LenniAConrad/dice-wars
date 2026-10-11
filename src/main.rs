@@ -2031,6 +2031,32 @@ fn face_val(seed: u32, idx: u32, salt: u32) -> usize {
 
 // (x, y) is the bottom front corner of an isometric die of width w.
 fn draw_die(x: f32, y: f32, w: f32, seed: u32, idx: u32, pal: &Palette) {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    let faces = face_val(seed, idx, 1) as u32 * 6 + face_val(seed, idx, 2) as u32;
+    (
+        faces % 24,
+        w.to_bits(),
+        pal.mid.bytes(),
+        pal.dark.bytes(),
+        pal.light.bytes(),
+        pal.pip.bytes(),
+    )
+        .hash(&mut hash);
+    let pad = (w * 0.04).max(2.0);
+    engine::cached_sprite(
+        hash.finish(),
+        Rect::new(
+            x - w * 0.5 - pad,
+            y - w * 1.14 - pad,
+            w + pad * 2.0,
+            w * 1.14 + pad * 2.0,
+        ),
+        || draw_die_live(x, y, w, seed, idx, pal),
+    );
+}
+
+fn draw_die_live(x: f32, y: f32, w: f32, seed: u32, idx: u32, pal: &Palette) {
     let hw = w * 0.5;
     let qh = w * 0.26;
     let ch = w * 0.62;
@@ -2420,6 +2446,15 @@ fn handle_input(game: &mut Game, mut net_out: Option<&mut Vec<String>>) {
 
 // ---------------------------------------------------------------- game drawing
 
+fn board_hover(game: &Game) -> Option<usize> {
+    if game.current == game.my_seat && game.over.is_none() && game.battle.is_none() {
+        game.keyboard_hover
+            .or_else(|| pick_territory(game, mouse_virtual()))
+    } else {
+        None
+    }
+}
+
 fn draw_board(game: &Game, ui: &Ui, chances: bool) {
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -2436,37 +2471,26 @@ fn draw_board(game: &Game, ui: &Ui, chances: bool) {
         REDUCED_MOTION.load(Ordering::Relaxed),
     )
         .hash(&mut hash);
-    let m = mouse_virtual();
-    (m.x.to_bits(), m.y.to_bits()).hash(&mut hash);
+    board_hover(game).hash(&mut hash);
     for p in 0..MAX_PLAYERS {
         color_map(p).hash(&mut hash);
     }
     for t in &game.terrs {
         (t.owner, t.dice).hash(&mut hash);
     }
-    let animated = game.selected.is_some()
-        || game.battle.is_some()
-        || !game.floats.is_empty()
-        || game
-            .fx
-            .iter()
-            .any(|f| f.shake > 0.0 || f.bounce > 0.0 || f.flash > 0.0);
-    if animated {
-        game.time.to_bits().hash(&mut hash);
+    for t in 0..game.terrs.len() {
+        stack_is_moving(game, t).hash(&mut hash);
     }
+    game.battle.as_ref().map(|b| (b.a, b.d)).hash(&mut hash);
     engine::cached_layer(0, hash.finish(), || draw_board_live(game, ui, chances));
+    draw_board_effects(game, ui);
 }
 
 fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
     // the whole canvas is the play surface
     draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
 
-    let hover = if game.current == game.my_seat && game.over.is_none() && game.battle.is_none() {
-        game.keyboard_hover
-            .or_else(|| pick_territory(game, mouse_virtual()))
-    } else {
-        None
-    };
+    let hover = board_hover(game);
 
     // empty water cells become a quiet dot grid, so holes read as sea
     for i in 0..COLS * ROWS {
@@ -2487,7 +2511,6 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
         }
         let t = t as usize;
         let terr = &game.terrs[t];
-        let fx = game.fx[t];
         let mut col = map_fill(terr.owner);
         let selectable = terr.owner == game.current && terr.dice > 1;
         let attackable = game.selected.map_or(false, |s| {
@@ -2495,14 +2518,7 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
         });
         let protected_ally = terr.owner != game.current && game.same_team(game.current, terr.owner);
         if game.selected == Some(t) {
-            col = lighten(
-                col,
-                if REDUCED_MOTION.load(Ordering::Relaxed) {
-                    0.38
-                } else {
-                    0.38 + 0.1 * (game.time * 6.0).sin()
-                },
-            );
+            col = lighten(col, 0.38);
         } else if game.selected.is_some() && !attackable {
             // Teammates remain identifiable while choosing a target, but are
             // visibly subdued when friendly fire does not make them valid.
@@ -2513,9 +2529,6 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
             };
         } else if hover == Some(t) && (attackable || selectable) {
             col = lighten(col, 0.2);
-        }
-        if fx.flash > 0.0 {
-            col = mix(col, WHITE, fx.flash * 0.85);
         }
         fill_hex(cell_pos(i), HEX + 0.6, col);
     }
@@ -2558,6 +2571,75 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
         }
     }
 
+    // dice stacks, back to front
+    let mut order: Vec<usize> = (0..game.terrs.len()).collect();
+    order.sort_by(|&a, &b| game.terrs[a].anchor.y.total_cmp(&game.terrs[b].anchor.y));
+    for t in order {
+        if !stack_is_moving(game, t) {
+            draw_stack(&game.terrs[t], TerrFx::default(), 0.0);
+        }
+    }
+
+    // readable dice-count badge at each stack's base; in colorblind mode the
+    // badge takes the owner's symbol shape so color is never the only cue
+    for (idx, t) in game.terrs.iter().enumerate() {
+        if !stack_is_moving(game, idx) {
+            draw_stack_badge(t, ui);
+        }
+    }
+
+    // subtle win-chance hint on every attack option of the selected land
+    if chances && game.battle.is_none() && game.over.is_none() && game.current == game.my_seat {
+        if let Some(sel) = game.selected {
+            for &d in &game.terrs[sel].neighbors {
+                if !game.can_target(game.current, game.terrs[d].owner) {
+                    continue;
+                }
+                let c = win_chance_cached(game.terrs[sel].dice, game.terrs[d].dice);
+                let txt = format!("{:.0}%", c * 100.0);
+                let p = game.terrs[d].anchor + vec2(0.0, 32.0);
+                let tw = ui.width(&txt, 12.0);
+                let col = if c >= 0.6 {
+                    accent_ink(4) // blue: good odds (colorblind-safe pair)
+                } else if c >= 0.4 {
+                    INK()
+                } else {
+                    accent_ink(5) // orange: risky
+                };
+                draw_round_rect(
+                    p.x - tw * 0.5 - 6.0,
+                    p.y - 12.0,
+                    tw + 12.0,
+                    16.0,
+                    8.0,
+                    with_alpha(SRF(), 0.75),
+                );
+                ui.text_centered(&txt, p.x, p.y + 0.5, 12.0, with_alpha(col, 0.85));
+            }
+        }
+    }
+}
+
+fn draw_stack_badge(t: &Territory, ui: &Ui) {
+    let pal = palette(t.owner);
+    let bx = t.anchor.x + 16.0;
+    let by = t.anchor.y + 13.0;
+    if colorblind_mode() {
+        draw_symbol(bx, by, 13.0, t.owner, SRF());
+        draw_symbol(bx, by, 11.0, t.owner, pal.dark);
+        ui.text_centered(&t.dice.to_string(), bx, by + 4.0, 11.0, on_color(pal.dark));
+    } else {
+        draw_circle(bx, by, 10.0, SRF());
+        draw_circle(bx, by, 8.8, pal.dark);
+        ui.text_centered(&t.dice.to_string(), bx, by + 4.5, 13.0, on_color(pal.dark));
+    }
+}
+
+fn stack_is_moving(game: &Game, t: usize) -> bool {
+    !REDUCED_MOTION.load(Ordering::Relaxed) && (game.fx[t].shake > 0.0 || game.fx[t].bounce > 0.0)
+}
+
+fn draw_board_effects(game: &Game, ui: &Ui) {
     // attack arrow during a battle
     if let Some(b) = &game.battle {
         let from = game.terrs[b.a].anchor + vec2(0.0, -18.0);
@@ -2596,61 +2678,41 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
         }
     }
 
-    // dice stacks, back to front
-    let mut order: Vec<usize> = (0..game.terrs.len()).collect();
-    order.sort_by(|&a, &b| game.terrs[a].anchor.y.total_cmp(&game.terrs[b].anchor.y));
-    for t in order {
+    // A fading outline conveys captures without repainting every map tile.
+    for i in 0..COLS * ROWS {
+        let t = game.cell_terr[i];
+        if t < 0 || game.fx[t as usize].flash <= 0.0 {
+            continue;
+        }
+        let pos = cell_pos(i);
+        for d in 0..6 {
+            if neighbor_of(i % COLS, i / COLS, d).is_some_and(|n| game.cell_terr[n] == t) {
+                continue;
+            }
+            let a = (d as f32 * 60.0 - 30.0).to_radians();
+            let b = (d as f32 * 60.0 + 30.0).to_radians();
+            let p0 = pos + HEX * vec2(a.cos(), a.sin());
+            let p1 = pos + HEX * vec2(b.cos(), b.sin());
+            draw_line(
+                p0.x,
+                p0.y,
+                p1.x,
+                p1.y,
+                2.0,
+                with_alpha(WHITE, game.fx[t as usize].flash * 0.85),
+            );
+        }
+    }
+    let mut moving: Vec<usize> = (0..game.terrs.len())
+        .filter(|&t| stack_is_moving(game, t))
+        .collect();
+    moving.sort_by(|&a, &b| game.terrs[a].anchor.y.total_cmp(&game.terrs[b].anchor.y));
+    for &t in &moving {
         draw_stack(&game.terrs[t], game.fx[t], game.time);
     }
-
-    // readable dice-count badge at each stack's base; in colorblind mode the
-    // badge takes the owner's symbol shape so color is never the only cue
-    for t in &game.terrs {
-        let pal = palette(t.owner);
-        let bx = t.anchor.x + 16.0;
-        let by = t.anchor.y + 13.0;
-        if colorblind_mode() {
-            draw_symbol(bx, by, 13.0, t.owner, SRF());
-            draw_symbol(bx, by, 11.0, t.owner, pal.dark);
-            ui.text_centered(&t.dice.to_string(), bx, by + 4.0, 11.0, on_color(pal.dark));
-        } else {
-            draw_circle(bx, by, 10.0, SRF());
-            draw_circle(bx, by, 8.8, pal.dark);
-            ui.text_centered(&t.dice.to_string(), bx, by + 4.5, 13.0, on_color(pal.dark));
-        }
+    for t in moving {
+        draw_stack_badge(&game.terrs[t], ui);
     }
-
-    // subtle win-chance hint on every attack option of the selected land
-    if chances && game.battle.is_none() && game.over.is_none() && game.current == game.my_seat {
-        if let Some(sel) = game.selected {
-            for &d in &game.terrs[sel].neighbors {
-                if !game.can_target(game.current, game.terrs[d].owner) {
-                    continue;
-                }
-                let c = win_chance_cached(game.terrs[sel].dice, game.terrs[d].dice);
-                let txt = format!("{:.0}%", c * 100.0);
-                let p = game.terrs[d].anchor + vec2(0.0, 32.0);
-                let tw = ui.width(&txt, 12.0);
-                let col = if c >= 0.6 {
-                    accent_ink(4) // blue: good odds (colorblind-safe pair)
-                } else if c >= 0.4 {
-                    INK()
-                } else {
-                    accent_ink(5) // orange: risky
-                };
-                draw_round_rect(
-                    p.x - tw * 0.5 - 6.0,
-                    p.y - 12.0,
-                    tw + 12.0,
-                    16.0,
-                    8.0,
-                    with_alpha(SRF(), 0.75),
-                );
-                ui.text_centered(&txt, p.x, p.y + 0.5, 12.0, with_alpha(col, 0.85));
-            }
-        }
-    }
-
     // floating roll numbers / reinforcement popups
     for f in &game.floats {
         let p = (f.t / f.life).clamp(0.0, 1.0);
@@ -2674,6 +2736,49 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
 }
 
 fn draw_panel(game: &Game, ui: &Ui, settings: &Settings) {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    (
+        (game.seed, game.players),
+        game.current,
+        game.my_seat,
+        game.humans,
+        game.over.is_some(),
+        game.selected,
+        game.battle.is_some(),
+        game.hint_t > 0.0,
+        game.turn_timer.ceil() as u32,
+        (
+            game.teams.on,
+            settings.chances,
+            dark_mode(),
+            colorblind_mode(),
+        ),
+    )
+        .hash(&mut hash);
+    game.team.hash(&mut hash);
+    game.reserve.hash(&mut hash);
+    game.names.hash(&mut hash);
+    game.hint.hash(&mut hash);
+    game.log.last().hash(&mut hash);
+    for t in &game.terrs {
+        (t.owner, t.dice).hash(&mut hash);
+    }
+    let m = mouse_virtual();
+    if game.selected.is_some() && game.battle.is_none() {
+        pick_territory(game, m).hash(&mut hash);
+    }
+    for r in [r_endturn(), r_btn_menu(), r_btn_new()] {
+        r.contains(m).hash(&mut hash);
+    }
+    is_mouse_button_down(MouseButton::Left).hash(&mut hash);
+    for p in 0..MAX_PLAYERS {
+        color_map(p).hash(&mut hash);
+    }
+    engine::cached_layer(2, hash.finish(), || draw_panel_live(game, ui, settings));
+}
+
+fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
     let chances = settings.chances;
     let px = 16.0;
     let py = 632.0;

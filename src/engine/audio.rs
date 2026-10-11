@@ -25,6 +25,7 @@ fn mixer() -> Option<&'static mpsc::SyncSender<Voice>> {
             let (ready_tx, ready_rx) = mpsc::sync_channel(1);
             std::thread::spawn(move || {
                 let Some(mut device) = native::Device::new() else {
+                    eprintln!("Dice Wars: audio output is unavailable");
                     let _ = ready_tx.send(false);
                     return;
                 };
@@ -59,6 +60,7 @@ fn mixer() -> Option<&'static mpsc::SyncSender<Voice>> {
                     }
                     voices.retain(|v| v.looped || v.position < v.samples.len());
                     if !device.write(&output) {
+                        eprintln!("Dice Wars: audio output disconnected");
                         break;
                     }
                 }
@@ -161,7 +163,10 @@ mod native {
             let attr = BufferAttr {
                 maxlength: 8820,
                 tlength: 4410,
-                prebuf: 0,
+                // Automatic rebuffering is essential for intermittent effects.
+                // With zero, the server's read cursor runs ahead during idle
+                // and discards short effects written after that silence.
+                prebuf: 882,
                 minreq: 882,
                 fragsize: u32::MAX,
             };

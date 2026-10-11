@@ -40,6 +40,10 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
     render("team-setup", DW_TEAMS="1", DW_PLAYERS="9", DW_THEME="dark")
     render("small-window", DW_SIZE="640x564")
     render("wide-window", DW_SIZE="1200x820", DW_THEME="dark")
+    for name, size in [("full-hd", "1920x1080"), ("laptop-resolution", "2560x1600")]:
+        path = render(name, DW_SIZE=size, DW_AUTOSTART="1", DW_BATTLE="1", DW_THEME="dark")
+        with Image.open(path) as image:
+            assert image.size == tuple(map(int, size.split("x"))), "output lost native resolution"
     render("confirmation", DW_AUTOSTART="1", DW_SCENE="confirm", DW_THEME="dark")
     render("game-over", DW_AUTOSTART="1", DW_SCENE="over")
     render("join", DW_SCENE="join", DW_THEME="dark")
@@ -63,4 +67,4 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
 
     render("keyboard-focus", DW_AUTOSTART="1", DW_INPUT="1:key:Right;2:key:Enter")
     render("reduced-motion", DW_AUTOSTART="1", DW_BATTLE="1", DW_INPUT="1:key:F8")
-    print(f"Verified 17 scenes, immediate theme switching, and GIF orientation. Screenshots: {out}")
+    print(f"Verified 19 scenes, native output resolution, immediate theme switching, and GIF orientation. Screenshots: {out}")
