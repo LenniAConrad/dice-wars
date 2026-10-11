@@ -638,10 +638,10 @@ pub fn cached_sprite(key: u64, bounds: Rect, draw: impl FnOnce()) {
 fn apply_actions(r: &mut Runtime) {
     for (_, action) in r.actions.iter().filter(|(frame, _)| *frame == r.frames + 1) {
         match action.first().map(String::as_str) {
-            Some("click") if action.len() == 3 => {
+            Some("click" | "move") if action.len() == 3 => {
                 if let (Ok(x), Ok(y)) = (action[1].parse(), action[2].parse()) {
                     r.input.mouse = (x, y);
-                    r.input.clicked = true;
+                    r.input.clicked = action[0] == "click";
                 }
             }
             Some("key") if action.len() == 2 => {

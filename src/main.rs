@@ -329,6 +329,8 @@ fn SRF() -> Color {
 }
 // pastel fills are light in both themes, so text on them is always dark
 const INK_ON_FILL: Color = Color::new(0.15, 0.16, 0.30, 1.0);
+// Pastel map art keeps the same outline and colors in either interface theme.
+const MAP_EDGE: Color = Color::new(0.24, 0.25, 0.42, 1.0);
 
 // one pastel base per player; dice/tile shades are derived from it
 const PLAYER_BASE: [Color; MAX_PLAYERS] = [
@@ -479,12 +481,7 @@ fn pip_color(palette: &Palette, face: Color) -> Color {
     }
 }
 fn map_fill(player: usize) -> Color {
-    let fill = palette(player).fill;
-    if dark_mode() {
-        mix(fill, SRF(), 0.52)
-    } else {
-        fill
-    }
+    palette(player).fill
 }
 fn accent_ink(player: usize) -> Color {
     let color = palette(player).dark;
@@ -2560,13 +2557,13 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
                         2.4
                     },
                     if game.keyboard_hover == Some(t as usize) {
-                        INK()
+                        INK_ON_FILL
                     } else {
-                        BORDER()
+                        MAP_EDGE
                     },
                 );
-                draw_circle(p0.x, p0.y, 1.2, BORDER());
-                draw_circle(p1.x, p1.y, 1.2, BORDER());
+                draw_circle(p0.x, p0.y, 1.2, MAP_EDGE);
+                draw_circle(p1.x, p1.y, 1.2, MAP_EDGE);
             }
         }
     }
@@ -2903,11 +2900,7 @@ fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
     if !pressed {
         draw_round_rect(b.x + 2.0, b.y + 4.0, b.w, b.h, 22.0, PANEL_SHADOW());
     }
-    let fill = if hovered {
-        mix(palette(HUMAN).fill, SRF(), 0.4)
-    } else {
-        SRF()
-    };
+    let fill = control_fill(SRF(), hovered);
     let edge = if active {
         BORDER()
     } else {
@@ -2935,12 +2928,17 @@ fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
     );
     for (r, label) in [(r_btn_menu(), "MENU"), (r_btn_new(), "NEW MAP")] {
         let h = r.contains(mp);
-        let f = if h {
-            mix(palette(HUMAN).fill, SRF(), 0.5)
-        } else {
-            SRF()
-        };
-        draw_round_frame(r.x, r.y, r.w, r.h, 10.0, 2.0, f, CARD_EDGE());
+        let f = control_fill(SRF(), h);
+        draw_round_frame(
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            10.0,
+            2.0,
+            f,
+            if h { BORDER() } else { CARD_EDGE() },
+        );
         ui.text_centered(label, r.x + r.w * 0.5, r.y + 21.0, 13.0, INK());
     }
 
@@ -3118,12 +3116,8 @@ fn draw_icon_bar(settings: &Settings, ui: &Ui, mp: Vec2) {
             r.h,
             8.0,
             1.5,
-            if hov {
-                mix(SRF(), palette(HUMAN).fill, 0.35)
-            } else {
-                SRF()
-            },
-            CARD_EDGE(),
+            control_fill(SRF(), hov),
+            if hov { BORDER() } else { CARD_EDGE() },
         );
         let (cx, cy) = (r.x + r.w * 0.5, r.y + r.h * 0.5);
         match i {
@@ -3338,11 +3332,7 @@ fn draw_over(game: &Game, ui: &Ui) {
         (r_over_gif(), "SAVE GIF"),
     ] {
         let hovered = rct.contains(mouse_virtual());
-        let fill = if hovered {
-            mix(palette(HUMAN).fill, WHITE, 0.35)
-        } else {
-            palette(HUMAN).fill
-        };
+        let fill = control_fill(palette(HUMAN).fill, hovered);
         let by = y + 130.0;
         draw_round_frame(
             rct.x,
@@ -3386,19 +3376,24 @@ fn draw_confirm(kind: Confirm, ui: &Ui) {
     let m = mouse_virtual();
     let yes = r_confirm_yes();
     let no = r_confirm_no();
-    let yf = if yes.contains(m) {
-        mix(palette(HUMAN).fill, WHITE, 0.35)
-    } else {
-        palette(HUMAN).fill
-    };
+    let yf = control_fill(palette(HUMAN).fill, yes.contains(m));
     draw_round_frame(yes.x, yes.y, yes.w, yes.h, 14.0, 2.5, yf, BORDER());
     ui.text_centered("YES", yes.x + yes.w * 0.5, yes.y + 29.0, 20.0, INK_ON_FILL);
-    let nf = if no.contains(m) {
-        mix(SRF(), INK(), 0.06)
-    } else {
-        SRF()
-    };
-    draw_round_frame(no.x, no.y, no.w, no.h, 14.0, 2.0, nf, CARD_EDGE());
+    let nf = control_fill(SRF(), no.contains(m));
+    draw_round_frame(
+        no.x,
+        no.y,
+        no.w,
+        no.h,
+        14.0,
+        2.0,
+        nf,
+        if no.contains(m) {
+            BORDER()
+        } else {
+            CARD_EDGE()
+        },
+    );
     ui.text_centered("CANCEL", no.x + no.w * 0.5, no.y + 29.0, 20.0, INK());
     ui.text_centered(
         "Enter or ESC: keep playing",
@@ -5554,7 +5549,7 @@ fn draw_map_mini_live(game: &Game, area: Rect) {
                 let a1 = (d as f32 * 60.0 + 30.0).to_radians();
                 let p0 = tp(pos + HEX * vec2(a0.cos(), a0.sin()));
                 let p1 = tp(pos + HEX * vec2(a1.cos(), a1.sin()));
-                draw_line(p0.x, p0.y, p1.x, p1.y, 1.3, BORDER());
+                draw_line(p0.x, p0.y, p1.x, p1.y, 1.3, MAP_EDGE);
             }
         }
     }
@@ -5661,30 +5656,51 @@ fn draw_menu_hero() {
 }
 
 fn draw_star(cx: f32, cy: f32, r: f32, col: Color) {
-    let tau = std::f32::consts::TAU;
-    let ri = r * 0.47;
-    draw_poly(cx, cy, 5, ri, -126.0, col);
-    for i in 0..6 {
-        let ao = -0.25 * tau + i as f32 / 5.0 * tau;
-        let ai0 = ao - tau / 10.0;
-        let ai1 = ao + tau / 10.0;
-        draw_triangle(
-            vec2(cx + ri * ai0.cos(), cy + ri * ai0.sin()),
-            vec2(cx + r * ao.cos(), cy + r * ao.sin()),
-            vec2(cx + ri * ai1.cos(), cy + ri * ai1.sin()),
-            col,
-        );
+    // Ten alternating vertices form five symmetric points. The triangles
+    // share edges without overlapping, keeping translucent stars uniform.
+    let points: [Vec2; 10] = std::array::from_fn(|i| {
+        let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+        let radius = if i % 2 == 0 { r } else { r * 0.47 };
+        vec2(cx + radius * angle.cos(), cy + radius * angle.sin())
+    });
+    for i in 0..10 {
+        draw_triangle(vec2(cx, cy), points[i], points[(i + 1) % 10], col);
+    }
+}
+
+fn control_fill(fill: Color, hovered: bool) -> Color {
+    if !hovered {
+        return fill;
+    }
+    let surface = SRF();
+    if fill.r == surface.r && fill.g == surface.g && fill.b == surface.b {
+        // White cannot be lightened. Give neutral controls a visible accent
+        // tint in either theme, while retaining contrast with their labels.
+        mix(
+            fill,
+            palette(HUMAN).fill,
+            if dark_mode() { 0.16 } else { 0.30 },
+        )
+    } else if on_color(fill).r > 0.5 {
+        darken(fill, 0.85)
+    } else {
+        mix(fill, WHITE, 0.25)
     }
 }
 
 fn menu_button(r: Rect, fill: Color, edge: Color, hovered: bool) {
-    let f = if hovered {
-        mix(fill, WHITE, 0.35)
-    } else {
-        fill
-    };
+    let f = control_fill(fill, hovered);
     draw_round_rect(r.x + 2.0, r.y + 4.0, r.w, r.h, 14.0, PANEL_SHADOW());
-    draw_round_frame(r.x, r.y, r.w, r.h, 14.0, 2.5, f, edge);
+    draw_round_frame(
+        r.x,
+        r.y,
+        r.w,
+        r.h,
+        14.0,
+        2.5,
+        f,
+        if hovered { BORDER() } else { edge },
+    );
 }
 
 fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
@@ -5744,14 +5760,7 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
             );
         }
         let hov = r.contains(m);
-        draw_round_rect(
-            r.x,
-            r.y,
-            r.w,
-            r.h,
-            6.0,
-            if hov { lighten(base, 0.25) } else { base },
-        );
+        draw_round_rect(r.x, r.y, r.w, r.h, 6.0, control_fill(base, hov));
     }
 
     let nums = ["2", "3", "4", "5", "6", "7", "8", "9"];
@@ -5820,23 +5829,26 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     ];
     seg_row(ui, m, true, "MODE", &row, 15.0);
 
-    // bookmark star, frameless, tucked into the preview's corner
+    // Match the toolbar's button treatment without changing the icon's size.
     let rb = r_bookmark();
     let marked = menu.is_bookmarked();
     let hovs = rb.contains(m);
-    let scol = if marked {
-        palette(HUMAN).mid
-    } else if hovs {
-        with_alpha(INK(), 0.72)
-    } else {
-        with_alpha(INK(), 0.28)
-    };
-    draw_star(
-        rb.x + rb.w * 0.5,
-        rb.y + rb.h * 0.5,
-        if hovs { 15.0 } else { 13.0 },
-        scol,
+    draw_round_frame(
+        rb.x,
+        rb.y,
+        rb.w,
+        rb.h,
+        8.0,
+        1.5,
+        control_fill(SRF(), hovs),
+        if hovs { BORDER() } else { CARD_EDGE() },
     );
+    let scol = if marked {
+        accent_ink(HUMAN)
+    } else {
+        with_alpha(INK(), 0.60)
+    };
+    draw_star(rb.x + rb.w * 0.5, rb.y + rb.h * 0.5, 13.0, scol);
 
     // the same icon toolbar as in-game (sound, chances, colorblind, speed)
     draw_icon_bar(settings, ui, m);
@@ -5890,11 +5902,13 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
         let r = r_bm_row(i);
         let active = seed == menu.seed && players == menu.players;
         let fill = if active { palette(HUMAN).fill } else { SRF() };
+        let del = r_bm_del(i);
+        let dh = del.contains(m);
         menu_button(
             r,
             fill,
             if active { BORDER() } else { CARD_EDGE() },
-            r.contains(m),
+            r.contains(m) && !dh,
         );
         ui.text(
             &format!("#{:08}", seed),
@@ -5910,14 +5924,24 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
             16.0,
             with_alpha(if active { INK_ON_FILL } else { INK() }, 0.72),
         );
-        let del = r_bm_del(i);
-        let dh = del.contains(m);
+        if dh {
+            draw_round_frame(
+                del.x,
+                del.y,
+                del.w,
+                del.h,
+                8.0,
+                1.5,
+                control_fill(fill, true),
+                BORDER(),
+            );
+        }
         ui.text_centered(
             "x",
             del.x + del.w * 0.5,
             del.y + 23.0,
             20.0,
-            if dh || active {
+            if active {
                 INK_ON_FILL
             } else {
                 with_alpha(INK(), 0.72)
@@ -6282,7 +6306,7 @@ fn seg_row(ui: &Ui, m: Vec2, live: bool, label: &str, items: &[(Rect, &str, bool
                 h - 5.0,
                 (h - 5.0) * 0.5,
                 2.0,
-                palette(HUMAN).fill,
+                control_fill(palette(HUMAN).fill, hov),
                 BORDER(),
             );
         } else if hov {
@@ -6292,7 +6316,7 @@ fn seg_row(ui: &Ui, m: Vec2, live: bool, label: &str, items: &[(Rect, &str, bool
                 r.w - 5.0,
                 h - 5.0,
                 (h - 5.0) * 0.5,
-                mix(SRF(), palette(HUMAN).fill, 0.35),
+                control_fill(SRF(), hov),
             );
         }
         ui.text_centered(
@@ -6524,6 +6548,16 @@ fn draw_host_lobby(
 fn draw_toggle(r: Rect, label: &str, on: bool, ui: &Ui, m: Vec2) {
     let hov = r.contains(m);
     let (bx, by) = (r.x, r.y + 2.0);
+    if hov {
+        draw_round_rect(
+            r.x - 4.0,
+            r.y - 2.0,
+            r.w + 8.0,
+            r.h + 4.0,
+            6.0,
+            control_fill(SRF(), true),
+        );
+    }
     draw_round_frame(
         bx,
         by,
@@ -6531,7 +6565,7 @@ fn draw_toggle(r: Rect, label: &str, on: bool, ui: &Ui, m: Vec2) {
         20.0,
         6.0,
         2.0,
-        if on { palette(HUMAN).mid } else { SRF() },
+        control_fill(if on { palette(HUMAN).mid } else { SRF() }, hov),
         if hov { BORDER() } else { CARD_EDGE() },
     );
     if on {
@@ -6641,14 +6675,7 @@ fn draw_lobby_shared(
             );
         }
         let hov = rc.contains(m) && !taken.contains(&i);
-        draw_round_rect(
-            rc.x,
-            rc.y,
-            rc.w,
-            rc.h,
-            6.0,
-            if hov { lighten(base, 0.25) } else { base },
-        );
+        draw_round_rect(rc.x, rc.y, rc.w, rc.h, 6.0, control_fill(base, hov));
         if taken.contains(&i) {
             draw_line(
                 rc.x + 4.0,
@@ -8544,7 +8571,17 @@ mod tests {
                     let pal = palette(player);
                     for fill in [pal.mid, pal.dark, pal.fill] {
                         assert!(contrast(on_color(fill), fill) >= 4.5, "label {player}");
+                        assert!(
+                            contrast(on_color(fill), control_fill(fill, true)) >= 4.5,
+                            "hover label {player}"
+                        );
                     }
+                    apply_local_colors(player);
+                    assert!(
+                        contrast(INK(), control_fill(SRF(), true)) >= 4.5,
+                        "neutral hover label {player}"
+                    );
+                    apply_local_colors(0);
                     for face in [pal.mid, pal.dark, pal.light] {
                         assert!(
                             contrast(pip_color(&pal, face), face) >= 3.0,

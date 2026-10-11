@@ -40,9 +40,10 @@ Build scripts install the Rust toolchain if missing and default to **one build w
 - **Mode** — FREE-FOR-ALL is the classic last-player-standing game. TEAMS ends the game when only one team is left alive: pick 2–4 teams and which one you play on (bots spread evenly across the rest), or choose HUMANS VS BOTS to put every human on one side. Everyone still plays for themselves — no shared dice or reinforcements. Two extra rules are toggleable: **Friendly fire** (teammates may attack each other, on by default) and **Islands link via allies** (your separated islands count as one connected region when teammate land bridges them, which boosts END TURN reinforcements — off by default). Bots never attack their own team. Everything persists in `settings.txt` and applies to hosted online games too.
 - **Map preview** — the generated map is shown live. Deals are fairness-balanced: every player starts with a comparable largest cluster, equal territory counts, and the first player is decided by the seed.
 - **Seed** — maps are deterministic: the same 8-digit seed and player count always produce the same map. Click the seed to type one in, use `<` / `>` to step through neighboring seeds, or `NEW` (or `N`) to skip to a random map.
-- **Bookmark map** — saves the current seed + player count to `bookmarks.txt`; click a bookmark to load it, or its `x` to delete it.
+- **Bookmark map** — the fixed-size, five-point star saves the current seed + player count to `bookmarks.txt`; click a bookmark to load it, or its `x` to delete it.
 - **Toolbar** — sound, win chances, color assist, 1x/2x speed, light/dark theme, and reduced motion. Hover for the current state and keyboard shortcut. Settings persist in `settings.txt`.
-- **Themes** — the board, preview, labels, controls, dialogs, and outer background switch on the input frame. Dark mode uses muted territory fills; colored buttons keep readable labels in both themes.
+- **Hover feedback** — buttons, toolbar icons, selected options, color swatches, checkboxes, and bookmark deletion visibly react on hover in both themes. Neutral controls gain an accent tint; colored controls preserve label contrast.
+- **Themes** — the surrounding surfaces, labels, controls, dialogs, and outer background switch on the input frame. Territory pastels, map outlines, and dice retain their original colors in dark mode; colored buttons keep readable labels in both themes.
 - **Accessibility** — protan color assist uses separated hues and owner-symbol badges. Dice pips and colored control labels choose contrasting ink. Reduced motion removes shaking, bouncing, floating text movement, and selection pulsing. [Nine-player accessibility screenshot](assets/screenshot-accessible.png).
 - **START GAME** (or `ENTER`) plays the previewed map.
 
@@ -100,9 +101,9 @@ python3 scripts/audit-audio.py                            # Linux: requires pact
 python3 scripts/pack-assets.py                            # only after changing font/icon sources
 ```
 
-Version 1.4.1 passed 42 automated tests and 19 screenshot scenarios on Linux. The Windows backend passed cross-compilation checks; Windows runtime testing is still outstanding.
+Version 1.4.2 passed 42 automated tests and 29 screenshot scenarios on Linux. The Windows backend passed cross-compilation checks; Windows runtime testing is still outstanding.
 
-The UI audit uses temporary settings, bounded headless runs, and reproducible seeds. It captures light/dark menus and battles, team setup, accessibility, dialogs, join/replay screens, and small/wide/high-resolution layouts; it verifies native screenshot dimensions, mouse and keyboard theme changes on the input frame, and upright GIFs.
+The UI audit uses temporary settings, bounded headless runs, and reproducible seeds. It captures light/dark menus and battles, team setup, accessibility, dialogs, join/replay screens, and small/wide/high-resolution layouts; it verifies native screenshot dimensions, mouse and keyboard theme changes on the input frame, unchanged pastel map art when switching themes, visible button hover fills in both themes, bookmark states and uniform star fills, and upright GIFs. Each scene uses separate temporary preferences.
 
 The runtime audit reports frame work separately from the 60/15 Hz cap and measures CPU time. Its results depend on background load and power settings; the cap does not guarantee 60 fps on every device. The audio audit routes only its test game's output into a temporary sink and verifies two short effects separated by silence, then removes the sink. It does not record a microphone or change the default audio output. This regression check fails against 1.4.0 and passes against 1.4.1.
 
