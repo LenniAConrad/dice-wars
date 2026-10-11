@@ -10,8 +10,8 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 BIN_DIR="$HOME/.local/bin"
 mkdir -p "$BIN_DIR"
-rm -f "$BIN_DIR/dice-wars"
-cp target/release/dicegame "$BIN_DIR/dice-wars"
+install -m 755 target/release/dicegame "$BIN_DIR/dice-wars.new"
+mv -f "$BIN_DIR/dice-wars.new" "$BIN_DIR/dice-wars"
 echo "Installed binary: $BIN_DIR/dice-wars"
 
 ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons"

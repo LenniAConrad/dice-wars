@@ -1,5 +1,5 @@
-use macroquad::audio::{load_sound_from_bytes, play_sound, PlaySoundParams};
-use macroquad::prelude::*;
+use dicegame::engine::audio::{load_sound_from_bytes, play_sound, PlaySoundParams};
+use dicegame::engine::{self, prelude::*};
 
 fn wav_bytes(samples: &[f32]) -> Vec<u8> {
     let rate: u32 = 44_100;
@@ -23,13 +23,13 @@ fn wav_bytes(samples: &[f32]) -> Vec<u8> {
     d
 }
 
-#[macroquad::main("sndcheck")]
-async fn main() {
+fn main() {
+    engine::init("Sound check", 480, 320).unwrap();
     let samples: Vec<f32> = (0..44100)
         .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 44100.0).sin() * 0.4)
         .collect();
     eprintln!("sndcheck: loading {} byte wav", 44 + samples.len() * 2);
-    match load_sound_from_bytes(&wav_bytes(&samples)).await {
+    match load_sound_from_bytes(&wav_bytes(&samples)) {
         Ok(s) => {
             eprintln!("sndcheck: LOAD OK, playing");
             play_sound(
@@ -44,7 +44,10 @@ async fn main() {
     }
     for _ in 0..150 {
         clear_background(WHITE);
-        next_frame().await;
+        if !engine::next_frame() {
+            break;
+        }
     }
+    engine::shutdown();
     eprintln!("sndcheck: done");
 }

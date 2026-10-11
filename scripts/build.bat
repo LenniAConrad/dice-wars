@@ -11,6 +11,6 @@ if errorlevel 1 (
     set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
 )
 
-cargo build --release
+cargo build --release -j 1
 if errorlevel 1 exit /b 1
 echo Built: target\release\dicegame.exe

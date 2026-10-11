@@ -11,5 +11,5 @@ if ! command -v cargo >/dev/null 2>&1; then
     . "$HOME/.cargo/env"
 fi
 
-cargo build --release
+cargo build --release -j "${CARGO_BUILD_JOBS:-1}"
 echo "Built: target/release/dicegame"

@@ -1,3 +1,17 @@
+# Dice Wars v1.4.0
+
+Native engine and interface refinement release.
+
+- Replaces Macroquad and getrandom with a native software renderer, OS entropy, embedded font masks, and a bounded procedural-audio mixer. No Cargo dependencies; Linux uses X11/PulseAudio, Windows uses Win32/GDI and native audio.
+- Caps animated rendering at 60 fps, reduces background polling to 15 Hz, caches map layers, and reuses unchanged menu/idle frames. Builds default to one worker.
+- Compact attack/defend roll rows leave the board, controls, and player cards visible; explicit totals and tie results make battles easier to follow.
+- Immediate light/dark switching updates every surface, including the outer background. Dark maps use muted fills; labels, badges, pips, and owner-colored text have contrast checks.
+- Adds keyboard territory focus/activation, toolbar descriptions, reduced motion, theme/accessibility shortcuts, and consistent controls in lobbies and replays.
+- Repairs offscreen image orientation, prevents live AI from inventing moves during replays, samples long GIFs through the final event, keeps saved-map seeds compatible, and adds reproducible screenshot audits.
+- Hard bots now follow the same random reinforcement rule as humans and do not prioritize opponents simply because they are human.
+
+---
+
 # Dice Wars v1.3.10
 
 Accessibility, team readability, and multiplayer hardening release. Online players must both update (older versions are told so).
