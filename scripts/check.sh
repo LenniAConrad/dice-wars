@@ -12,6 +12,13 @@ jobs="${CARGO_BUILD_JOBS:-1}"
 
 step() { printf '\n== %s\n' "$*"; }
 
+step "formatting"
+if cargo fmt --version >/dev/null 2>&1; then
+    cargo fmt --check
+else
+    echo "skipped: rustup component add rustfmt"
+fi
+
 step "unit tests"
 cargo test --release -j "$jobs" -- --test-threads=1
 

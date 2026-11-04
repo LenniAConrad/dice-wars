@@ -4,12 +4,16 @@ use dicegame::engine::prelude::*;
 
 use crate::board::gen_map_local;
 use crate::draw_game::{draw_battle_overlay, draw_board, draw_panel_replay};
-use crate::game::{split_sum, Battle, Game, RepEvent, MAX_DICE};
+use crate::game::HUMAN;
+use crate::game::{dice_count, split_sum, Battle, Game, RepEvent, MAX_DICE};
 use crate::gif::{downsample, gif_capture_count, quantize_image, GifWriter, GIF_H, GIF_W};
 use crate::settings::replay_file;
 use crate::sound::Snd;
-use crate::theme::{BG, BORDER, INK, SRF};
-use crate::ui::{draw_icon_bar, draw_round_frame, mouse_virtual, view_camera, Ui, WIN_H, WIN_W};
+use crate::theme::{accent_ink, with_alpha, BG, INK};
+use crate::ui::{
+    draw_icon_bar, draw_round_rect, mouse_virtual, secondary_button, seg_group, view_camera, Ui,
+    WIN_H, WIN_W,
+};
 use crate::{App, Screen};
 
 pub(crate) struct Replay {
@@ -22,7 +26,12 @@ pub(crate) struct Replay {
     pub(crate) frame_count: usize,
     pub(crate) rt: Option<RenderTarget>,
     pub(crate) saved: Option<String>, // status message once the gif is written
+    pub(crate) paused: bool,
+    pub(crate) speed: usize,  // index into REPLAY_SPEEDS
+    start: Vec<(usize, u32)>, // the dealt board, for RESTART
 }
+
+const REPLAY_SPEEDS: [(f32, &str); 3] = [(1.1, "1x"), (2.2, "2x"), (4.4, "4x")];
 
 impl Replay {
     pub(crate) fn new(src: &Game, saving: bool) -> Self {
@@ -39,6 +48,7 @@ impl Replay {
         }
         g.recording = false;
         g.banner_t = 0.0;
+        let start = g.terrs.iter().map(|t| (t.owner, t.dice)).collect();
         let (gif, saved) = if saving {
             let path = replay_file(&format!("replay-{:08}.gif", src.seed));
             match GifWriter::create(&path, GIF_W as u16, GIF_H as u16, 12) {
@@ -62,7 +72,26 @@ impl Replay {
                 None
             },
             saved,
+            paused: false,
+            speed: 1,
+            start,
         }
+    }
+
+    /// Back to the dealt board, playing.
+    pub(crate) fn restart(&mut self) {
+        for (t, &(owner, dice)) in self.g.terrs.iter_mut().zip(&self.start) {
+            t.owner = owner;
+            t.dice = dice;
+        }
+        for fx in &mut self.g.fx {
+            *fx = Default::default();
+        }
+        self.g.battle = None;
+        self.g.log.clear();
+        self.idx = 0;
+        self.timer = 0.0;
+        self.paused = false;
     }
 
     pub(crate) fn finished(&self) -> bool {
@@ -116,7 +145,7 @@ impl Replay {
                 }
                 let nm = self.g.name_of(player);
                 self.g
-                    .push_log(format!("{} reinforced with {} dice.", nm, n));
+                    .push_log(format!("{} reinforced with {}.", nm, dice_count(n as u32)));
             }
         }
     }
@@ -149,33 +178,115 @@ impl Replay {
     }
 }
 
+// replay controls share the status lane of the game panel
+fn r_play() -> Rect {
+    Rect::new(40.0, 640.0, 120.0, 40.0)
+}
+
+fn r_restart() -> Rect {
+    Rect::new(168.0, 640.0, 110.0, 40.0)
+}
+
+fn r_speed(k: usize) -> Rect {
+    Rect::new(290.0 + k as f32 * 50.0, 640.0, 50.0, 40.0)
+}
+
+fn r_exit() -> Rect {
+    Rect::new(WIN_W - 136.0, 640.0, 96.0, 40.0)
+}
+
 fn draw_replay_hud(r: &Replay, ui: &Ui) {
-    let txt = if let Some(msg) = &r.saved {
-        format!("{} — click or ESC for menu", msg)
+    let m = mouse_virtual();
+    let total = r.events.len().max(1);
+    let (x0, x1) = (r_speed(2).x + 70.0, r_exit().x - 24.0);
+    let status = if let Some(msg) = &r.saved {
+        msg.clone()
     } else if r.saving {
-        format!("Recording GIF... {}/{}", r.idx, r.events.len())
+        format!("Saving GIF… move {} of {}", r.idx, r.events.len())
     } else if r.finished() {
-        "Replay finished — click or ESC for menu".to_string()
+        "Replay finished".to_string()
     } else {
-        format!("REPLAY  {}/{}   ESC = exit", r.idx, r.events.len())
+        format!("Move {} of {}", r.idx, r.events.len())
     };
-    let w = 570.0;
-    draw_round_frame(30.0, 16.0, w, 44.0, 14.0, 2.5, SRF(), BORDER());
-    ui.text_fitted(&txt, 48.0, 45.0, 16.0, w - 36.0, INK());
+    let (sx, sw) = if r.saving {
+        (40.0, x1 - 40.0)
+    } else {
+        (x0, x1 - x0)
+    };
+    ui.text_fitted(&status, sx, 655.0, 14.0, sw, INK());
+    draw_round_rect(sx, 667.0, sw, 6.0, 3.0, with_alpha(INK(), 0.12));
+    draw_round_rect(
+        sx,
+        667.0,
+        (sw * r.idx as f32 / total as f32).max(6.0),
+        6.0,
+        3.0,
+        accent_ink(HUMAN),
+    );
+    if !r.saving {
+        let play = if r.finished() {
+            "AGAIN"
+        } else if r.paused {
+            "PLAY"
+        } else {
+            "PAUSE"
+        };
+        secondary_button(ui, r_play(), play, 14.0, m);
+        secondary_button(ui, r_restart(), "RESTART", 14.0, m);
+        let row: Vec<(Rect, &str, bool)> = REPLAY_SPEEDS
+            .iter()
+            .enumerate()
+            .map(|(k, (_, l))| (r_speed(k), *l, r.speed == k))
+            .collect();
+        seg_group(ui, m, true, &row, 13.0);
+    }
+    if !r.saving || r.saved.is_some() {
+        secondary_button(ui, r_exit(), "MENU", 14.0, m);
+    }
 }
 
 impl App {
     // One frame of a replay, writing GIF frames while exporting.
     pub(crate) fn run_replay(&mut self, dt: f32) {
         let r = self.replay.as_mut().unwrap();
-        let speed = if r.saving { 1.0 } else { 2.2 };
-        r.g.update(dt * speed);
         let mut exit = is_key_pressed(KeyCode::Escape);
+        let click = is_mouse_button_pressed(MouseButton::Left);
+        let m = mouse_virtual();
+        if !r.saving {
+            // Space pauses, the arrow steps one move while paused, R restarts
+            let toggle = is_key_pressed(KeyCode::Space) || (click && r_play().contains(m));
+            if toggle && r.finished()
+                || is_key_pressed(KeyCode::R) && !modifier_down()
+                || click && r_restart().contains(m)
+            {
+                r.restart();
+            } else if toggle {
+                r.paused = !r.paused;
+            }
+            for k in 0..REPLAY_SPEEDS.len() {
+                if click && r_speed(k).contains(m) {
+                    r.speed = k;
+                }
+            }
+            if r.paused && is_key_pressed(KeyCode::Right) && r.g.battle.is_none() {
+                r.timer = 1.0; // the next step fires at once
+                r.step_watch(0.0);
+            }
+        }
+        if click && r_exit().contains(m) && (!r.saving || r.saved.is_some()) {
+            exit = true;
+        }
+        let speed = if r.saving {
+            1.0
+        } else {
+            REPLAY_SPEEDS[r.speed].0
+        };
+        r.g.update(dt * speed);
         if r.saving {
             if r.saved.is_none() && r.idx < r.events.len() {
                 r.apply_instant();
             }
-        } else {
+        } else if !r.paused {
             r.step_watch(dt * speed);
         }
         if r.saving && r.saved.is_none() {
@@ -219,9 +330,6 @@ impl App {
         draw_battle_overlay(&r.g, &self.ui);
         draw_replay_hud(r, &self.ui);
         draw_icon_bar(&self.settings, &self.ui, mouse_virtual());
-        if (r.finished() || r.saved.is_some()) && is_mouse_button_pressed(MouseButton::Left) {
-            exit = true;
-        }
         if r.saving {
             r.g.snd.clear();
         } else {

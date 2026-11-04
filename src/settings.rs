@@ -94,6 +94,8 @@ pub(crate) struct Settings {
     pub(crate) last_addr: String, // last host address joined, prefilled next time
     pub(crate) players: usize,    // last chosen player count
     pub(crate) difficulty: usize, // last chosen difficulty index
+    pub(crate) played: [u32; 3],  // finished solo games per difficulty
+    pub(crate) won: [u32; 3],     // of those, the ones you won
 }
 
 // lobby names travel in space/comma-separated messages: keep them plain
@@ -105,6 +107,14 @@ pub(crate) fn clean_name(s: &str) -> String {
 }
 
 impl Settings {
+    pub(crate) fn games_played(&self) -> u32 {
+        self.played.iter().sum()
+    }
+
+    pub(crate) fn games_won(&self) -> u32 {
+        self.won.iter().sum()
+    }
+
     pub(crate) fn team_cfg(&self) -> TeamCfg {
         TeamCfg {
             on: self.teams,
@@ -141,6 +151,8 @@ fn parse_settings(txt: &str) -> Settings {
         last_addr: String::new(),
         players: 6,
         difficulty: 1,
+        played: [0; 3],
+        won: [0; 3],
     };
     let has_theme = txt.lines().any(|l| l.starts_with("theme "));
     for l in txt.lines() {
@@ -178,6 +190,17 @@ fn parse_settings(txt: &str) -> Settings {
                 s.players = v.parse::<usize>().unwrap_or(6).clamp(2, MAX_PLAYERS)
             }
             (Some("difficulty"), Some(v)) => s.difficulty = v.parse::<usize>().unwrap_or(1).min(2),
+            // record p_easy w_easy p_normal w_normal p_hard w_hard
+            (Some("record"), Some(first)) => {
+                let n: Vec<u32> = std::iter::once(first)
+                    .chain(it)
+                    .map(|v| v.parse().unwrap_or(0))
+                    .collect();
+                for k in 0..3 {
+                    s.played[k] = n.get(k * 2).copied().unwrap_or(0);
+                    s.won[k] = n.get(k * 2 + 1).copied().unwrap_or(0).min(s.played[k]);
+                }
+            }
             _ => {}
         }
     }
@@ -188,7 +211,7 @@ pub(crate) fn save_settings(s: &Settings) {
     let _ = write_atomic(
         &data_file(SETTINGS_FILE),
         &format!(
-            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\nplayers {}\ndifficulty {}\nreducedmotion {}\nquiet {}\ntheme {}\n",
+            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\nplayers {}\ndifficulty {}\nreducedmotion {}\nquiet {}\ntheme {}\nrecord {} {} {} {} {} {}\n",
             s.chances as u8,
             s.muted as u8,
             s.colorblind as u8,
@@ -207,7 +230,13 @@ pub(crate) fn save_settings(s: &Settings) {
             s.difficulty,
             s.reduced_motion as u8,
             s.quiet as u8,
-            s.theme
+            s.theme,
+            s.played[0],
+            s.won[0],
+            s.played[1],
+            s.won[1],
+            s.played[2],
+            s.won[2]
         ),
     );
 }
@@ -264,6 +293,8 @@ mod tests {
         s.last_addr = "192.168.1.20:7777".into();
         s.players = 5;
         s.difficulty = 2;
+        s.played = [3, 7, 1];
+        s.won = [2, 4, 0];
         save_settings(&s);
         save_settings(&s); // replacing an existing file works too
         let l = load_settings();
@@ -297,6 +328,7 @@ mod tests {
             (false, true, true, true, 4, 4.0, true)
         );
         assert_eq!(l.theme, s.theme);
+        assert_eq!((l.played, l.won), ([3, 7, 1], [2, 4, 0]));
         assert_eq!(
             (
                 l.teams,

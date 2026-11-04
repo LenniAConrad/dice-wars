@@ -218,6 +218,15 @@ pub(crate) fn split_sum(sum: u32, n: u32) -> Vec<u8> {
     v
 }
 
+/// "1 die", "3 dice"
+pub(crate) fn dice_count(n: u32) -> String {
+    if n == 1 {
+        "1 die".to_string()
+    } else {
+        format!("{n} dice")
+    }
+}
+
 impl Game {
     pub(crate) fn count(&self, p: usize) -> usize {
         self.terrs.iter().filter(|t| t.owner == p).count()
@@ -432,6 +441,14 @@ impl Game {
         self.check_game_over();
     }
 
+    /// Whether every land left belongs to this screen's player or, in team
+    /// games, to their team.
+    pub(crate) fn my_side_won(&self) -> bool {
+        self.terrs.iter().all(|t| {
+            t.owner == self.my_seat || (self.teams.on && self.same_team(t.owner, self.my_seat))
+        })
+    }
+
     pub(crate) fn check_game_over(&mut self) {
         if self.over.is_some() {
             return;
@@ -499,8 +516,11 @@ impl Game {
                 format!("{} conquered the whole map!", self.name_of(w))
             });
             self.banner_t = 0.0;
-            self.snd
-                .push(if w == self.my_seat { Snd::Win } else { Snd::Lose });
+            self.snd.push(if w == self.my_seat {
+                Snd::Win
+            } else {
+                Snd::Lose
+            });
         }
     }
 
@@ -538,16 +558,16 @@ impl Game {
         }
         if self.reserve[p] > 0 {
             self.push_log(format!(
-                "{} reinforced with {} dice ({} stored).",
+                "{} reinforced with {} ({} stored).",
                 self.name_of(p),
-                reinforced.len(),
+                dice_count(reinforced.len() as u32),
                 self.reserve[p]
             ));
         } else {
             self.push_log(format!(
-                "{} reinforced with {} dice.",
+                "{} reinforced with {}.",
                 self.name_of(p),
-                reinforced.len()
+                dice_count(reinforced.len() as u32)
             ));
         }
         if self.recording {
@@ -733,9 +753,9 @@ impl Game {
         }
         self.reserve[player] = n.saturating_sub(placed).min(64);
         self.push_log(format!(
-            "{} reinforced with {} dice.",
+            "{} reinforced with {}.",
             self.name_of(player),
-            placed
+            dice_count(placed)
         ));
         if player < self.humans && placed > 0 {
             self.snd.push(Snd::Reinforce);

@@ -462,7 +462,10 @@ impl Surface {
             if !(xs < xe) {
                 continue;
             }
-            let (xs, xe) = (xs.max(x0 as f32) as usize, (xe.min(x1 as f32)).max(0.0) as usize);
+            let (xs, xe) = (
+                xs.max(x0 as f32) as usize,
+                (xe.min(x1 as f32)).max(0.0) as usize,
+            );
             if xs >= xe {
                 continue;
             }
@@ -472,7 +475,8 @@ impl Surface {
             if solid && bytes[0][3] == 255 {
                 // Opaque flat fills: a triangle row is one contiguous run, so
                 // find its exact ends with the same test and copy the run.
-                let inside = |w: [f32; 3]| (0..3).all(|i| w[i] > 0.0 || (w[i] == 0.0 && top_left[i]));
+                let inside =
+                    |w: [f32; 3]| (0..3).all(|i| w[i] > 0.0 || (w[i] == 0.0 && top_left[i]));
                 let at = |x: usize| -> [f32; 3] {
                     std::array::from_fn(|i| weights[i] - edges[i].y * (x - xs) as f32)
                 };

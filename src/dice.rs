@@ -41,14 +41,12 @@ fn quad(a: Vec2, b: Vec2, c: Vec2, d: Vec2, col: Color) {
 fn grad_quad(p: [Vec2; 4], c: [Color; 4]) {
     let v = |p: Vec2, c: Color| Vertex {
         position: vec3(p.x, p.y, 0.0),
-        uv: vec2(0.0, 0.0),
         color: [
             (c.r * 255.0) as u8,
             (c.g * 255.0) as u8,
             (c.b * 255.0) as u8,
             (c.a * 255.0) as u8,
         ],
-        normal: vec4(0.0, 0.0, 0.0, 0.0),
     };
     draw_mesh(&Mesh {
         vertices: vec![v(p[0], c[0]), v(p[1], c[1]), v(p[2], c[2]), v(p[3], c[3])],

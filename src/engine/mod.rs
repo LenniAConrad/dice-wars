@@ -32,8 +32,8 @@ pub mod prelude {
         draw_text_ex, draw_triangle, get_char_pressed, get_frame_time, is_key_down, is_key_pressed,
         is_mouse_button_down, is_mouse_button_pressed, measure_text, modifier_down, mouse_position,
         mouse_wheel, render_target, screen_height, screen_width, set_camera, set_default_camera,
-        vec2, vec3, vec4, Camera2D, Color, Font, Image, KeyCode, Mesh, MouseButton, Rect,
-        RenderTarget, TextParams, Vec2, Vertex, BLACK, WHITE,
+        vec2, vec3, Camera2D, Color, Font, Image, KeyCode, Mesh, MouseButton, Rect, RenderTarget,
+        TextParams, Vec2, Vertex, BLACK, WHITE,
     };
 }
 
@@ -178,16 +178,9 @@ pub struct Vec3 {
 pub fn vec3(x: f32, y: f32, z: f32) -> Vec3 {
     Vec3 { x, y, z }
 }
-#[derive(Clone, Copy)]
-pub struct Vec4;
-pub fn vec4(_: f32, _: f32, _: f32, _: f32) -> Vec4 {
-    Vec4
-}
 pub struct Vertex {
     pub position: Vec3,
-    pub uv: Vec2,
     pub color: [u8; 4],
-    pub normal: Vec4,
 }
 pub struct Mesh {
     pub vertices: Vec<Vertex>,

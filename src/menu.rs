@@ -9,21 +9,26 @@ use crate::board::{
 use crate::dice::{draw_die, draw_ellipse_fan, draw_star, DIE_W};
 use crate::draw_game::fill_hex;
 use crate::game::{
-    diff_idx, idx_diff, team_letter, Difficulty, Game, TeamCfg, HUMAN, MAX_PLAYERS, MAX_TEAMS,
-    SEED_MOD,
+    diff_idx, idx_diff, Difficulty, Game, TeamCfg, HUMAN, MAX_PLAYERS, MAX_TEAMS, SEED_MOD,
 };
 use crate::lobby::JoinUi;
-use crate::net::{lobby_layout, HostNet, LobbyPicks};
+use crate::net::{lobby_layout, net_port, HostNet, LobbyPicks};
 use crate::settings::{load_bookmarks, save_bookmarks, save_settings, Settings};
+use crate::setup::{
+    draw_color_row, draw_preview, draw_rule_rows, draw_seed_row, draw_team_block, r_color, r_diff,
+    r_mode, r_new, r_next, r_player, r_prev, r_preview, r_primary, r_secondary_half, r_seed,
+    r_team_bridge, r_team_count, r_team_ff, r_team_pick, BOTTOM_Y, COL_END, LEFT_X, RIGHT_W,
+    RIGHT_X, TEAM_BLOCK_H, TEAM_BLOCK_W, TOP_Y,
+};
 use crate::sound::Snd;
 use crate::theme::{
-    accent_ink, apply_local_colors, base_color, color_map, colorblind_mode, dark_mode, map_fill,
-    mix, on_color, palette, th, with_alpha, ACCENT, BG, BORDER, CARD_EDGE, INK, INK_ON_FILL,
-    MAP_EDGE, PLAYER_BASE, PLAYER_BASE_PROTAN, SEA, SRF,
+    accent_ink, apply_local_colors, color_map, colorblind_mode, dark_mode, map_fill, mix, palette,
+    th, theme_index, with_alpha, ACCENT, BG, BORDER, CARD_EDGE, INK, INK_ON_FILL, MAP_EDGE,
+    PLAYER_BASE, SEA, SRF,
 };
 use crate::ui::{
-    control_fill, draw_icon_bar, draw_round_frame, draw_round_rect, draw_toggle, menu_button,
-    mouse_virtual, toolbar_contains, seg_row, Ui, WIN_H, WIN_W,
+    card, control_fill, draw_icon_bar, draw_round_frame, draw_round_rect, label, menu_button,
+    mouse_virtual, primary_button, secondary_button, toolbar_contains, Ui, WIN_H, WIN_W,
 };
 use crate::{App, Screen};
 
@@ -47,6 +52,7 @@ pub(crate) struct Menu {
     pub(crate) hold_next: f32,               // countdown to the next auto-repeat step
     pub(crate) bm_scroll: f32,               // bookmark list scroll offset, in rows
     pub(crate) host_err: f32,                // countdown showing the hosting-failed message
+    pub(crate) show_rules: bool,             // info card shows the rules instead of your record
 }
 
 impl Menu {
@@ -68,6 +74,7 @@ impl Menu {
             hold_next: 0.0,
             bm_scroll: 0.0,
             host_err: 0.0,
+            show_rules: false,
         }
     }
 
@@ -95,104 +102,36 @@ impl Menu {
     }
 }
 
-// menu layout: a centered main column plus a bookmarks column on the right
-pub(crate) const COL_L: f32 = 300.0;
-
-pub(crate) const COL_R: f32 = 728.0;
-
-fn r_color(i: usize) -> Rect {
-    Rect::new(WIN_W * 0.5 - 141.0 + i as f32 * 32.0, 100.0, 26.0, 14.0)
-}
-
-fn r_player(k: usize) -> Rect {
-    Rect::new(COL_L - 130.0 + k as f32 * 45.0, 244.0, 45.0, 44.0)
-}
-
-fn r_diff(k: usize) -> Rect {
-    Rect::new(COL_L - 130.0 + k as f32 * 119.0, 148.0, 119.0, 44.0)
-}
-
-fn r_preview() -> Rect {
-    Rect::new(COL_L - 230.0, 304.0, 460.0, 216.0)
-}
-
-fn r_prev() -> Rect {
-    Rect::new(COL_L - 200.0, 550.0, 48.0, 48.0)
-}
-
-fn r_seedbox() -> Rect {
-    Rect::new(COL_L - 144.0, 550.0, 200.0, 48.0)
-}
-
-fn r_next() -> Rect {
-    Rect::new(COL_L + 64.0, 550.0, 48.0, 48.0)
-}
-
-fn r_new() -> Rect {
-    Rect::new(COL_L + 120.0, 550.0, 80.0, 48.0)
-}
-
+// The menu uses the shared setup grid (see setup.rs): map and rules on the
+// left, saved maps and a help/record or team card on the right.
 fn r_bookmark() -> Rect {
-    Rect::new(COL_L + 230.0 - 54.0, 312.0, 42.0, 42.0)
+    let pv = r_preview();
+    Rect::new(pv.x + pv.w - 52.0, pv.y + 10.0, 42.0, 42.0)
 }
 
-fn r_mode(k: usize) -> Rect {
-    // one segmented row: FREE-FOR-ALL | TEAMS, between the seed row and start
-    Rect::new(COL_L - 130.0 + k as f32 * 178.0, 628.0, 178.0, 40.0)
+// the lower right card: how to play, your record, or team setup
+fn r_info_card() -> Rect {
+    Rect::new(RIGHT_X, 392.0, RIGHT_W, BOTTOM_Y - 392.0)
 }
 
-// the team setup card replaces the how-to-play card while team mode is on
-const TEAM_CARD_X: f32 = COL_R - 160.0;
-
-const TEAM_CARD_Y: f32 = 552.0;
-
-const TEAM_CARD_H: f32 = 240.0;
-
-fn r_team_count(k: usize) -> Rect {
-    // k = 0..2 → 2/3/4 teams; k = 3 → humans-vs-bots
-    if k < 3 {
-        Rect::new(
-            TEAM_CARD_X + 16.0 + k as f32 * 48.0,
-            TEAM_CARD_Y + 54.0,
-            40.0,
-            32.0,
-        )
-    } else {
-        Rect::new(TEAM_CARD_X + 16.0 + 144.0, TEAM_CARD_Y + 54.0, 144.0, 32.0)
-    }
+fn team_origin() -> Vec2 {
+    let c = r_info_card();
+    vec2(c.x + 16.0, c.y + 52.0)
 }
 
-fn r_team_pick(k: usize) -> Rect {
-    Rect::new(
-        TEAM_CARD_X + 16.0 + k as f32 * 48.0,
-        TEAM_CARD_Y + 120.0,
-        40.0,
-        32.0,
-    )
+// switches the info card between your record and the rules
+fn r_info_toggle() -> Rect {
+    let c = r_info_card();
+    Rect::new(c.x + c.w - 86.0, c.y + 12.0, 72.0, 28.0)
 }
 
-fn r_team_ff() -> Rect {
-    Rect::new(TEAM_CARD_X + 16.0, TEAM_CARD_Y + 170.0, 288.0, 24.0)
-}
-
-fn r_team_bridge() -> Rect {
-    Rect::new(TEAM_CARD_X + 16.0, TEAM_CARD_Y + 202.0, 288.0, 24.0)
-}
-
-fn r_start() -> Rect {
-    Rect::new(COL_L - 234.0, 698.0, 300.0, 72.0)
-}
-
-fn r_host() -> Rect {
-    Rect::new(COL_L + 78.0, 698.0, 156.0, 33.0)
-}
-
-fn r_join() -> Rect {
-    Rect::new(COL_L + 78.0, 737.0, 156.0, 33.0)
+fn r_saved_card() -> Rect {
+    Rect::new(RIGHT_X, TOP_Y, RIGHT_W, r_preview().h)
 }
 
 fn r_bm_row(i: usize) -> Rect {
-    Rect::new(COL_R - 160.0, 320.0 + i as f32 * 54.0, 320.0, 44.0)
+    let c = r_saved_card();
+    Rect::new(c.x + 16.0, c.y + 48.0 + i as f32 * 52.0, c.w - 40.0, 44.0)
 }
 
 fn r_bm_del(i: usize) -> Rect {
@@ -265,7 +204,7 @@ fn update_menu(
     let (_, wheel) = mouse_wheel();
     if wheel != 0.0 {
         let mw = mouse_virtual();
-        if mw.x > COL_R - 175.0 && mw.y > 130.0 && mw.y < 545.0 {
+        if r_saved_card().contains(mw) {
             let max_off = menu.bookmarks.len().saturating_sub(BM_SHOWN) as f32;
             menu.bm_scroll = (menu.bm_scroll - wheel.signum()).clamp(0.0, max_off);
         }
@@ -274,7 +213,7 @@ fn update_menu(
         return MenuAction::None;
     }
     let m = mouse_virtual();
-    if menu.editing && !r_seedbox().contains(m) {
+    if menu.editing && !r_seed().contains(m) {
         menu.commit_seed();
     }
     for i in 0..MAX_PLAYERS {
@@ -318,9 +257,15 @@ fn update_menu(
             return MenuAction::None;
         }
     }
+    if !settings.teams && settings.games_played() > 0 && r_info_toggle().contains(m) {
+        menu.show_rules = !menu.show_rules;
+        snd.push(Snd::Click);
+        return MenuAction::None;
+    }
     if settings.teams {
+        let o = team_origin();
         for k in 0..4 {
-            if r_team_count(k).contains(m) {
+            if r_team_count(o, k).contains(m) {
                 if k < 3 {
                     settings.team_hvb = false;
                     settings.team_count = k + 2;
@@ -335,7 +280,7 @@ fn update_menu(
         }
         if !settings.team_hvb {
             for k in 0..settings.team_count.clamp(2, MAX_TEAMS) {
-                if r_team_pick(k).contains(m) {
+                if r_team_pick(o, k).contains(m) {
                     settings.team_mine = k;
                     save_settings(settings);
                     snd.push(Snd::Click);
@@ -343,20 +288,20 @@ fn update_menu(
                 }
             }
         }
-        if r_team_ff().contains(m) {
+        if r_team_ff(o).contains(m) {
             settings.team_ff = !settings.team_ff;
             save_settings(settings);
             snd.push(Snd::Click);
             return MenuAction::None;
         }
-        if r_team_bridge().contains(m) {
+        if r_team_bridge(o).contains(m) {
             settings.team_bridge = !settings.team_bridge;
             save_settings(settings);
             snd.push(Snd::Click);
             return MenuAction::None;
         }
     }
-    if r_seedbox().contains(m) {
+    if r_seed().contains(m) {
         if !menu.editing {
             menu.editing = true;
             menu.seed_text = menu.seed.to_string();
@@ -414,14 +359,14 @@ fn update_menu(
             return MenuAction::None;
         }
     }
-    if r_start().contains(m) {
+    if r_primary().contains(m) {
         return MenuAction::Start;
     }
-    if r_host().contains(m) {
+    if r_secondary_half(0).contains(m) {
         snd.push(Snd::Click);
         return MenuAction::Host;
     }
-    if r_join().contains(m) {
+    if r_secondary_half(1).contains(m) {
         snd.push(Snd::Click);
         return MenuAction::Join;
     }
@@ -434,7 +379,7 @@ pub(crate) fn draw_map_mini(game: &Game, area: Rect) {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     (
         game.seed,
-        dark_mode(),
+        theme_index(),
         colorblind_mode(),
         area.x.to_bits(),
         area.y.to_bits(),
@@ -556,71 +501,25 @@ fn draw_map_mini_live(game: &Game, area: Rect) {
     }
 }
 
-// a dice-burst hero fills the right column, a nod to the 2001 original
-// a spiky explosion: alternating outer/inner spokes with jittered lengths
-fn draw_burst(cx: f32, cy: f32, r_out: f32, r_in: f32, spikes: usize, rot: f32, col: Color) {
-    let tau = std::f32::consts::TAU;
-    for i in 0..spikes {
-        let a0 = rot + i as f32 / spikes as f32 * tau;
-        let a1 = rot + (i as f32 + 0.5) / spikes as f32 * tau;
-        let a2 = rot + (i as f32 + 1.0) / spikes as f32 * tau;
-        let ro = r_out * (0.82 + 0.36 * (((i * 7919) % 13) as f32 / 13.0));
-        draw_triangle(
-            vec2(cx + r_in * a0.cos(), cy + r_in * a0.sin()),
-            vec2(cx + ro * a1.cos(), cy + ro * a1.sin()),
-            vec2(cx + r_in * a2.cos(), cy + r_in * a2.sin()),
-            col,
-        );
-    }
-    draw_poly(cx, cy, spikes as u8, r_in, rot.to_degrees(), col);
-}
-
-fn draw_menu_hero() {
-    let cx = COL_R;
-    let cy = 212.0;
-    draw_burst(
-        cx,
-        cy,
-        118.0,
-        54.0,
-        12,
-        0.1,
-        mix(base_color(0), WHITE, 0.12),
-    );
-    draw_burst(
-        cx,
-        cy,
-        82.0,
-        40.0,
-        12,
-        0.36,
-        mix(base_color(0), WHITE, 0.62),
-    );
-    // one contact shadow per die, centered under its base diamond with the
-    // same footprint formula the in-game stacks use
-    let sh = Color::new(0.15, 0.16, 0.30, 0.16);
-    let dice = [
-        (cx + 4.0, cy - 16.0, 42.0, 5u32, 3usize),
-        (cx - 46.0, cy + 54.0, 58.0, 11, 2),
-        (cx + 42.0, cy + 58.0, 52.0, 23, 4),
-    ];
-    for &(x, y, w, _, _) in &dice {
-        let qh = w * 0.26;
-        draw_ellipse_fan(x, y - qh * 0.8, w * 0.62, qh * 1.3, sh);
-    }
-    for &(x, y, w, seed, pl) in &dice {
-        draw_die(x, y, w, seed, 0, &palette(pl));
-    }
-}
-
 fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     let m = mouse_virtual();
 
-    // Keep the large outlined title, decorative dice, and map out of hover
-    // redraws. Theme and palette changes still invalidate on the input frame.
+    // Keep the large outlined title and the map out of hover redraws. Theme
+    // and palette changes still invalidate on the input frame.
     use std::hash::{Hash, Hasher};
     let mut art_key = std::collections::hash_map::DefaultHasher::new();
-    (menu.seed, menu.players, dark_mode(), colorblind_mode()).hash(&mut art_key);
+    (menu.seed, menu.players, theme_index(), colorblind_mode()).hash(&mut art_key);
+    // the static parts of the right-hand cards are cached too
+    (
+        menu.bookmarks.is_empty(),
+        settings.teams,
+        settings.team_ff,
+        settings.team_bridge,
+        menu.show_rules,
+        settings.played,
+        settings.won,
+    )
+        .hash(&mut art_key);
     for player in 0..MAX_PLAYERS {
         color_map(player).hash(&mut art_key);
     }
@@ -657,77 +556,11 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
             mix(PLAYER_BASE[0], WHITE, 0.2),
             INK_ON_FILL,
         );
-        draw_menu_hero();
-        // map preview
-        let pv = r_preview();
-        draw_round_frame(pv.x, pv.y, pv.w, pv.h, 14.0, 2.0, SRF(), CARD_EDGE());
-        draw_map_mini(
-            &menu.preview,
-            Rect::new(pv.x + 8.0, pv.y + 8.0, pv.w - 16.0, pv.h - 16.0),
-        );
+        draw_preview(ui, Some(&menu.preview), "");
+        draw_cards_static(menu, settings, ui);
     });
-    // the accent band doubles as the pick-your-color control
-    let first = r_color(0);
-    ui.text(
-        "YOUR COLOR",
-        COL_L - 230.0, // aligned with the other row labels
-        first.y + 11.0,
-        11.0,
-        with_alpha(INK(), 0.62),
-    );
-    for i in 0..MAX_PLAYERS {
-        let r = r_color(i);
-        let base = if colorblind_mode() {
-            PLAYER_BASE_PROTAN[i]
-        } else {
-            PLAYER_BASE[i]
-        };
-        let sel = settings.color == i;
-        if sel {
-            draw_round_frame(
-                r.x - 3.0,
-                r.y - 3.0,
-                r.w + 6.0,
-                r.h + 6.0,
-                8.0,
-                2.0,
-                SRF(),
-                BORDER(),
-            );
-        }
-        let hov = r.contains(m);
-        draw_round_rect(r.x, r.y, r.w, r.h, 6.0, control_fill(base, hov));
-    }
 
-    let nums = ["2", "3", "4", "5", "6", "7", "8", "9"];
-    let row: Vec<(Rect, &str, bool)> = (0..MAX_PLAYERS - 1)
-        .map(|k| (r_player(k), nums[k], menu.players == k + 2))
-        .collect();
-    seg_row(ui, m, true, "PLAYERS", &row, 18.0);
-    let row: Vec<(Rect, &str, bool)> = [
-        ("EASY", Difficulty::Easy),
-        ("NORMAL", Difficulty::Normal),
-        ("HARD", Difficulty::Hard),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(k, (l, d))| (r_diff(k), l, menu.difficulty == d))
-    .collect();
-    seg_row(ui, m, true, "DIFFICULTY", &row, 15.0);
-
-    // seed row
-    let (rp, rs, rn, rr) = (r_prev(), r_seedbox(), r_next(), r_new());
-    menu_button(rp, SRF(), CARD_EDGE(), rp.contains(m));
-    draw_poly(
-        rp.x + rp.w * 0.5 - 1.5,
-        rp.y + rp.h * 0.5,
-        3,
-        8.5,
-        180.0,
-        INK(),
-    );
-    let seed_edge = if menu.editing { ACCENT() } else { CARD_EDGE() };
-    menu_button(rs, SRF(), seed_edge, rs.contains(m));
+    // ---- left column: map, rules, your color, actions
     let seed_str = if menu.editing {
         let caret = if (time * 2.5) as i32 % 2 == 0 {
             "|"
@@ -738,26 +571,11 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     } else {
         format!("{:08}", menu.seed)
     };
-    ui.text_centered(&seed_str, rs.x + rs.w * 0.5, rs.y + 32.0, 22.0, INK());
-    menu_button(rn, SRF(), CARD_EDGE(), rn.contains(m));
-    draw_poly(
-        rn.x + rn.w * 0.5 + 1.5,
-        rn.y + rn.h * 0.5,
-        3,
-        8.5,
-        0.0,
-        INK(),
-    );
-    menu_button(rr, SRF(), CARD_EDGE(), rr.contains(m));
-    ui.text_centered("NEW", rr.x + rr.w * 0.5, rr.y + 31.0, 18.0, INK());
+    draw_seed_row(ui, m, &seed_str, menu.editing, true);
+    draw_rule_rows(ui, m, true, menu.players, menu.difficulty, settings.teams);
+    draw_color_row(ui, m, settings.color, &[]);
 
-    let row = vec![
-        (r_mode(0), "FREE-FOR-ALL", !settings.teams),
-        (r_mode(1), "TEAMS", settings.teams),
-    ];
-    seg_row(ui, m, true, "MODE", &row, 15.0);
-
-    // Match the toolbar's button treatment without changing the icon's size.
+    // the star on the preview saves the map
     let rb = r_bookmark();
     let marked = menu.is_bookmarked();
     let hovs = rb.contains(m);
@@ -766,7 +584,7 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
         rb.y,
         rb.w,
         rb.h,
-        8.0,
+        10.0,
         1.5,
         control_fill(SRF(), hovs),
         if hovs { ACCENT() } else { CARD_EDGE() },
@@ -778,50 +596,94 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     };
     draw_star(rb.x + rb.w * 0.5, rb.y + rb.h * 0.5, 13.0, scol);
 
-    // the same icon toolbar as in-game (sound, chances, colorblind, speed)
-    draw_icon_bar(settings, ui, m);
-
+    primary_button(ui, r_primary(), "START GAME", 28.0, m, true);
+    secondary_button(ui, r_secondary_half(0), "HOST GAME", 14.0, m);
+    secondary_button(ui, r_secondary_half(1), "JOIN GAME", 14.0, m);
     if menu.host_err > 0.0 {
         ui.text_centered(
             &format!(
-                "Could not open port {} — is another instance hosting?",
-                crate::net::net_port()
+                "Could not open port {} — is another copy hosting?",
+                net_port()
             ),
-            COL_L,
-            800.0,
-            15.0,
+            (LEFT_X + COL_END) * 0.5,
+            BOTTOM_Y + 26.0,
+            14.0,
             accent_ink(2),
         );
     }
 
-    // start button
-    let st = r_start();
-    menu_button(st, palette(HUMAN).mid, BORDER(), st.contains(m));
-    ui.text_centered(
-        "START GAME",
-        st.x + st.w * 0.5,
-        st.y + 45.0,
-        30.0,
-        on_color(palette(HUMAN).mid),
-    );
-    let rh = r_host();
-    menu_button(rh, SRF(), CARD_EDGE(), rh.contains(m));
-    ui.text_centered("HOST GAME", rh.x + rh.w * 0.5, rh.y + 22.0, 14.0, INK());
-    let rj = r_join();
-    menu_button(rj, SRF(), CARD_EDGE(), rj.contains(m));
-    ui.text_centered("JOIN GAME", rj.x + rj.w * 0.5, rj.y + 22.0, 14.0, INK());
+    // ---- right column: saved maps, then help / record / team setup
+    draw_saved_rows(menu, ui, m);
+    if settings.teams {
+        draw_team_block(
+            ui,
+            m,
+            team_origin(),
+            settings.team_cfg(),
+            settings.team_mine,
+            true,
+            true,
+        );
+    } else if settings.games_played() > 0 {
+        let text = if menu.show_rules { "RECORD" } else { "RULES" };
+        secondary_button(ui, r_info_toggle(), text, 11.0, m);
+    }
 
+    // the same toolbar as in-game: sound and settings
+    draw_icon_bar(settings, ui, m);
+}
+
+// card frames and text that only change with settings; drawn into the cached
+// menu layer so hovering never re-renders them
+fn draw_cards_static(menu: &Menu, settings: &Settings, ui: &Ui) {
+    let c = r_saved_card();
+    card(ui, c, "SAVED MAPS");
     if menu.bookmarks.is_empty() {
-        ui.text_centered("No saved maps yet", COL_R, 380.0, 17.0, INK());
+        let cx = c.x + c.w * 0.5;
+        draw_star(cx, c.y + 112.0, 22.0, with_alpha(INK(), 0.18));
+        ui.text_centered("No saved maps yet", cx, c.y + 168.0, 17.0, INK());
         ui.text_centered(
-            "The star on the preview saves a map here.",
-            COL_R,
-            407.0,
-            14.0,
-            with_alpha(INK(), 0.75),
+            "Click the star on a map to keep it here.",
+            cx,
+            c.y + 194.0,
+            13.0,
+            with_alpha(INK(), 0.72),
         );
     }
-    // Saved-map rows
+    if settings.teams {
+        card(ui, r_info_card(), "TEAM SETUP");
+        let o = team_origin();
+        let mut lines = vec!["The last team standing wins."];
+        lines.push(if settings.team_ff {
+            "Friendly fire: you can attack allies."
+        } else {
+            "No friendly fire: allies are safe."
+        });
+        lines.push(if settings.team_bridge {
+            "Island links: allied land connects."
+        } else {
+            "Reinforcements count only your land."
+        });
+        for (i, line) in lines.iter().enumerate() {
+            ui.text_fitted(
+                line,
+                o.x,
+                o.y + TEAM_BLOCK_H + 34.0 + i as f32 * 22.0,
+                13.0,
+                TEAM_BLOCK_W,
+                with_alpha(INK(), 0.72),
+            );
+        }
+    } else if settings.games_played() == 0 || menu.show_rules {
+        draw_rules_card(ui);
+    } else {
+        draw_record_card(settings, ui);
+    }
+}
+
+// the saved-map rows: hoverable, so drawn live
+fn draw_saved_rows(menu: &Menu, ui: &Ui, m: Vec2) {
+    let c = r_saved_card();
     let bm_off = menu.bm_scroll as usize;
     for (i, &(seed, players)) in menu
         .bookmarks
@@ -841,19 +703,14 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
             if active { BORDER() } else { CARD_EDGE() },
             r.contains(m) && !dh,
         );
+        let ink = if active { INK_ON_FILL } else { INK() };
+        ui.text(&format!("#{:08}", seed), r.x + 16.0, r.y + 29.0, 18.0, ink);
         ui.text(
-            &format!("#{:08}", seed),
-            r.x + 18.0,
-            r.y + 29.0,
-            19.0,
-            if active { INK_ON_FILL } else { INK() },
-        );
-        ui.text(
-            &format!("{}P", players),
-            r.x + r.w - 82.0,
-            r.y + 29.0,
-            16.0,
-            with_alpha(if active { INK_ON_FILL } else { INK() }, 0.72),
+            &format!("{} players", players),
+            r.x + r.w - 128.0,
+            r.y + 28.0,
+            13.0,
+            with_alpha(ink, 0.72),
         );
         if dh {
             draw_round_frame(
@@ -864,145 +721,116 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
                 8.0,
                 1.5,
                 control_fill(fill, true),
-                BORDER(),
+                ACCENT(),
             );
         }
-        ui.text_centered(
-            "x",
-            del.x + del.w * 0.5,
-            del.y + 23.0,
-            20.0,
-            if active {
-                INK_ON_FILL
-            } else {
-                with_alpha(INK(), 0.72)
-            },
-        );
+        // a drawn cross: crisp at every scale, unlike a letter "x"
+        let (cx, cy) = (del.x + del.w * 0.5, del.y + del.h * 0.5);
+        let col = with_alpha(ink, if dh { 1.0 } else { 0.6 });
+        draw_line(cx - 5.0, cy - 5.0, cx + 5.0, cy + 5.0, 2.0, col);
+        draw_line(cx - 5.0, cy + 5.0, cx + 5.0, cy - 5.0, 2.0, col);
     }
     if menu.bookmarks.len() > BM_SHOWN {
         let total = menu.bookmarks.len() as f32;
-        let track_y = 320.0;
-        let track_h = BM_SHOWN as f32 * 54.0 - 10.0;
-        draw_round_rect(COL_R + 166.0, track_y, 5.0, track_h, 2.5, CARD_EDGE());
+        let track_y = r_bm_row(0).y;
+        let track_h = BM_SHOWN as f32 * 52.0 - 8.0;
+        let x = c.x + c.w - 16.0;
+        draw_round_rect(x, track_y, 5.0, track_h, 2.5, CARD_EDGE());
         let th = (track_h * BM_SHOWN as f32 / total).max(24.0);
         let ty = track_y + (track_h - th) * (bm_off as f32 / (total - BM_SHOWN as f32));
-        draw_round_rect(COL_R + 166.0, ty, 5.0, th, 2.5, with_alpha(INK(), 0.35));
-    }
-
-    // below the bookmark list: team setup while team mode is on,
-    // otherwise a quick rules card
-    if settings.teams {
-        draw_team_card(settings, ui, m);
-    } else {
-        let hx = TEAM_CARD_X;
-        let hy = TEAM_CARD_Y;
-        draw_round_frame(hx, hy, 320.0, TEAM_CARD_H, 14.0, 2.0, SRF(), CARD_EDGE());
-        ui.text_centered(
-            "HOW TO PLAY",
-            COL_R,
-            hy + 28.0,
-            13.0,
-            with_alpha(INK(), 0.72),
-        );
-        for (i, line) in [
-            "1. Click one of your lands (2+ dice),",
-            "    then a neighbor land to attack.",
-            "2. Higher dice total wins the land.",
-            "    Ties go to the defender.",
-            "3. END TURN gives +1 die per land",
-            "    in your biggest connected area.",
-            "4. Conquer the whole map!",
-        ]
-        .iter()
-        .enumerate()
-        {
-            ui.text(
-                line,
-                hx + 18.0,
-                hy + 62.0 + i as f32 * 25.0,
-                14.0,
-                with_alpha(INK(), 0.8),
-            );
-        }
+        draw_round_rect(x, ty, 5.0, th, 2.5, with_alpha(INK(), 0.35));
     }
 }
 
-// team-mode controls: how many teams, which one is yours, and the two rules
-fn draw_team_card(settings: &Settings, ui: &Ui, m: Vec2) {
-    let hx = TEAM_CARD_X;
-    let hy = TEAM_CARD_Y;
-    draw_round_frame(hx, hy, 320.0, TEAM_CARD_H, 14.0, 2.0, SRF(), CARD_EDGE());
-    ui.text_centered(
-        "TEAM SETUP",
-        COL_R,
-        hy + 26.0,
-        13.0,
-        with_alpha(INK(), 0.72),
-    );
+const KEYS: [(&str, &str); 4] = [
+    ("ENTER", "start the game"),
+    ("SPACE", "end your turn"),
+    ("SPACE", "hold to fast-forward bots"),
+    ("ESC", "cancel, or pause the game"),
+];
 
-    ui.text("TEAMS", hx + 16.0, hy + 48.0, 10.0, with_alpha(INK(), 0.72));
-    for (k, label) in ["2", "3", "4", "HUMANS VS BOTS"].into_iter().enumerate() {
-        let r = r_team_count(k);
-        let sel = if k < 3 {
-            !settings.team_hvb && settings.team_count == k + 2
-        } else {
-            settings.team_hvb
-        };
-        let fill = if sel { palette(HUMAN).fill } else { SRF() };
-        let edge = if sel { BORDER() } else { CARD_EDGE() };
-        menu_button(r, fill, edge, r.contains(m));
-        ui.text_centered(
-            label,
-            r.x + r.w * 0.5,
-            r.y + 22.0,
-            if k < 3 { 16.0 } else { 12.0 },
-            if sel { INK_ON_FILL } else { INK() },
+fn draw_keys(ui: &Ui, x: f32, y: f32) {
+    label(ui, "KEYS", x, y);
+    for (i, (key, what)) in KEYS.iter().enumerate() {
+        let ly = y + 24.0 + i as f32 * 21.0;
+        ui.text(key, x, ly, 12.0, INK());
+        ui.text(what, x + 62.0, ly, 13.0, with_alpha(INK(), 0.72));
+    }
+}
+
+fn draw_rules_card(ui: &Ui) {
+    let c = r_info_card();
+    card(ui, c, "HOW TO PLAY");
+    for (i, line) in [
+        "1. Click one of your lands (2+ dice),",
+        "    then a neighbor land to attack.",
+        "2. Higher dice total wins the land.",
+        "    Ties go to the defender.",
+        "3. END TURN gives +1 die per land",
+        "    in your biggest connected area.",
+        "4. Conquer the whole map!",
+    ]
+    .iter()
+    .enumerate()
+    {
+        ui.text(
+            line,
+            c.x + 18.0,
+            c.y + 68.0 + i as f32 * 24.0,
+            14.0,
+            with_alpha(INK(), 0.85),
         );
     }
+    draw_keys(ui, c.x + 18.0, c.y + 260.0);
+}
 
-    if settings.team_hvb {
-        ui.text(
-            "Every human against all the bots.",
-            hx + 16.0,
-            hy + 140.0,
-            13.0,
-            with_alpha(INK(), 0.7),
-        );
-    } else {
-        ui.text(
-            "YOUR TEAM",
-            hx + 16.0,
-            hy + 114.0,
-            10.0,
-            with_alpha(INK(), 0.72),
-        );
-        let count = settings.team_count.clamp(2, MAX_TEAMS);
-        for k in 0..count {
-            let r = r_team_pick(k);
-            let sel = settings.team_mine.min(count - 1) == k;
-            let fill = if sel { palette(HUMAN).fill } else { SRF() };
-            let edge = if sel { BORDER() } else { CARD_EDGE() };
-            menu_button(r, fill, edge, r.contains(m));
-            ui.text_centered(
-                team_letter(k),
-                r.x + r.w * 0.5,
-                r.y + 22.0,
-                16.0,
-                if sel { INK_ON_FILL } else { INK() },
+fn draw_record_card(settings: &Settings, ui: &Ui) {
+    let c = r_info_card();
+    card(ui, c, "YOUR RECORD");
+    let (played, won) = (settings.games_played(), settings.games_won());
+    ui.text_centered(
+        &format!(
+            "{} {} of {} game{}",
+            won,
+            if won == 1 { "win" } else { "wins" },
+            played,
+            if played == 1 { "" } else { "s" }
+        ),
+        c.x + c.w * 0.5,
+        c.y + 86.0,
+        20.0,
+        INK(),
+    );
+    for (k, name) in ["EASY", "NORMAL", "HARD"].iter().enumerate() {
+        let y = c.y + 120.0 + k as f32 * 40.0;
+        let (p, w) = (settings.played[k], settings.won[k]);
+        label(ui, name, c.x + 18.0, y + 16.0);
+        let (bx, bw) = (c.x + 100.0, c.w - 190.0);
+        draw_round_rect(bx, y + 7.0, bw, 10.0, 5.0, with_alpha(INK(), 0.10));
+        if p > 0 && w > 0 {
+            let share = w as f32 / p as f32;
+            draw_round_rect(
+                bx,
+                y + 7.0,
+                (bw * share).max(10.0),
+                10.0,
+                5.0,
+                palette(HUMAN).mid,
             );
         }
+        ui.text(
+            &if p == 0 {
+                "—".to_string()
+            } else {
+                format!("{w} / {p}")
+            },
+            bx + bw + 14.0,
+            y + 17.0,
+            14.0,
+            with_alpha(INK(), 0.85),
+        );
     }
-
-    for (r, label, on) in [
-        (r_team_ff(), "FRIENDLY FIRE", settings.team_ff),
-        (
-            r_team_bridge(),
-            "ISLANDS LINK VIA ALLIES",
-            settings.team_bridge,
-        ),
-    ] {
-        draw_toggle(r, label, on, ui, m);
-    }
+    draw_keys(ui, c.x + 18.0, c.y + 260.0);
 }
 
 impl App {

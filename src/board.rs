@@ -264,12 +264,16 @@ impl Game {
                         .iter()
                         .fold(Vec2::ZERO, |acc, &c| acc + cell_pos(c))
                         / cells[t].len() as f32;
+                    // Dice towers rise above their anchor, so aim a little
+                    // below the centroid: the tower then sits visually
+                    // centered on its land and rarely pokes past the top coast.
+                    let target = centroid + vec2(0.0, HEX * 0.8);
                     let anchor_cell = *cells[t]
                         .iter()
                         .min_by(|&&a, &&b| {
                             cell_pos(a)
-                                .distance(centroid)
-                                .total_cmp(&cell_pos(b).distance(centroid))
+                                .distance(target)
+                                .total_cmp(&cell_pos(b).distance(target))
                         })
                         .unwrap();
                     Territory {

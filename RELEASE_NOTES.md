@@ -1,3 +1,19 @@
+# Dice Wars v1.7.0
+
+Consistent interface and multiplayer reliability release.
+
+- **One layout for setup**: the menu, the host lobby and the guest lobby share one grid — map and rules on the left, cards on the right — so every control sits in the same place. You type your name on your own line of the player list.
+- **One visual language**: every choice is a segmented control filled with your color, one filled primary button per screen, small-caps labels, and the accent color only for hover and focus. The settings panel uses the same controls.
+- **Start screen**: the decorative burst is gone; saved maps get their own card, and the help card turns into your win record (per difficulty) after your first finished game.
+- **In game**: a MENU button at the top left opens a pause dialog (LEAVE / NEW MAP / KEEP PLAYING), so NEW MAP no longer sits next to END TURN. Battle results say who took what ("Mint takes your land"), END TURN is the filled action on your turn, and the game-over screen no longer shows stale messages or duplicate buttons.
+- **Replays**: pause, step, restart and 1x/2x/4x speed controls.
+- **Color assist**: a softer palette that also stays distinct for deuteranopia.
+- **Multiplayer fixes**: the host's game speed applies to everyone, leaving a game closes its connections (a later lobby works again), guests stop reconnecting to a host that left, rematches never strand a reconnecting player, and a guest that falls behind resyncs instead of being dropped.
+- **Platform fixes**: on Windows, closing the window quits, focus changes release held keys, F10 no longer opens the window menu and the icon is upright; on macOS, quitting no longer cancels logout; shortcuts ignore Ctrl/Cmd/Alt.
+- **Repo**: CI also tests on Windows, macOS and the minimum Rust version; releases publish only their own notes; settings are written atomically.
+
+---
+
 # Dice Wars v1.6.0
 
 Themes, settings and game-flow release.

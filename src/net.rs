@@ -1235,7 +1235,12 @@ mod tests {
 
         // ...and the old host's guest hears that the host left
         let bye = (0..4)
-            .filter_map(|_| guest.rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+            .filter_map(|_| {
+                guest
+                    .rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .ok()
+            })
             .find(|l| l.starts_with("BYE"));
         assert_eq!(bye.as_deref(), Some("BYE The host left the game"));
         drop(new);
@@ -1299,7 +1304,14 @@ mod tests {
             }
         }
         assert_eq!(host.resize_guests(1), 1);
-        let seats: Vec<usize> = host.shared.lock().unwrap().tokens.values().copied().collect();
+        let seats: Vec<usize> = host
+            .shared
+            .lock()
+            .unwrap()
+            .tokens
+            .values()
+            .copied()
+            .collect();
         assert_eq!(seats, vec![1]);
 
         // a token naming a seat that no longer exists is refused, not a panic
@@ -1307,8 +1319,11 @@ mod tests {
         let mut stale = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         write_net_line(&mut stale, &format!("REJOIN {} {}", host.code, tok('d'))).unwrap();
         let mut reply = std::io::BufReader::new(stale.try_clone().unwrap());
-        let line =
-            read_net_line_before(&mut reply, NET_MAX_HOST_LINE, std::time::Duration::from_secs(2));
+        let line = read_net_line_before(
+            &mut reply,
+            NET_MAX_HOST_LINE,
+            std::time::Duration::from_secs(2),
+        );
         assert!(line.is_some_and(|l| l.starts_with("BYE")));
         assert!(!host.shared.is_poisoned());
 
@@ -1339,7 +1354,12 @@ mod tests {
 
         // the START line carries the host's speed for the guests to follow
         let start = (0..4)
-            .filter_map(|_| guest.rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+            .filter_map(|_| {
+                guest
+                    .rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .ok()
+            })
             .find(|l| l.starts_with("START"))
             .unwrap();
         assert_eq!(parse_speed(start.split_whitespace().nth(14)), 4.0);

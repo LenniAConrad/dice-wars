@@ -17,7 +17,11 @@
 
 ## Start screen
 
-- **Your color**: the swatches under the title choose the color, and the map
+The left side holds the map and the rules, the right side your saved maps and
+a help card. Hosting and joining use the same layout, so every control stays
+in the same place.
+
+- **Your color**: the swatches below the rules choose the color, and the map
   position, you play.
 - **Difficulty**: EASY bots hesitate and need a big edge; NORMAL plays by
   personality; HARD takes even fights and keeps its territory together. Bots
@@ -28,15 +32,19 @@
   (teammates may attack each other) and *Islands link via allies* (an ally's
   land can connect your regions for reinforcement).
 - **Seed**: the same 8-digit seed and player count always produce the same
-  map. Type one, step with `<` and `>`, or press `NEW` (`N`). The star
-  bookmarks the map.
+  map. Type one, step with `<` and `>`, or press `NEW` (`N`). The star on the
+  preview saves the map to **Saved maps**.
+- **How to play / Your record**: the card at the bottom right shows the rules
+  until you finish a game, then your wins per difficulty (the **RULES** button
+  brings the rules back). In team mode it holds the team setup.
 
 Each bot has a hidden personality from the seed. When one player grows
 dominant, the others stop fighting each other and turn on the leader.
 
 ## Playing together
 
-**HOST GAME** opens a lobby with a 6-digit room code. While it is open, the
+**HOST GAME** opens a lobby with a 6-digit room code; your own line in the
+player list is where you type your name. While it is open, the
 lobby is announced on your local network, and it shows up in the **JOIN GAME**
 screen of every player on the same network; one click joins it. Anyone on that
 network can see and join an open lobby.
@@ -44,8 +52,9 @@ network can see and join an open lobby.
 To join from elsewhere (for example over a VPN such as Tailscale), enter the
 host's address and room code under *Or enter an address*. Joined players take
 the first seats and bots fill the rest. The host's game is authoritative and
-can start whenever it is ready; **NEW MAP** after a game starts a rematch with
-everyone still connected. Disconnected players are replaced by a bot after a
+can start whenever it is ready, and its game speed applies to everyone; a new
+map (from the game-over card or the pause menu) starts a rematch with everyone
+still connected. Disconnected players are replaced by a bot after a
 grace period and can reconnect.
 
 If the game is not found or a connection fails, a firewall is the usual
@@ -55,12 +64,18 @@ lobbies. On Ubuntu or Mint: `sudo ufw allow 7777/tcp` and
 traffic. Game traffic is not encrypted, so play over a trusted network or VPN
 rather than forwarding the port to the internet.
 
+## Pausing
+
+**MENU** at the top left (or `Esc`) pauses with three choices: **LEAVE** to the
+menu, **NEW MAP**, or **KEEP PLAYING**. `R` asks for a new map directly.
+
 ## Replays
 
 The game-over card offers **REPLAY**, which plays back every battle and
 reinforcement, and **SAVE GIF**, which writes a timelapse `replay-<seed>.gif`
 to your data folder. **NEW MAP** (`R`) starts again and **MENU** (`Esc`)
-leaves.
+leaves. While a replay runs, **PAUSE** (`Space`) stops it, `→` steps one move
+while paused, **RESTART** (`R`) starts over, and 1x/2x/4x sets the speed.
 
 ## Settings and accessibility
 
@@ -73,8 +88,9 @@ The two buttons at the top right of every screen are a quick sound toggle and
 - **Game speed**: 1x, 2x or 4x. Fights between bots always play faster, and
   holding `Space` during bot turns fast-forwards them in local games.
 - **Win chances**: show the exact odds on every attack target.
-- **Color assist** (`F9`): hues chosen for protan color vision, plus an owner
-  symbol on every dice badge.
+- **Color assist** (`F9`): a muted palette that stays distinct for red-green
+  color vision (protanopia and deuteranopia), plus an owner symbol on every
+  dice badge.
 - **Motion** (`F8`): *Less* removes shaking, bouncing, sliding and fades.
 
 The keyboard also works on the map: arrow keys move the focus, `Enter` selects
@@ -82,6 +98,6 @@ and attacks.
 
 ## Your files
 
-Settings, bookmarks and saved GIFs live in `~/.local/share/dice-wars` on
+Settings (including your record), saved maps and GIFs live in `~/.local/share/dice-wars` on
 Linux, `~/Library/Application Support/dice-wars` on macOS and
 `%APPDATA%\dice-wars` on Windows.

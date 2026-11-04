@@ -28,15 +28,11 @@ pub(crate) enum Confirm {
 }
 
 pub(crate) fn r_endturn() -> Rect {
-    Rect::new(WIN_W - 216.0, 640.0, 172.0, 44.0)
+    Rect::new(WIN_W - 216.0, 646.0, 176.0, 52.0)
 }
 
 pub(crate) fn r_btn_menu() -> Rect {
-    Rect::new(WIN_W - 216.0, 694.0, 78.0, 30.0)
-}
-
-pub(crate) fn r_btn_new() -> Rect {
-    Rect::new(WIN_W - 122.0, 694.0, 78.0, 30.0)
+    crate::ui::r_game_menu()
 }
 
 // The game-over card and its buttons share one layout; `rise` is the entry
@@ -77,12 +73,41 @@ fn r_over_menu() -> Rect {
     r_over_button(3, 0.0)
 }
 
-pub(crate) fn r_confirm_yes() -> Rect {
-    Rect::new(WIN_W * 0.5 - 158.0, 398.0, 150.0, 44.0)
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum ConfirmChoice {
+    Leave,
+    NewMap,
+    Keep,
 }
 
-pub(crate) fn r_confirm_no() -> Rect {
-    Rect::new(WIN_W * 0.5 + 8.0, 398.0, 150.0, 44.0)
+pub(crate) const CONFIRM_W: f32 = 520.0;
+pub(crate) const CONFIRM_Y: f32 = 280.0;
+
+/// The pause dialog's buttons, left to right; keeping the game is last.
+/// `can_new` is false for guests, who cannot start a new map.
+pub(crate) fn confirm_choices(kind: Confirm, can_new: bool) -> Vec<(Rect, ConfirmChoice)> {
+    let choices: &[ConfirmChoice] = match kind {
+        Confirm::Menu if can_new => &[
+            ConfirmChoice::Leave,
+            ConfirmChoice::NewMap,
+            ConfirmChoice::Keep,
+        ],
+        Confirm::Menu => &[ConfirmChoice::Leave, ConfirmChoice::Keep],
+        Confirm::NewMap => &[ConfirmChoice::NewMap, ConfirmChoice::Keep],
+    };
+    let (w, gap) = (150.0, 12.0);
+    let total = choices.len() as f32 * w + (choices.len() - 1) as f32 * gap;
+    let x0 = (WIN_W - total) * 0.5;
+    choices
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            (
+                Rect::new(x0 + i as f32 * (w + gap), CONFIRM_Y + 118.0, w, 46.0),
+                c,
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn pick_territory(game: &Game, p: Vec2) -> Option<usize> {
@@ -170,7 +195,7 @@ fn handle_input(game: &mut Game, mut net_out: Option<&mut Vec<String>>) {
         }
         return;
     }
-    if r_btn_menu().contains(mp) || r_btn_new().contains(mp) {
+    if r_btn_menu().contains(mp) {
         return; // handled in the main loop (also works during AI turns)
     }
     if toolbar_contains(mp) {
@@ -305,10 +330,14 @@ impl App {
                 self.confirm = None;
             } else if click {
                 let m = mouse_virtual();
-                if r_confirm_yes().contains(m) {
+                let choice = confirm_choices(kind, self.guest.is_none())
+                    .into_iter()
+                    .find(|(r, _)| r.contains(m))
+                    .map(|(_, c)| c);
+                if matches!(choice, Some(ConfirmChoice::NewMap | ConfirmChoice::Leave)) {
                     self.confirm = None;
-                    match kind {
-                        Confirm::NewMap => {
+                    match choice {
+                        Some(ConfirmChoice::NewMap) => {
                             self.menu.seed = random_seed();
                             if let Some(h) = self.host.as_mut() {
                                 // rematch: everyone still connected moves
@@ -349,20 +378,14 @@ impl App {
                                 );
                             }
                         }
-                        Confirm::Menu => go_menu = true,
+                        _ => go_menu = true,
                     }
-                } else if r_confirm_no().contains(m) {
+                } else if choice == Some(ConfirmChoice::Keep) {
                     self.confirm = None;
                 }
             }
         } else if click && g.over.is_none() && r_btn_menu().contains(mouse_virtual()) {
             self.confirm = Some(Confirm::Menu);
-        } else if click
-            && g.over.is_none()
-            && self.guest.is_none()
-            && r_btn_new().contains(mouse_virtual())
-        {
-            self.confirm = Some(Confirm::NewMap);
         } else if is_key_pressed(KeyCode::Escape) {
             if g.selected.is_some() {
                 g.selected = None; // ESC first cancels the selection
@@ -455,7 +478,7 @@ impl App {
             }
         }
         if let Some(kind) = self.confirm {
-            draw_confirm(kind, &self.ui);
+            draw_confirm(kind, &self.ui, self.guest.is_none());
         }
         self.snd_queue.append(&mut g.snd);
         if go_menu {

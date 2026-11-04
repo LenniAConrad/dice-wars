@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use dicegame::engine::{self, prelude::*};
 
 use crate::game::HUMAN;
-use crate::menu::COL_L;
 use crate::settings::{save_settings, Settings};
 use crate::sound::Snd;
 use crate::theme::{
@@ -208,11 +207,11 @@ pub(crate) fn draw_round_frame(
 static SETTINGS_OPEN: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn r_sound() -> Rect {
-    Rect::new(WIN_W - 166.0, 16.0, 40.0, 30.0)
+    Rect::new(WIN_W - 176.0, 16.0, 40.0, 30.0)
 }
 
 pub(crate) fn r_settings() -> Rect {
-    Rect::new(WIN_W - 120.0, 16.0, 100.0, 30.0)
+    Rect::new(WIN_W - 128.0, 16.0, 108.0, 30.0)
 }
 
 pub(crate) fn settings_open() -> bool {
@@ -229,11 +228,11 @@ const PANEL_W: f32 = 312.0;
 const ROW_Y: f32 = 150.0; // first option row, below the theme swatches
 const ROW_H: f32 = 44.0;
 const ROWS: [(&str, &[&str]); 5] = [
-    ("Sound", &["Full", "Half", "Off"]),
-    ("Game speed", &["1x", "2x", "4x"]),
-    ("Win chances", &["Show", "Hide"]),
-    ("Color assist", &["Off", "On"]),
-    ("Motion", &["Full", "Less"]),
+    ("SOUND", &["FULL", "HALF", "OFF"]),
+    ("GAME SPEED", &["1x", "2x", "4x"]),
+    ("WIN CHANCES", &["SHOW", "HIDE"]),
+    ("COLOR ASSIST", &["OFF", "ON"]),
+    ("MOTION", &["FULL", "LESS"]),
 ];
 
 fn r_panel() -> Rect {
@@ -412,36 +411,56 @@ fn draw_sliders(cx: f32, cy: f32) {
     }
 }
 
-pub(crate) fn draw_icon_bar(settings: &Settings, ui: &Ui, mp: Vec2) {
-    let rs = r_sound();
-    let hov = rs.contains(mp);
+// a small outlined toolbar button; `active` keeps it highlighted (open panel)
+fn tool_button(r: Rect, mp: Vec2, active: bool) {
+    let hov = r.contains(mp);
     draw_round_frame(
-        rs.x,
-        rs.y,
-        rs.w,
-        rs.h,
+        r.x,
+        r.y,
+        r.w,
+        r.h,
         10.0,
         1.5,
-        control_fill(SRF(), hov),
-        if hov { ACCENT() } else { CARD_EDGE() },
+        control_fill(
+            if active {
+                mix(SRF(), ACCENT(), 0.14)
+            } else {
+                SRF()
+            },
+            hov,
+        ),
+        if hov || active { ACCENT() } else { CARD_EDGE() },
     );
+}
+
+/// The in-game MENU button, top left; it opens the pause dialog.
+pub(crate) fn r_game_menu() -> Rect {
+    Rect::new(20.0, 16.0, 84.0, 30.0)
+}
+
+pub(crate) fn draw_game_menu_button(ui: &Ui, mp: Vec2) {
+    let r = r_game_menu();
+    tool_button(r, mp, false);
+    for k in -1..=1 {
+        let y = r.y + r.h * 0.5 + k as f32 * 5.0;
+        draw_line(r.x + 13.0, y, r.x + 25.0, y, 1.8, INK());
+    }
+    ui.text("MENU", r.x + 34.0, r.y + 20.0, LABEL_SIZE, INK());
+    if r.contains(mp) && !settings_open() {
+        tooltip(ui, "Pause: new map or leave · ESC", r);
+    }
+}
+
+pub(crate) fn draw_icon_bar(settings: &Settings, ui: &Ui, mp: Vec2) {
+    let rs = r_sound();
+    tool_button(rs, mp, false);
     draw_speaker(rs.x + rs.w * 0.5, rs.y + rs.h * 0.5, settings);
     let rg = r_settings();
     let open = settings_open();
-    let hov = rg.contains(mp);
-    draw_round_frame(
-        rg.x,
-        rg.y,
-        rg.w,
-        rg.h,
-        10.0,
-        1.5,
-        control_fill(if open { mix(SRF(), ACCENT(), 0.14) } else { SRF() }, hov),
-        if hov || open { ACCENT() } else { CARD_EDGE() },
-    );
+    tool_button(rg, mp, open);
     draw_sliders(rg.x + 20.0, rg.y + rg.h * 0.5);
-    ui.text("Settings", rg.x + 34.0, rg.y + 20.0, 13.0, INK());
-    if hov && !open {
+    ui.text("SETTINGS", rg.x + 33.0, rg.y + 20.0, LABEL_SIZE, INK());
+    if rg.contains(mp) && !open {
         tooltip(ui, "Theme, sound, speed, accessibility", rg);
     } else if rs.contains(mp) && !open {
         let tip = match option_selected(settings, 0) {
@@ -455,7 +474,11 @@ pub(crate) fn draw_icon_bar(settings: &Settings, ui: &Ui, mp: Vec2) {
 
 fn tooltip(ui: &Ui, tip: &str, anchor: Rect) {
     let width = ui.width(tip, 12.0) + 20.0;
-    let x = (anchor.x + anchor.w - width).max(20.0);
+    let x = if anchor.x < WIN_W * 0.5 {
+        anchor.x
+    } else {
+        (anchor.x + anchor.w - width).max(20.0)
+    };
     let y = anchor.y + anchor.h + 8.0;
     soft_shadow(x, y, width, 26.0, 8.0, 1.0);
     draw_round_frame(x, y, width, 26.0, 8.0, 1.0, SRF(), CARD_EDGE());
@@ -470,14 +493,18 @@ pub(crate) fn draw_settings_panel(settings: &Settings, ui: &Ui, m: Vec2) {
     let p = r_panel();
     soft_shadow(p.x, p.y, p.w, p.h, 18.0, 2.4);
     draw_round_frame(p.x, p.y, p.w, p.h, 18.0, 1.5, SRF(), CARD_EDGE());
-    let label = |text: &str, y: f32| ui.text(text, p.x + 20.0, y, 13.0, with_alpha(INK(), 0.75));
-    label(&format!("Theme · {}", THEMES[theme_index()].name), p.y + 32.0);
+    label(
+        ui,
+        &format!("THEME · {}", THEMES[theme_index()].name.to_uppercase()),
+        p.x + 20.0,
+        p.y + 32.0,
+    );
     for (i, t) in THEMES.iter().enumerate() {
         let r = r_theme(i);
         let (cx, cy, rad) = (r.x + r.w * 0.5, r.y + r.h * 0.5, r.w * 0.5);
         let chosen = i == theme_index();
         if chosen || r.contains(m) {
-            draw_circle(cx, cy, rad + 2.5, if chosen { ACCENT() } else { CARD_EDGE() });
+            draw_circle(cx, cy, rad + 2.5, if chosen { BORDER() } else { ACCENT() });
             draw_circle(cx, cy, rad, SRF());
         }
         // each swatch shows the theme's surface with its accent dot
@@ -487,59 +514,21 @@ pub(crate) fn draw_settings_panel(settings: &Settings, ui: &Ui, m: Vec2) {
     }
     for (row, (name, options)) in ROWS.iter().enumerate() {
         let y = ROW_Y + row as f32 * ROW_H;
-        label(name, y + 20.0);
-        let first = r_option(row, 0);
-        let last = r_option(row, options.len() - 1);
-        draw_round_frame(
-            first.x,
-            y,
-            last.x + last.w - first.x,
-            first.h,
-            first.h * 0.5,
-            1.5,
-            mix(SRF(), BG(), 0.5),
-            CARD_EDGE(),
-        );
+        label(ui, name, p.x + 20.0, y + 19.0);
         let sel = option_selected(settings, row);
-        for (k, text) in options.iter().enumerate() {
-            let r = r_option(row, k);
-            let hov = r.contains(m);
-            if k == sel {
-                draw_round_frame(
-                    r.x + 2.0,
-                    r.y + 2.0,
-                    r.w - 4.0,
-                    r.h - 4.0,
-                    (r.h - 4.0) * 0.5,
-                    1.5,
-                    SRF(),
-                    ACCENT(),
-                );
-            } else if hov {
-                draw_round_rect(
-                    r.x + 2.0,
-                    r.y + 2.0,
-                    r.w - 4.0,
-                    r.h - 4.0,
-                    (r.h - 4.0) * 0.5,
-                    control_fill(SRF(), true),
-                );
-            }
-            ui.text_centered(
-                text,
-                r.x + r.w * 0.5,
-                r.y + 20.0,
-                12.5,
-                if k == sel { ACCENT() } else { with_alpha(INK(), 0.8) },
-            );
-        }
+        let items: Vec<(Rect, &str, bool)> = options
+            .iter()
+            .enumerate()
+            .map(|(k, text)| (r_option(row, k), *text, k == sel))
+            .collect();
+        seg_group(ui, m, true, &items, 12.0);
     }
     ui.text_centered(
         "M sound · F8 motion · F9 color · F10 theme",
         p.x + p.w * 0.5,
         p.y + p.h - 16.0,
         11.0,
-        with_alpha(INK(), 0.5),
+        with_alpha(INK(), 0.55),
     );
 }
 
@@ -574,24 +563,61 @@ pub(crate) fn menu_button(r: Rect, fill: Color, edge: Color, hovered: bool) {
     );
 }
 
-// one segmented control: label left, options in a single pill container
-pub(crate) fn seg_row(
-    ui: &Ui,
-    m: Vec2,
-    live: bool,
-    label: &str,
-    items: &[(Rect, &str, bool)],
-    size: f32,
-) {
+// ------------------------------------------------------------ shared styles
+// One visual language for every screen:
+// - labels: small caps text at 72% ink, left of or above their control
+// - the selected option of any choice is filled with your color
+// - the accent color marks hover and keyboard/text focus only
+// - one filled primary button per screen; everything else is outlined
+
+pub(crate) const LABEL_SIZE: f32 = 12.0;
+
+pub(crate) fn label(ui: &Ui, text: &str, x: f32, y: f32) {
+    ui.text(text, x, y, LABEL_SIZE, with_alpha(INK(), 0.72));
+}
+
+// text baseline that centers caps of `size` inside `r`
+fn baseline(r: Rect, size: f32) -> f32 {
+    r.y + r.h * 0.5 + size * 0.36
+}
+
+/// The one filled call to action of a screen.
+pub(crate) fn primary_button(ui: &Ui, r: Rect, text: &str, size: f32, m: Vec2, enabled: bool) {
+    let hovered = enabled && r.contains(m);
+    let base = if enabled {
+        palette(HUMAN).mid
+    } else {
+        mix(SRF(), BG(), 0.5)
+    };
+    let edge = if enabled { BORDER() } else { CARD_EDGE() };
+    menu_button(r, base, edge, hovered);
+    let ink = if enabled {
+        on_color(control_fill(base, hovered))
+    } else {
+        with_alpha(INK(), 0.5)
+    };
+    ui.text_centered(text, r.x + r.w * 0.5, baseline(r, size), size, ink);
+}
+
+/// Every other button: outlined on the surface color.
+pub(crate) fn secondary_button(ui: &Ui, r: Rect, text: &str, size: f32, m: Vec2) {
+    menu_button(r, SRF(), CARD_EDGE(), r.contains(m));
+    ui.text_centered(text, r.x + r.w * 0.5, baseline(r, size), size, INK());
+}
+
+/// A titled card: the container for one group of related controls.
+pub(crate) fn card(ui: &Ui, r: Rect, title: &str) {
+    draw_round_frame(r.x, r.y, r.w, r.h, 16.0, 2.0, SRF(), CARD_EDGE());
+    if !title.is_empty() {
+        label(ui, title, r.x + 18.0, r.y + 30.0);
+    }
+}
+
+/// Options in a single pill container; the selected one is filled with your
+/// color. `live` false draws the same picture read-only.
+pub(crate) fn seg_group(ui: &Ui, m: Vec2, live: bool, items: &[(Rect, &str, bool)], size: f32) {
     let y = items[0].0.y;
     let h = items[0].0.h;
-    ui.text(
-        label,
-        COL_L - 230.0,
-        y + h * 0.5 + 4.0,
-        12.0,
-        with_alpha(INK(), 0.72),
-    );
     let last = &items[items.len() - 1].0;
     let x0 = items[0].0.x;
     draw_round_frame(
@@ -630,14 +656,33 @@ pub(crate) fn seg_row(
                 control_fill(SRF(), hov),
             );
         }
+        let ink = if *sel { INK_ON_FILL } else { INK() };
         ui.text_centered(
             txt,
             r.x + r.w * 0.5,
             y + h * 0.5 + size * 0.33,
             size,
-            if *sel { INK_ON_FILL } else { INK() },
+            if live || *sel {
+                ink
+            } else {
+                with_alpha(ink, 0.6)
+            },
         );
     }
+}
+
+/// A labelled segmented row of the setup form: label in the left gutter.
+pub(crate) fn seg_row(
+    ui: &Ui,
+    m: Vec2,
+    live: bool,
+    text: &str,
+    items: &[(Rect, &str, bool)],
+    size: f32,
+) {
+    let r = items[0].0;
+    label(ui, text, crate::setup::LEFT_X, r.y + r.h * 0.5 + 4.0);
+    seg_group(ui, m, live, items, size);
 }
 
 // checkbox row shared by the menu card and both lobbies

@@ -296,19 +296,19 @@ pub(crate) const PLAYER_BASE: [Color; MAX_PLAYERS] = [
     Color::new(0.79, 0.66, 0.50, 1.0), // cocoa
 ];
 
-// Protan-safe colors optimized for separation after a full-protanopia
-// simulation. Blue/yellow position and luminance carry the distinctions that
-// would otherwise be lost when reds are perceived weakly.
+// Color-assist palette: nine muted hues picked by a search that maximizes the
+// smallest pairwise distance under normal vision and full protanopia and
+// deuteranopia simulations (lightness and blue/yellow carry the differences).
 pub(crate) const PLAYER_BASE_PROTAN: [Color; MAX_PLAYERS] = [
-    Color::from_rgba(0x90, 0xF0, 0x10, 0xFF), // bright yellow to protan vision
-    Color::from_rgba(0xB0, 0xD0, 0xF0, 0xFF), // pale blue
-    Color::from_rgba(0xF0, 0x30, 0x70, 0xFF), // neutral mid-tone to protan vision
-    Color::from_rgba(0x50, 0x90, 0x10, 0xFF), // ochre to protan vision
-    Color::from_rgba(0x10, 0x90, 0xF0, 0xFF), // sky blue
-    Color::from_rgba(0xF0, 0xB0, 0x90, 0xFF), // pale sand
-    Color::from_rgba(0x10, 0x10, 0xF0, 0xFF), // cobalt
-    Color::from_rgba(0x70, 0x10, 0x70, 0xFF), // deep blue to protan vision
-    Color::from_rgba(0x70, 0x30, 0x10, 0xFF), // dark ochre to protan vision
+    Color::from_rgba(0xF9, 0xE0, 0x3F, 0xFF), // yellow
+    Color::from_rgba(0x80, 0x82, 0xF7, 0xFF), // periwinkle
+    Color::from_rgba(0xCE, 0x93, 0x92, 0xFF), // dusty rose
+    Color::from_rgba(0xC3, 0xFA, 0xB7, 0xFF), // pale mint
+    Color::from_rgba(0x33, 0xD5, 0xFE, 0xFF), // sky
+    Color::from_rgba(0xBC, 0x96, 0x11, 0xFF), // ochre
+    Color::from_rgba(0x0E, 0x4E, 0xB1, 0xFF), // cobalt
+    Color::from_rgba(0x70, 0x52, 0x6D, 0xFF), // mauve
+    Color::from_rgba(0x91, 0x31, 0x05, 0xFF), // rust
 ];
 
 pub(crate) static COLORBLIND: AtomicBool = AtomicBool::new(false);
@@ -343,14 +343,15 @@ pub(crate) fn palette(player: usize) -> Palette {
         // Keep the accessible hues vivid. Pale pips on the darker protan-safe
         // hues preserve face-value contrast on the shaded sides of each die.
         let base = PLAYER_BASE_PROTAN[idx];
-        let pale_pips = matches!(idx, 2 | 3 | 4 | 6 | 7 | 8);
+        let pale_pips = matches!(idx, 1 | 6 | 7 | 8);
         // `fill` is also used behind dark UI labels, so lift darker hues until
         // those labels remain legible without flattening every map color.
         let fill_mix = match idx {
-            6 => 0.50,
-            7 => 0.48,
-            8 => 0.43,
-            2 => 0.30,
+            3 => 0.0,
+            6 => 0.48,
+            7 => 0.42,
+            8 => 0.50,
+            1 => 0.18,
             _ => 0.16,
         };
         Palette {
@@ -544,6 +545,17 @@ mod tests {
                 1.0,
             )
         };
+        let simulate_deutan = |c: Color| {
+            let r = srgb_to_linear(c.r);
+            let g = srgb_to_linear(c.g);
+            let b = srgb_to_linear(c.b);
+            Color::new(
+                linear_to_srgb(0.367_322 * r + 0.860_646 * g - 0.227_968 * b),
+                linear_to_srgb(0.280_085 * r + 0.672_501 * g + 0.047_413 * b),
+                linear_to_srgb(-0.011_820 * r + 0.042_940 * g + 0.968_881 * b),
+                1.0,
+            )
+        };
         let distance = |a: Color, b: Color| {
             ((a.r - b.r).powi(2) + (a.g - b.g).powi(2) + (a.b - b.b).powi(2)).sqrt()
         };
@@ -567,6 +579,10 @@ mod tests {
                 assert!(
                     distance(simulate_protan(ca), simulate_protan(cb)) >= 0.39,
                     "palette slots {a} and {b} collapse under protanopia"
+                );
+                assert!(
+                    distance(simulate_deutan(ca), simulate_deutan(cb)) >= 0.39,
+                    "palette slots {a} and {b} collapse under deuteranopia"
                 );
             }
         }

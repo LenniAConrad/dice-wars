@@ -8,7 +8,7 @@ use dicegame::engine::{self, prelude::*};
 
 use crate::board::gen_map_local;
 use crate::dice::draw_die;
-use crate::game::{split_sum, Battle, Game, RepEvent, MAX_PLAYERS, SEED_MOD};
+use crate::game::{diff_idx, split_sum, Battle, Game, RepEvent, MAX_PLAYERS, SEED_MOD};
 use crate::gif::downsample;
 use crate::lan::{lan_beacon_line, LanBeacon, LanScan};
 use crate::lobby::JoinUi;
@@ -16,7 +16,7 @@ use crate::menu::Menu;
 use crate::net::{guest_connect, net_port, GuestNet, HostNet, LobbyPicks};
 use crate::play::Confirm;
 use crate::replay::Replay;
-use crate::settings::{load_settings, Settings};
+use crate::settings::{load_settings, save_settings, Settings};
 use crate::sound::{Snd, Sounds};
 use crate::theme::{
     apply_local_colors, darken, mix, set_theme, with_alpha, Palette, BG, COLORBLIND, PLAYER_BASE,
@@ -40,6 +40,7 @@ mod net;
 mod play;
 mod replay;
 mod settings;
+mod setup;
 mod sound;
 mod svg;
 #[cfg(test)]
@@ -358,6 +359,26 @@ impl App {
 
     // End any network session: guests are told the host left, and the local
     // colors come back. Used whenever play ends up back at the menu.
+    /// Counts a finished solo game in the menu's record, once, on the frame
+    /// it ends. Network games and bot-only test runs are not counted.
+    fn record_result(&mut self) {
+        let Some(g) = self.game.as_ref() else { return };
+        if g.over.is_none()
+            || self.autoend
+            || self.host.is_some()
+            || self.guest.is_some()
+            || g.humans != 1
+        {
+            return;
+        }
+        let d = diff_idx(g.difficulty).min(2);
+        self.settings.played[d] += 1;
+        if g.my_side_won() {
+            self.settings.won[d] += 1;
+        }
+        save_settings(&self.settings);
+    }
+
     pub(crate) fn leave_network(&mut self) {
         self.host = None;
         self.guest = None;
@@ -452,7 +473,13 @@ impl App {
         set_camera(&view_camera());
         match self.screen {
             Screen::Menu => self.run_menu(dt),
-            Screen::Play => self.run_play(dt),
+            Screen::Play => {
+                let was_over = self.game.as_ref().is_some_and(|g| g.over.is_some());
+                self.run_play(dt);
+                if !was_over {
+                    self.record_result();
+                }
+            }
             Screen::HostLobby => self.run_host_lobby(dt),
             Screen::JoinLobby => self.run_join_lobby(dt),
             Screen::Replay => self.run_replay(dt),

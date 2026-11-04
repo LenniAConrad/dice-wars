@@ -11,18 +11,18 @@ use crate::game::{
     team_letter, Battle, Game, TerrFx, Territory, HUMAN, MAX_PLAYERS, MAX_TEAMS, T_SHAKE,
 };
 use crate::play::{
-    pick_territory, r_btn_menu, r_btn_new, r_confirm_no, r_confirm_yes, r_endturn, r_over_button,
-    r_over_card, Confirm,
+    confirm_choices, pick_territory, r_endturn, r_over_button, r_over_card, Confirm, ConfirmChoice,
+    CONFIRM_W, CONFIRM_Y,
 };
 use crate::settings::Settings;
 use crate::theme::{
-    accent_ink, theme, color_map, colorblind_mode, dark_mode, darken, lighten, map_fill, mix, on_color,
-    palette, with_alpha, ACCENT, BORDER, CARD_EDGE, INK, INK_ON_FILL, MAP_EDGE, REDUCED_MOTION,
-    SEA, SRF,
+    accent_ink, color_map, colorblind_mode, darken, lighten, map_fill, mix, on_color, palette,
+    theme, theme_index, with_alpha, ACCENT, BG, BORDER, CARD_EDGE, INK, INK_ON_FILL, MAP_EDGE,
+    REDUCED_MOTION, SEA, SRF,
 };
 use crate::ui::{
-    control_fill, draw_icon_bar, draw_round_frame, draw_round_rect, ease_out, mouse_virtual,
-    soft_shadow, Ui, WIN_H, WIN_W,
+    control_fill, draw_game_menu_button, draw_icon_bar, draw_round_frame, draw_round_rect,
+    ease_out, mouse_virtual, primary_button, soft_shadow, Ui, WIN_H, WIN_W,
 };
 
 pub(crate) fn fill_hex(p: Vec2, s: f32, col: Color) {
@@ -56,7 +56,7 @@ pub(crate) fn draw_board(game: &Game, ui: &Ui, chances: bool) {
         game.my_seat,
         game.over.is_some(),
         chances,
-        dark_mode(),
+        theme_index(),
         colorblind_mode(),
         REDUCED_MOTION.load(Ordering::Relaxed),
     )
@@ -396,7 +396,7 @@ fn draw_panel(game: &Game, ui: &Ui, settings: &Settings) {
         (
             game.teams.on,
             settings.chances,
-            dark_mode(),
+            theme_index(),
             colorblind_mode(),
         ),
     )
@@ -413,9 +413,7 @@ fn draw_panel(game: &Game, ui: &Ui, settings: &Settings) {
     if game.selected.is_some() && game.battle.is_none() {
         pick_territory(game, m).hash(&mut hash);
     }
-    for r in [r_endturn(), r_btn_menu(), r_btn_new()] {
-        r.contains(m).hash(&mut hash);
-    }
+    r_endturn().contains(m).hash(&mut hash);
     is_mouse_button_down(MouseButton::Left).hash(&mut hash);
     for p in 0..MAX_PLAYERS {
         color_map(p).hash(&mut hash);
@@ -452,18 +450,32 @@ fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
         format!("{}'s turn", game.name_of(cur))
     };
     let tw = ui.width(&turn_text, 21.0).min(492.0);
-    draw_round_frame(
-        40.0,
-        py + 12.0,
-        tw + 60.0,
-        36.0,
-        12.0,
-        2.5,
-        palette(cur).fill,
-        BORDER(),
-    );
-    draw_symbol(62.0, py + 30.0, 8.5, cur, palette(cur).dark);
-    ui.text_fitted(&turn_text, 80.0, py + 37.0, 21.0, tw, INK_ON_FILL);
+    if game.over.is_some() {
+        draw_round_frame(
+            40.0,
+            py + 12.0,
+            tw + 40.0,
+            36.0,
+            12.0,
+            2.0,
+            SRF(),
+            CARD_EDGE(),
+        );
+        ui.text_fitted(&turn_text, 60.0, py + 37.0, 21.0, tw, INK());
+    } else {
+        draw_round_frame(
+            40.0,
+            py + 12.0,
+            tw + 60.0,
+            36.0,
+            12.0,
+            2.5,
+            palette(cur).fill,
+            BORDER(),
+        );
+        draw_symbol(62.0, py + 30.0, 8.5, cur, palette(cur).dark);
+        ui.text_fitted(&turn_text, 80.0, py + 37.0, 21.0, tw, INK_ON_FILL);
+    }
     // multiplayer idle countdown: the turn auto-passes at zero
     if game.humans > 1 && game.is_human(cur) && game.over.is_none() {
         let secs = game.turn_timer.ceil().max(0.0) as u32;
@@ -478,10 +490,10 @@ fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
 
     // ---- current step instruction, invalid-action hint, or attack preview
     let hover = pick_territory(game, mp);
-    let instruction = if game.battle.is_some() {
+    // nothing during battles (the rolls take the lane) or after the game
+    // (the result card says it all)
+    let instruction = if game.battle.is_some() || game.over.is_some() {
         String::new()
-    } else if game.over.is_some() {
-        "Watch the replay, save a GIF, or start a new map.".to_string()
     } else if cur >= game.humans {
         if game.humans == 1 {
             "Bots are playing. Hold SPACE to fast-forward.".to_string()
@@ -494,9 +506,7 @@ fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
         let region = game.largest_region(game.my_seat);
         let stored = game.reserve[game.my_seat];
         if stored > 0 {
-            format!(
-                "End your turn: +{region} dice for your largest region, plus {stored} stored."
-            )
+            format!("End your turn: +{region} dice for your largest region, plus {stored} stored.")
         } else {
             format!("End your turn: +{region} dice, one per land in your largest region.")
         }
@@ -538,66 +548,66 @@ fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
     }
 
     // ---- last event, small
-    if let Some(last) = game.log.last().filter(|_| game.battle.is_none()) {
-        ui.text_fitted(
-            last,
-            40.0,
-            py + 98.0,
-            13.5,
-            648.0,
-            with_alpha(INK(), 0.72),
-        );
+    if let Some(last) = game
+        .log
+        .last()
+        .filter(|_| game.battle.is_none() && game.over.is_none())
+    {
+        ui.text_fitted(last, 40.0, py + 98.0, 13.5, 648.0, with_alpha(INK(), 0.72));
     }
 
-    // ---- buttons (right side)
-    let active = cur == game.my_seat && game.over.is_none() && game.battle.is_none();
-    let b = r_endturn();
-    let hovered = active && b.contains(mp);
-    let pressed = hovered && is_mouse_button_down(MouseButton::Left);
-    let off = if pressed { 2.0 } else { 0.0 };
-    if !pressed {
-        soft_shadow(b.x, b.y, b.w, b.h, 22.0, 1.0);
-    }
-    let fill = control_fill(SRF(), hovered);
-    let edge = if active {
-        BORDER()
-    } else {
-        with_alpha(BORDER(), 0.3)
-    };
-    draw_round_frame(b.x + off, b.y + off, b.w, b.h, 22.0, 2.5, fill, edge);
-    let label = if active {
-        format!(
-            "END TURN +{}",
-            game.largest_region(game.my_seat) + game.reserve[game.my_seat]
-        )
-    } else {
-        "END TURN".to_string()
-    };
-    ui.text_centered(
-        &label,
-        b.x + off + b.w * 0.5,
-        b.y + off + 29.0,
-        18.0,
-        if active {
-            on_color(fill)
+    // ---- END TURN (right side); the pause menu sits top left
+    if game.over.is_none() {
+        let active = cur == game.my_seat && game.battle.is_none();
+        let b = r_endturn();
+        let hovered = active && b.contains(mp);
+        let pressed = hovered && is_mouse_button_down(MouseButton::Left);
+        let off = if pressed { 2.0 } else { 0.0 };
+        if !pressed && active {
+            soft_shadow(b.x, b.y, b.w, b.h, 22.0, 1.0);
+        }
+        let base = if active {
+            palette(HUMAN).mid
         } else {
-            with_alpha(INK(), 0.35)
-        },
-    );
-    for (r, label) in [(r_btn_menu(), "MENU"), (r_btn_new(), "NEW MAP")] {
-        let h = r.contains(mp);
-        let f = control_fill(SRF(), h);
-        draw_round_frame(
-            r.x,
-            r.y,
-            r.w,
-            r.h,
-            10.0,
-            2.0,
-            f,
-            if h { ACCENT() } else { CARD_EDGE() },
+            mix(SRF(), BG(), 0.5)
+        };
+        let fill = control_fill(base, hovered);
+        let edge = if hovered {
+            ACCENT()
+        } else if active {
+            BORDER()
+        } else {
+            CARD_EDGE()
+        };
+        draw_round_frame(b.x + off, b.y + off, b.w, b.h, 22.0, 2.5, fill, edge);
+        let label = if active {
+            format!(
+                "END TURN +{}",
+                game.largest_region(game.my_seat) + game.reserve[game.my_seat]
+            )
+        } else {
+            "END TURN".to_string()
+        };
+        ui.text_centered(
+            &label,
+            b.x + off + b.w * 0.5,
+            b.y + off + 33.0,
+            19.0,
+            if active {
+                on_color(fill)
+            } else {
+                with_alpha(INK(), 0.4)
+            },
         );
-        ui.text_centered(label, r.x + r.w * 0.5, r.y + 21.0, 13.0, INK());
+        if active {
+            ui.text_centered(
+                "or press SPACE",
+                b.x + b.w * 0.5,
+                b.y + b.h + 18.0,
+                11.0,
+                with_alpha(INK(), 0.55),
+            );
+        }
     }
 
     draw_player_cards(game, ui, player_cards_y(game), 0.0);
@@ -751,14 +761,15 @@ pub(crate) fn draw_panel_replay(game: &Game, ui: &Ui) {
         1.5,
         with_alpha(INK(), 0.12),
     );
+    // below the replay controls, in the lane the battle rolls use
     if let Some(last) = game.log.last().filter(|_| game.battle.is_none()) {
         ui.text_fitted(
             last,
             40.0,
-            py + 40.0,
-            16.0,
+            py + 82.0,
+            15.0,
             WIN_W - 80.0,
-            with_alpha(INK(), 0.7),
+            with_alpha(INK(), 0.72),
         );
     }
     draw_player_cards(game, ui, player_cards_y(game), 0.0);
@@ -872,7 +883,7 @@ fn draw_over(game: &Game, ui: &Ui) {
         let enabled = i != 2 || !game.net_guest;
         let hovered = enabled && r_over_button(i, 0.0).contains(m);
         let primary = i == 2 && enabled;
-        let base = if primary { palette(HUMAN).fill } else { SRF() };
+        let base = if primary { palette(HUMAN).mid } else { SRF() };
         let fill = control_fill(base, hovered);
         draw_round_frame(
             r.x,
@@ -886,14 +897,14 @@ fn draw_over(game: &Game, ui: &Ui) {
                 if hovered {
                     ACCENT()
                 } else if primary {
-                    darken(palette(HUMAN).fill, 0.8)
+                    BORDER()
                 } else {
                     CARD_EDGE()
                 },
                 a,
             ),
         );
-        let ink = if primary { INK_ON_FILL } else { INK() };
+        let ink = if primary { on_color(fill) } else { INK() };
         ui.text_centered(
             label,
             r.x + r.w * 0.5,
@@ -904,69 +915,63 @@ fn draw_over(game: &Game, ui: &Ui) {
     }
 }
 
-pub(crate) fn draw_confirm(kind: Confirm, ui: &Ui) {
+pub(crate) fn draw_confirm(kind: Confirm, ui: &Ui, can_new: bool) {
     draw_rectangle(0.0, 0.0, WIN_W, WIN_H, with_alpha(SRF(), 0.6));
-    let w = 480.0;
-    let h = 202.0;
+    let (w, h) = (CONFIRM_W, 214.0);
     let x = (WIN_W - w) * 0.5;
-    let y = 280.0;
+    let y = CONFIRM_Y;
     soft_shadow(x, y, w, h, 22.0, 2.4);
     draw_round_frame(x, y, w, h, 22.0, 2.0, SRF(), CARD_EDGE());
-    let (title, action) = match kind {
-        Confirm::NewMap => ("Start a new map?", "NEW MAP"),
-        Confirm::Menu => ("Return to the menu?", "LEAVE"),
+    let (title, body) = match kind {
+        Confirm::NewMap => ("Start a new map?", "The current game will be lost."),
+        Confirm::Menu if can_new => ("Paused", "Leaving or starting a new map ends this game."),
+        Confirm::Menu => ("Paused", "Leaving ends this game for you."),
     };
     ui.text_centered(title, WIN_W * 0.5, y + 56.0, 28.0, INK());
-    ui.text_centered(
-        "The current game will be lost.",
-        WIN_W * 0.5,
-        y + 88.0,
-        17.0,
-        with_alpha(INK(), 0.7),
-    );
+    ui.text_centered(body, WIN_W * 0.5, y + 90.0, 16.0, with_alpha(INK(), 0.72));
     let m = mouse_virtual();
-    let yes = r_confirm_yes();
-    let no = r_confirm_no();
-    // The destructive action is the quiet outline button; keeping the game is
-    // the filled default, matching Enter and ESC.
-    let warn = accent_ink(2);
-    let yf = control_fill(SRF(), yes.contains(m));
-    draw_round_frame(yes.x, yes.y, yes.w, yes.h, 14.0, 2.5, yf, warn);
-    ui.text_centered(action, yes.x + yes.w * 0.5, yes.y + 29.0, 18.0, warn);
-    let nf = control_fill(palette(HUMAN).fill, no.contains(m));
-    draw_round_frame(
-        no.x,
-        no.y,
-        no.w,
-        no.h,
-        14.0,
-        2.5,
-        nf,
-        if no.contains(m) {
-            ACCENT()
-        } else {
-            darken(palette(HUMAN).fill, 0.8)
-        },
-    );
-    ui.text_centered(
-        "KEEP PLAYING",
-        no.x + no.w * 0.5,
-        no.y + 29.0,
-        16.0,
-        INK_ON_FILL,
-    );
+    for (r, choice) in confirm_choices(kind, can_new) {
+        match choice {
+            // ending the game is the quiet, rose-outlined choice; keeping
+            // the game is the filled default, matching Enter and ESC
+            ConfirmChoice::Leave | ConfirmChoice::NewMap => {
+                let warn = accent_ink(2);
+                let hov = r.contains(m);
+                draw_round_frame(
+                    r.x,
+                    r.y,
+                    r.w,
+                    r.h,
+                    14.0,
+                    2.5,
+                    control_fill(SRF(), hov),
+                    if hov { ACCENT() } else { warn },
+                );
+                let text = if choice == ConfirmChoice::Leave {
+                    "LEAVE"
+                } else {
+                    "NEW MAP"
+                };
+                ui.text_centered(text, r.x + r.w * 0.5, r.y + 29.0, 16.0, warn);
+            }
+            ConfirmChoice::Keep => primary_button(ui, r, "KEEP PLAYING", 16.0, m, true),
+        }
+    }
     ui.text_centered(
         "Enter or ESC: keep playing",
         WIN_W * 0.5,
-        y + 185.0,
+        y + h - 22.0,
         12.0,
-        with_alpha(INK(), 0.75),
+        with_alpha(INK(), 0.6),
     );
 }
 
 pub(crate) fn draw_game(game: &Game, ui: &Ui, settings: &Settings) {
     draw_board(game, ui, settings.chances);
     draw_icon_bar(settings, ui, mouse_virtual());
+    if game.over.is_none() {
+        draw_game_menu_button(ui, mouse_virtual());
+    }
     draw_panel(game, ui, settings);
     // Rolls share the status lane; controls and player cards stay visible.
     draw_battle_overlay(game, ui);
@@ -978,6 +983,32 @@ pub(crate) fn draw_game(game: &Game, ui: &Ui, settings: &Settings) {
 // When the last die of a battle has appeared and the totals are final.
 pub(crate) fn battle_settle_time(b: &Battle) -> f32 {
     T_SHAKE * 0.6 + (b.ad.len().max(b.dd.len()) as f32 - 1.0).max(0.0) * 0.06 + 0.14
+}
+
+// "Mint takes Rose's land", "You hold", "Tie — Rose holds"
+fn battle_result(game: &Game, b: &Battle) -> String {
+    let atk = game.terrs[b.a].owner;
+    let def = game.terrs[b.d].owner;
+    let me = |p: usize| p == game.my_seat && p < game.humans;
+    let name = |p: usize| game.name_of(p);
+    if b.captured {
+        match (me(atk), me(def)) {
+            (true, _) => format!("You take {}'s land", name(def)),
+            (_, true) => format!("{} takes your land", name(atk)),
+            _ => format!("{} takes {}'s land", name(atk), name(def)),
+        }
+    } else {
+        let holds = if me(def) {
+            "You hold".to_string()
+        } else {
+            format!("{} holds", name(def))
+        };
+        if b.ra == b.rd {
+            format!("Tie — {holds}")
+        } else {
+            holds
+        }
+    }
 }
 
 pub(crate) fn draw_battle_overlay(game: &Game, ui: &Ui) {
@@ -1024,17 +1055,12 @@ pub(crate) fn draw_battle_overlay(game: &Game, ui: &Ui) {
         }
     }
     if settled {
-        ui.text(
-            if b.ra == b.rd {
-                "Tie — defender holds"
-            } else if b.captured {
-                "Territory captured"
-            } else {
-                "Defender holds"
-            },
+        ui.text_fitted(
+            &battle_result(game, b),
             435.0,
             721.0,
             14.0,
+            WIN_W - 216.0 - 435.0 - 12.0,
             INK(),
         );
     } else {

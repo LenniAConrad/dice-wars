@@ -49,6 +49,21 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
     render("confirmation", DW_AUTOSTART="1", DW_SCENE="confirm", DW_THEME="dark")
     render("game-over", DW_AUTOSTART="1", DW_SCENE="over")
     render("join", DW_SCENE="join", DW_THEME="dark")
+    # HOST GAME from the menu opens the lobby on the same grid as the menu.
+    for theme in ("light", "dark"):
+        render(f"host-lobby-{theme}", DW_THEME=theme, DW_PORT="17793", DW_FRAME_LIMIT="40",
+               DW_CAPTURE_FRAMES="1", DW_INPUT="2:click:436:716")
+        with Image.open(out / f"host-lobby-{theme}-1.png") as menu, \
+                Image.open(out / f"host-lobby-{theme}.png") as lobby:
+            region = (570, 112, 890, 252)  # saved maps card -> room code card
+            assert menu.crop(region).tobytes() != lobby.crop(region).tobytes(), "HOST GAME did not open the lobby"
+    render("host-lobby-teams", DW_THEME="dark", DW_TEAMS="1", DW_PLAYERS="9", DW_PORT="17793",
+           DW_FRAME_LIMIT="40", DW_INPUT="2:click:436:716")
+    # After a finished game the info card shows the record instead of the rules.
+    record_dir = Path(data) / "record" / "dice-wars"
+    record_dir.mkdir(parents=True)
+    (record_dir / "settings.txt").write_text("record 3 2 7 4 1 0\n")
+    render("record")
     render("replay", DW_AUTOSTART="1", DW_SCENE="replay", DW_FRAME_LIMIT="30", DW_THEME="dark")
     render("gif-export", DW_AUTOSTART="1", DW_SCENE="gif", DW_FRAME_LIMIT="3")
     gifs = list(Path(data).rglob("replay-*.gif"))
@@ -68,7 +83,7 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
             assert before.getpixel((0, 0)) != after.getpixel((0, 0)), "theme delayed by a frame"
             assert after.getpixel((0, 0))[0] < 60, "dark background not updated"
             if name == "theme-mouse":
-                region = (157, 335, 445, 513)
+                region = (160, 160, 440, 360)
                 light = before.crop(region).convert("RGB")
                 dark = after.crop(region).convert("RGB")
                 # Compare flat pastel territory interiors, excluding the sea
@@ -103,9 +118,9 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
                 gap = image.crop((420, 727, 570, 734))
                 assert len(gap.getcolors(gap.width * gap.height) or []) == 1, "replay result overlaps team cards"
     render("menu-refresh", DW_FRAME_LIMIT="5", DW_CAPTURE_FRAMES="1,2,3,4",
-           DW_INPUT="2:click:384:574;3:key:F9;4:click:368:106")
+           DW_INPUT="2:click:412:414;3:key:F9;4:click:227:628")
     with Image.open(out / "menu-refresh-1.png") as first, Image.open(out / "menu-refresh-2.png") as seed, Image.open(out / "menu-refresh-3.png") as assist, Image.open(out / "menu-refresh-4.png") as color:
-        region = (157, 335, 445, 513)
+        region = (160, 160, 440, 360)
         assert first.crop(region).tobytes() != seed.crop(region).tobytes(), "cached preview ignored seed change"
         assert seed.crop(region).tobytes() != assist.crop(region).tobytes(), "cached preview ignored color assist"
         assert assist.getpixel((100, 710)) != color.getpixel((100, 710)), "color selection ignored"
@@ -114,14 +129,14 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
     for theme in ("light", "dark"):
         for name, changes, points in [
             ("menu-hover", {"DW_TEAMS": "1"},
-             [(440, 560), (390, 708), (200, 258), (365, 258),
-              (490, 320), (590, 730), (830, 24), (330, 106)]),
+             [(518, 400), (370, 705), (178, 462), (360, 462),
+              (486, 130), (650, 580), (830, 24), (187, 628)]),
             ("join-hover", {"DW_SCENE": "join"},
-             [(490, 588), (330, 234), (650, 582)]),
+             [(484, 508), (330, 154), (650, 512)]),
             ("game-hover", {"DW_AUTOSTART": "1"},
-             [(726, 702), (820, 702)]),
+             [(62, 31), (774, 31)]),
             ("confirm-hover", {"DW_AUTOSTART": "1", "DW_SCENE": "confirm"},
-             [(490, 408), (352, 408)]),
+             [(242, 408), (404, 408), (566, 408)]),
         ]:
             frames = len(points) + 1
             scene = f"{name}-{theme}"
@@ -138,11 +153,11 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
         # Bookmark, leave the button, then hover its separate delete target.
         scene = f"bookmark-{theme}"
         render(scene, DW_THEME=theme, DW_FRAME_LIMIT="5", DW_CAPTURE_FRAMES="1,2,3,4",
-               DW_INPUT="2:click:497:333;3:move:0:0;4:move:859:337")
+               DW_INPUT="2:click:499:143;3:move:0:0;4:move:842:182")
         with Image.open(out / f"{scene}-1.png") as before, Image.open(out / f"{scene}-3.png") as saved:
-            assert before.getpixel((497, 330)) != saved.getpixel((497, 330)), "bookmark state invisible"
-            assert max(abs(a - b) for a, b in zip(before.getpixel((497, 323)),
-                                                before.getpixel((497, 330)))) <= 2, "uneven star fill"
+            assert before.getpixel((499, 143)) != saved.getpixel((499, 143)), "bookmark state invisible"
+            assert max(abs(a - b) for a, b in zip(before.getpixel((499, 137)),
+                                                before.getpixel((499, 143)))) <= 2, "uneven star fill"
         with Image.open(out / f"{scene}-3.png") as saved, Image.open(out / f"{scene}-4.png") as hovered:
-            assert saved.getpixel((854, 330)) != hovered.getpixel((854, 330)), "delete hover invisible"
-    print(f"Verified 43 scenes, replay battle layout, menu cache refresh, white non-target territories and hover feedback in both themes, bookmark states, native output resolution, immediate theme switching, and GIF orientation. Screenshots: {out}")
+            assert saved.getpixel((842, 170)) != hovered.getpixel((842, 170)), "delete hover invisible"
+    print(f"Verified 47 scenes, the host lobby, the record card, replay battle layout, menu cache refresh, white non-target territories and hover feedback in both themes, bookmark states, native output resolution, immediate theme switching, and GIF orientation. Screenshots: {out}")

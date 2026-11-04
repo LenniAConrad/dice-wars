@@ -59,7 +59,7 @@ largest connected region. Conquer the whole map to win.
 | --- | --- |
 | Arrow keys, `Enter` | focus a land, select it or attack |
 | `Space` | end your turn |
-| `Esc` | cancel the selection, or open the menu |
+| `Esc` | cancel the selection, or pause |
 | `R` | new map |
 | `M` | sound: full, half, off |
 | `F8` / `F9` / `F10` | less motion / colour assist / next theme |
