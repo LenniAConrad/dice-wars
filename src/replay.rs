@@ -213,7 +213,7 @@ fn draw_replay_hud(r: &Replay, ui: &Ui) {
     } else {
         (x0, x1 - x0)
     };
-    ui.text_fitted(&status, sx, 655.0, 14.0, sw, INK());
+    ui.body_fitted(&status, sx, 655.0, 14.0, sw, INK());
     draw_round_rect(sx, 667.0, sw, 6.0, 3.0, with_alpha(INK(), 0.12));
     draw_round_rect(
         sx,

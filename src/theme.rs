@@ -107,8 +107,8 @@ pub(crate) struct Theme {
     accent: Color,
     edge: Color,
     sea: Color,
-    // dark themes tint water cells so holes in the map stay readable
-    pub(crate) water: Option<Color>,
+    // lakes and bays inside the map get a quiet tint of their own
+    pub(crate) water: Color,
 }
 
 const fn hex(v: u32) -> Color {
@@ -125,8 +125,8 @@ pub(crate) const THEMES: [Theme; 7] = [
         border: hex(0x61699A),
         accent: hex(0x5466DB),
         edge: hex(0xDDE0E8),
-        sea: hex(0xD7D5CD),
-        water: None,
+        sea: hex(0xC9D3E6),
+        water: hex(0xEDF2FA),
     },
     Theme {
         name: "Midnight",
@@ -137,8 +137,8 @@ pub(crate) const THEMES: [Theme; 7] = [
         border: hex(0x8F99CC),
         accent: hex(0x94A6FF),
         edge: hex(0x383D54),
-        sea: hex(0x383C52),
-        water: Some(hex(0x282B3C)),
+        sea: hex(0x404A6C),
+        water: hex(0x262D45),
     },
     Theme {
         name: "Sakura",
@@ -149,8 +149,8 @@ pub(crate) const THEMES: [Theme; 7] = [
         border: hex(0x9A6A86),
         accent: hex(0xC93F7D),
         edge: hex(0xF0DAE3),
-        sea: hex(0xE6CDD6),
-        water: None,
+        sea: hex(0xE6C9D5),
+        water: hex(0xFBEEF3),
     },
     Theme {
         name: "Sage",
@@ -161,8 +161,8 @@ pub(crate) const THEMES: [Theme; 7] = [
         border: hex(0x5E7A66),
         accent: hex(0x2F7F50),
         edge: hex(0xD5E1D2),
-        sea: hex(0xC8D5C3),
-        water: None,
+        sea: hex(0xC2D3C1),
+        water: hex(0xEEF4EE),
     },
     Theme {
         name: "Paper",
@@ -173,8 +173,8 @@ pub(crate) const THEMES: [Theme; 7] = [
         border: hex(0x85735C),
         accent: hex(0xB0602A),
         edge: hex(0xE6DCC9),
-        sea: hex(0xD9CCB4),
-        water: None,
+        sea: hex(0xDACAB0),
+        water: hex(0xF5EEE1),
     },
     Theme {
         name: "Ocean",
@@ -185,8 +185,8 @@ pub(crate) const THEMES: [Theme; 7] = [
         border: hex(0x7FA6C4),
         accent: hex(0x4FC1F0),
         edge: hex(0x22405A),
-        sea: hex(0x2A4A63),
-        water: Some(hex(0x163049)),
+        sea: hex(0x305C7E),
+        water: hex(0x173B58),
     },
     Theme {
         name: "Ember",
@@ -197,8 +197,8 @@ pub(crate) const THEMES: [Theme; 7] = [
         border: hex(0xC49A8C),
         accent: hex(0xFF8A5B),
         edge: hex(0x43302C),
-        sea: hex(0x4A3431),
-        water: Some(hex(0x2E201E)),
+        sea: hex(0x5A3F38),
+        water: hex(0x342320),
     },
 ];
 

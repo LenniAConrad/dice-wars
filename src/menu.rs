@@ -27,8 +27,9 @@ use crate::theme::{
     PLAYER_BASE, SEA, SRF,
 };
 use crate::ui::{
-    card, control_fill, draw_icon_bar, draw_round_frame, draw_round_rect, label, menu_button,
-    mouse_virtual, primary_button, secondary_button, toolbar_contains, Ui, WIN_H, WIN_W,
+    card, control_fill, control_fill_t, draw_icon_bar, draw_round_frame, draw_round_rect, hover_t,
+    label, menu_button, mouse_virtual, primary_button, secondary_button, toolbar_contains, Ui,
+    WIN_H, WIN_W,
 };
 use crate::{App, Screen};
 
@@ -586,8 +587,8 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
         rb.h,
         10.0,
         1.5,
-        control_fill(SRF(), hovs),
-        if hovs { ACCENT() } else { CARD_EDGE() },
+        control_fill_t(SRF(), hover_t(rb, hovs)),
+        mix(CARD_EDGE(), ACCENT(), hover_t(rb, hovs)),
     );
     let scol = if marked {
         accent_ink(HUMAN)
@@ -600,7 +601,7 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     secondary_button(ui, r_secondary_half(0), "HOST GAME", 14.0, m);
     secondary_button(ui, r_secondary_half(1), "JOIN GAME", 14.0, m);
     if menu.host_err > 0.0 {
-        ui.text_centered(
+        ui.body_centered(
             &format!(
                 "Could not open port {} — is another copy hosting?",
                 net_port()
@@ -642,7 +643,7 @@ fn draw_cards_static(menu: &Menu, settings: &Settings, ui: &Ui) {
         let cx = c.x + c.w * 0.5;
         draw_star(cx, c.y + 112.0, 22.0, with_alpha(INK(), 0.18));
         ui.text_centered("No saved maps yet", cx, c.y + 168.0, 17.0, INK());
-        ui.text_centered(
+        ui.body_centered(
             "Click the star on a map to keep it here.",
             cx,
             c.y + 194.0,
@@ -665,7 +666,7 @@ fn draw_cards_static(menu: &Menu, settings: &Settings, ui: &Ui) {
             "Reinforcements count only your land."
         });
         for (i, line) in lines.iter().enumerate() {
-            ui.text_fitted(
+            ui.body_fitted(
                 line,
                 o.x,
                 o.y + TEAM_BLOCK_H + 34.0 + i as f32 * 22.0,
@@ -705,7 +706,7 @@ fn draw_saved_rows(menu: &Menu, ui: &Ui, m: Vec2) {
         );
         let ink = if active { INK_ON_FILL } else { INK() };
         ui.text(&format!("#{:08}", seed), r.x + 16.0, r.y + 29.0, 18.0, ink);
-        ui.text(
+        ui.body(
             &format!("{} players", players),
             r.x + r.w - 128.0,
             r.y + 28.0,
@@ -754,7 +755,7 @@ fn draw_keys(ui: &Ui, x: f32, y: f32) {
     for (i, (key, what)) in KEYS.iter().enumerate() {
         let ly = y + 24.0 + i as f32 * 21.0;
         ui.text(key, x, ly, 12.0, INK());
-        ui.text(what, x + 62.0, ly, 13.0, with_alpha(INK(), 0.72));
+        ui.body(what, x + 62.0, ly, 13.0, with_alpha(INK(), 0.72));
     }
 }
 
@@ -773,7 +774,7 @@ fn draw_rules_card(ui: &Ui) {
     .iter()
     .enumerate()
     {
-        ui.text(
+        ui.body(
             line,
             c.x + 18.0,
             c.y + 68.0 + i as f32 * 24.0,

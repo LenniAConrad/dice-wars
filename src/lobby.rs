@@ -28,8 +28,8 @@ use crate::theme::{
     INK_ON_FILL, REDUCED_MOTION, SRF,
 };
 use crate::ui::{
-    card, control_fill, draw_icon_bar, draw_round_frame, draw_round_rect, label, mouse_virtual,
-    primary_button, secondary_button, Ui, WIN_H, WIN_W,
+    card, control_fill, control_fill_t, draw_icon_bar, draw_round_frame, draw_round_rect, hover_t,
+    label, mouse_virtual, primary_button, secondary_button, Ui, WIN_H, WIN_W,
 };
 use crate::{App, Screen};
 
@@ -356,7 +356,7 @@ fn draw_players_card(ui: &Ui, m: Vec2, my_name: &str, name_edit: bool, time: f32
             } else {
                 (format!("{my_name}{caret}"), INK())
             };
-            ui.text_fitted(&text, f.x + 10.0, f.y + 18.0, 14.0, f.w - 20.0, col);
+            ui.body_fitted(&text, f.x + 10.0, f.y + 18.0, 14.0, f.w - 20.0, col);
         }
     }
 }
@@ -373,7 +373,7 @@ fn draw_live_status(ui: &Ui, x: f32, y: f32, text: &str, time: f32) {
         );
     }
     draw_circle(x + 4.0, y - 4.0, 4.0, palette(3).dark);
-    ui.text_fitted(
+    ui.body_fitted(
         text,
         x + 16.0,
         y,
@@ -414,7 +414,7 @@ fn draw_host_lobby(
     let rc = r_room_card();
     card(ui, rc, "ROOM CODE");
     ui.text_centered(&h.code, rc.x + rc.w * 0.5, rc.y + 76.0, 38.0, INK());
-    ui.text(
+    ui.body(
         &format!("{}:{}", local_ip(), net_port()),
         rc.x + 18.0,
         rc.y + 107.0,
@@ -491,7 +491,7 @@ fn draw_guest_lobby(
     let rc = r_room_card();
     card(ui, rc, "CONNECTED");
     ui.text_centered(&j.code, rc.x + rc.w * 0.5, rc.y + 76.0, 38.0, INK());
-    ui.text_fitted(
+    ui.body_fitted(
         &format!("Host: {}", j.addr),
         rc.x + 18.0,
         rc.y + 107.0,
@@ -509,7 +509,7 @@ fn draw_guest_lobby(
     let Some(v) = &j.view else {
         let c = r_players_card();
         card(ui, c, "PLAYERS");
-        ui.text_centered(
+        ui.body_centered(
             &format!("Syncing with the host{dots}"),
             c.x + c.w * 0.5,
             c.y + 90.0,
@@ -590,7 +590,7 @@ fn draw_join_lobby(j: &JoinUi, lan: Option<&LanScan>, settings: &Settings, ui: &
             control_fill(SRF(), hovered && !focused),
             if focused { ACCENT() } else { CARD_EDGE() },
         );
-        ui.text_fitted(
+        ui.body_fitted(
             text,
             r.x + 16.0,
             r.y + r.h * 0.5 + size * 0.36,
@@ -610,7 +610,7 @@ fn draw_join_lobby(j: &JoinUi, lan: Option<&LanScan>, settings: &Settings, ui: &
         18.0,
     );
     if settings.name.is_empty() && j.focus != 2 {
-        ui.text(
+        ui.body(
             "Shown to the other players",
             rn.x + 16.0,
             rn.y + 28.0,
@@ -664,7 +664,7 @@ fn draw_join_lobby(j: &JoinUi, lan: Option<&LanScan>, settings: &Settings, ui: &
         }
         draw_circle(cx, cy, 6.0, with_alpha(ACCENT(), 0.85));
         ui.text_centered(&title, WIN_W * 0.5, list.y + 112.0, 17.0, INK());
-        ui.text_centered(
+        ui.body_centered(
             hint,
             WIN_W * 0.5,
             list.y + 138.0,
@@ -682,8 +682,8 @@ fn draw_join_lobby(j: &JoinUi, lan: Option<&LanScan>, settings: &Settings, ui: &
             r.h,
             12.0,
             1.5,
-            control_fill(SRF(), hovered),
-            if hovered { ACCENT() } else { CARD_EDGE() },
+            control_fill_t(SRF(), hover_t(r, hovered)),
+            mix(CARD_EDGE(), ACCENT(), hover_t(r, hovered)),
         );
         draw_circle(r.x + 30.0, r.y + r.h * 0.5, 5.0, palette(3).dark);
         ui.text_fitted(
@@ -694,7 +694,7 @@ fn draw_join_lobby(j: &JoinUi, lan: Option<&LanScan>, settings: &Settings, ui: &
             330.0,
             INK(),
         );
-        ui.text_fitted(
+        ui.body_fitted(
             &format!("{} of {} seats taken  ·  {}", g.humans, g.players, g.addr),
             r.x + 46.0,
             r.y + 38.0,
@@ -726,7 +726,7 @@ fn draw_join_lobby(j: &JoinUi, lan: Option<&LanScan>, settings: &Settings, ui: &
     };
     field(ra, j.focus == 0, &addr_text, 17.0);
     if j.addr.is_empty() && j.focus != 0 {
-        ui.text(
+        ui.body(
             "192.168.1.20",
             ra.x + 16.0,
             ra.y + 28.0,
@@ -756,7 +756,7 @@ fn draw_join_lobby(j: &JoinUi, lan: Option<&LanScan>, settings: &Settings, ui: &
     );
     secondary_button(ui, r_join_back(), "BACK", 16.0, m);
     if !j.status.is_empty() {
-        ui.text_centered(&j.status, WIN_W * 0.5, 672.0, 15.0, with_alpha(INK(), 0.75));
+        ui.body_centered(&j.status, WIN_W * 0.5, 672.0, 15.0, with_alpha(INK(), 0.75));
     }
     draw_icon_bar(settings, ui, m);
 }

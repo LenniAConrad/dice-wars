@@ -189,7 +189,17 @@ pub struct Mesh {
     pub texture: Option<Texture>,
 }
 
+// A short blend from the picture on screen to whatever is drawn next (theme
+// changes). Only the presented image is blended; captures stay exact.
+struct Crossfade {
+    from: Vec<u8>,
+    out: raster::Surface,
+    started: Instant,
+    duration: f32,
+}
+
 struct Runtime {
+    fade: Option<Crossfade>,
     surface: raster::Surface,
     presentation: raster::Surface,
     previous_raster: Vec<u8>,
@@ -268,6 +278,7 @@ pub fn init(title: &str, width: usize, height: usize) -> Result<(), String> {
         .collect();
     let (rw, rh) = raster_size(width, height);
     let mut rt = Runtime {
+        fade: None,
         surface: raster::Surface::new(rw, rh),
         presentation: raster::Surface::new(width, height),
         previous_raster: Vec::new(),
@@ -326,6 +337,10 @@ pub fn mouse_wheel() -> (f32, f32) {
 }
 pub fn input_changed() -> bool {
     read(true, |r| r.input_dirty)
+}
+/// Frames presented so far; lets per-frame animation state step once per frame.
+pub fn frame_index() -> usize {
+    read(0, |r| r.frames)
 }
 pub fn get_frame_time() -> f32 {
     read(1.0 / 60.0, |r| r.dt)
@@ -834,6 +849,30 @@ fn apply_actions(r: &mut Runtime) {
     }
 }
 
+/// Blend from the frame now on screen into the frames that follow, over
+/// `seconds`. Restarting mid-fade continues from the blended picture.
+pub fn crossfade(seconds: f32) {
+    RUNTIME.with(|r| {
+        let mut guard = r.borrow_mut();
+        let Some(r) = guard.as_mut() else { return };
+        if r.native.is_none() {
+            return; // headless runs and captures stay exact
+        }
+        let from = match &r.fade {
+            Some(f) if f.out.pixels.len() == r.presentation.pixels.len() => f.out.pixels.clone(),
+            _ => r.presentation.pixels.clone(),
+        };
+        let mut out = raster::Surface::new(r.presentation.width, r.presentation.height);
+        out.pixels.copy_from_slice(&from);
+        r.fade = Some(Crossfade {
+            from,
+            out,
+            started: Instant::now(),
+            duration: seconds.max(0.01),
+        });
+    });
+}
+
 /// Present at most 60 fps (15 while unfocused), and release all native resources on exit.
 pub fn next_frame() -> bool {
     RUNTIME.with(|r| {
@@ -879,7 +918,32 @@ pub fn next_frame() -> bool {
                 eprintln!("Capture failed: {e}");
             }
         }
-        if !damage.is_empty() {
+        let mut faded = false;
+        if let Some(fade) = &mut r.fade {
+            let t = fade.started.elapsed().as_secs_f32() / fade.duration;
+            if t >= 1.0 || fade.from.len() != r.presentation.pixels.len() {
+                r.fade = None;
+                damage = vec![(0, 0, r.presentation.width, r.presentation.height)];
+            } else {
+                // smoothstep keeps both ends gentle
+                let k = (t * t * (3.0 - 2.0 * t) * 256.0) as u16;
+                for ((o, &a), &b) in fade
+                    .out
+                    .pixels
+                    .iter_mut()
+                    .zip(&fade.from)
+                    .zip(&r.presentation.pixels)
+                {
+                    *o = ((a as u16 * (256 - k) + b as u16 * k) >> 8) as u8;
+                }
+                if let Some(w) = &mut r.native {
+                    let all = [(0, 0, fade.out.width, fade.out.height)];
+                    w.present(&fade.out, &all);
+                }
+                faded = true;
+            }
+        }
+        if !damage.is_empty() && !faded {
             if let Some(w) = &mut r.native {
                 w.present(&r.presentation, &damage);
             }

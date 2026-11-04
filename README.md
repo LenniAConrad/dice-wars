@@ -83,5 +83,5 @@ play. Details and firewall tips are in the [player guide](docs/GUIDE.md#playing-
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The interface font is DejaVu Sans Bold; see
-[assets/FONT-LICENSE.txt](assets/FONT-LICENSE.txt).
+MIT, see [LICENSE](LICENSE). The interface font is Nunito (SIL Open Font
+License); see [assets/FONT-LICENSE.txt](assets/FONT-LICENSE.txt).

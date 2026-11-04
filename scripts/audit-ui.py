@@ -144,17 +144,19 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
             ("join-hover", {"DW_SCENE": "join"},
              [(484, 508), (330, 154), (650, 512)]),
             ("game-hover", {"DW_AUTOSTART": "1"},
-             [(62, 31), (774, 31)]),
+             [(98, 24), (760, 24)]),
             ("confirm-hover", {"DW_AUTOSTART": "1", "DW_SCENE": "confirm"},
              [(242, 408), (404, 408), (566, 408)]),
         ]:
-            frames = len(points) + 1
+            # hover eases in over a few frames: give every point six
+            step = 6
             scene = f"{name}-{theme}"
-            actions = ";".join(f"{i + 2}:move:{x}:{y}" for i, (x, y) in enumerate(points))
-            render(scene, DW_THEME=theme, DW_INPUT=actions, DW_FRAME_LIMIT=str(frames + 1),
-                   DW_CAPTURE_FRAMES=",".join(map(str, range(1, frames + 1))), **changes)
+            actions = ";".join(f"{2 + i * step}:move:{x}:{y}" for i, (x, y) in enumerate(points))
+            shots = [1 + (i + 1) * step for i in range(len(points))]
+            render(scene, DW_THEME=theme, DW_INPUT=actions, DW_FRAME_LIMIT=str(shots[-1] + 1),
+                   DW_CAPTURE_FRAMES=",".join(map(str, [1, *shots])), **changes)
             with Image.open(out / f"{scene}-1.png") as before:
-                for frame, point in enumerate(points, 2):
+                for frame, point in zip(shots, points):
                     with Image.open(out / f"{scene}-{frame}.png") as after:
                         difference = max(abs(a - b) for a, b in
                                          zip(before.getpixel(point), after.getpixel(point)))

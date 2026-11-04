@@ -1,4 +1,4 @@
-//! Embedded DejaVu Sans Bold coverage masks; no runtime font library.
+//! Embedded Nunito coverage masks (ExtraBold and SemiBold); no runtime font library.
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -16,8 +16,18 @@ pub(super) struct Glyph {
     pub pixels: Vec<u8>,
 }
 impl Font {
+    /// Nunito ExtraBold: headings, buttons and labels.
     pub fn embedded() -> Self {
         Self::from_bytes(include_bytes!("../../assets/font.dwf")).expect("invalid embedded font")
+    }
+    /// Nunito SemiBold: body text, hints and descriptions.
+    pub fn embedded_body() -> Self {
+        Self::from_bytes(include_bytes!("../../assets/font-body.dwf"))
+            .expect("invalid embedded font")
+    }
+    /// Identifies the font in glyph caches shared by several fonts.
+    pub(super) fn id(&self) -> usize {
+        Arc::as_ptr(&self.glyphs) as usize
     }
     pub fn from_bytes(data: &[u8]) -> Result<Self, &'static str> {
         let mut p = 0;
@@ -126,10 +136,12 @@ mod tests {
     use super::*;
     #[test]
     fn font_retains_ui_glyphs_and_baseline() {
-        let f = Font::embedded();
-        for c in "Dice Wars — → … ✓ 12345".chars() {
-            assert!(f.glyphs.contains_key(&c));
+        for f in [Font::embedded(), Font::embedded_body()] {
+            for c in "Dice Wars — … · − 12345".chars() {
+                assert!(f.glyphs.contains_key(&c));
+            }
         }
+        let f = Font::embedded();
         assert!(f.glyph('A').y < 0.0);
         assert!(
             measure_text("WWW", Some(&f), 24, 1.0).width

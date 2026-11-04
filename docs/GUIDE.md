@@ -83,7 +83,9 @@ The two buttons at the top right of every screen are a quick sound toggle and
 **Settings**, which holds every preference:
 
 - **Theme**: Daylight, Midnight, Sakura, Sage, Paper, Ocean or Ember. Themes
-  change the interface; the map and dice keep their colors. `F10` cycles them.
+  change the interface and the lakes; the lands and dice keep their colors.
+  Switching fades over briefly (instantly with Motion: Less). `F10` cycles
+  them.
 - **Sound**: full, half or off (`M`).
 - **Game speed**: 1x, 2x or 4x. Fights between bots always play faster, and
   holding `Space` during bot turns fast-forwards them in local games.

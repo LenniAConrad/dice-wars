@@ -50,19 +50,20 @@ pub(crate) fn mouse_virtual() -> Vec2 {
 }
 
 pub(crate) struct Ui {
-    pub(crate) font: Font,
+    pub(crate) font: Font, // ExtraBold: headings, buttons, labels
+    pub(crate) body: Font, // SemiBold: sentences, hints, descriptions
 }
 
 impl Ui {
     // rasterize at the real on-screen pixel size so text stays crisp at any scale
-    pub(crate) fn text(&self, s: &str, x: f32, y: f32, size: f32, col: Color) {
+    fn draw(&self, font: &Font, s: &str, x: f32, y: f32, size: f32, col: Color) {
         let k = view_scale();
         draw_text_ex(
             s,
             x,
             y,
             TextParams {
-                font: Some(&self.font),
+                font: Some(font),
                 font_size: (size * k).round().max(8.0) as u16,
                 font_scale: 1.0 / k,
                 color: col,
@@ -70,15 +71,28 @@ impl Ui {
         );
     }
 
-    pub(crate) fn width(&self, s: &str, size: f32) -> f32 {
+    fn measure(&self, font: &Font, s: &str, size: f32) -> f32 {
         let k = view_scale();
-        measure_text(
-            s,
-            Some(&self.font),
-            (size * k).round().max(8.0) as u16,
-            1.0 / k,
-        )
-        .width
+        measure_text(s, Some(font), (size * k).round().max(8.0) as u16, 1.0 / k).width
+    }
+
+    fn fit(&self, font: &Font, s: &str, size: f32, width: f32) -> String {
+        let mut text = s.to_string();
+        if self.measure(font, &text, size) > width {
+            while !text.is_empty() && self.measure(font, &(text.clone() + "…"), size) > width {
+                text.pop();
+            }
+            text.push('…');
+        }
+        text
+    }
+
+    pub(crate) fn text(&self, s: &str, x: f32, y: f32, size: f32, col: Color) {
+        self.draw(&self.font, s, x, y, size, col);
+    }
+
+    pub(crate) fn width(&self, s: &str, size: f32) -> f32 {
+        self.measure(&self.font, s, size)
     }
 
     pub(crate) fn text_centered(&self, s: &str, cx: f32, y: f32, size: f32, col: Color) {
@@ -98,14 +112,26 @@ impl Ui {
 
     // Fit status copy into its lane without crossing adjacent controls.
     pub(crate) fn text_fitted(&self, s: &str, x: f32, y: f32, size: f32, width: f32, col: Color) {
-        let mut text = s.to_string();
-        if self.width(&text, size) > width {
-            while !text.is_empty() && self.width(&(text.clone() + "…"), size) > width {
-                text.pop();
-            }
-            text.push('…');
-        }
+        let text = self.fit(&self.font, s, size, width);
         self.text(&text, x, y, size, col);
+    }
+
+    // ---- body text: the lighter weight for sentences and descriptions
+    pub(crate) fn body(&self, s: &str, x: f32, y: f32, size: f32, col: Color) {
+        self.draw(&self.body, s, x, y, size, col);
+    }
+
+    pub(crate) fn body_width(&self, s: &str, size: f32) -> f32 {
+        self.measure(&self.body, s, size)
+    }
+
+    pub(crate) fn body_centered(&self, s: &str, cx: f32, y: f32, size: f32, col: Color) {
+        self.body(s, cx - self.body_width(s, size) * 0.5, y, size, col);
+    }
+
+    pub(crate) fn body_fitted(&self, s: &str, x: f32, y: f32, size: f32, width: f32, col: Color) {
+        let text = self.fit(&self.body, s, size, width);
+        self.body(&text, x, y, size, col);
     }
 
     pub(crate) fn text_outlined(
@@ -335,8 +361,7 @@ pub(crate) fn toolbar_shortcut(settings: &mut Settings, snd: &mut Vec<Snd>, text
         return; // Ctrl/Alt/Cmd combinations belong to the system or other actions
     }
     let changed = if is_key_pressed(KeyCode::F10) {
-        settings.theme = (settings.theme + 1) % THEMES.len();
-        set_theme(settings.theme);
+        change_theme(settings, (settings.theme + 1) % THEMES.len());
         true
     } else if is_key_pressed(KeyCode::F9) {
         set_option(settings, 3, (!settings.colorblind) as usize);
@@ -374,8 +399,7 @@ pub(crate) fn handle_toolbar_click(settings: &mut Settings, snd: &mut Vec<Snd>, 
             .flat_map(|row| (0..ROWS[row].1.len()).map(move |k| (row, k)))
             .find(|&(row, k)| r_option(row, k).contains(m));
         if let Some(i) = theme {
-            settings.theme = i;
-            set_theme(i);
+            change_theme(settings, i);
         } else if let Some((row, k)) = option.filter(|&(row, _)| row != 1 || host_speed().is_none())
         {
             set_option(settings, row, k);
@@ -388,6 +412,15 @@ pub(crate) fn handle_toolbar_click(settings: &mut Settings, snd: &mut Vec<Snd>, 
     save_settings(settings);
     snd.push(Snd::Click);
     true
+}
+
+/// Switch themes with a short cross-fade (instant with reduced motion).
+fn change_theme(settings: &mut Settings, i: usize) {
+    if i != settings.theme && !REDUCED_MOTION.load(Ordering::Relaxed) {
+        engine::crossfade(0.22);
+    }
+    settings.theme = i;
+    set_theme(i);
 }
 
 pub(crate) fn close_settings() {
@@ -440,24 +473,18 @@ fn draw_sliders(cx: f32, cy: f32) {
 
 // a small outlined toolbar button; `active` keeps it highlighted (open panel)
 fn tool_button(r: Rect, mp: Vec2, active: bool) {
-    let hov = r.contains(mp);
-    draw_round_frame(
-        r.x,
-        r.y,
-        r.w,
-        r.h,
-        10.0,
-        1.5,
-        control_fill(
-            if active {
-                mix(SRF(), ACCENT(), 0.14)
-            } else {
-                SRF()
-            },
-            hov,
-        ),
-        if hov || active { ACCENT() } else { CARD_EDGE() },
-    );
+    let t = hover_t(r, r.contains(mp));
+    let base = if active {
+        mix(SRF(), ACCENT(), 0.14)
+    } else {
+        SRF()
+    };
+    let edge = if active {
+        ACCENT()
+    } else {
+        mix(CARD_EDGE(), ACCENT(), t)
+    };
+    draw_round_frame(r.x, r.y, r.w, r.h, 10.0, 1.5, control_fill_t(base, t), edge);
 }
 
 /// The in-game MENU button, top left; it opens the pause dialog.
@@ -509,7 +536,7 @@ fn tooltip(ui: &Ui, tip: &str, anchor: Rect) {
     let y = anchor.y + anchor.h + 8.0;
     soft_shadow(x, y, width, 26.0, 8.0, 1.0);
     draw_round_frame(x, y, width, 26.0, 8.0, 1.0, SRF(), CARD_EDGE());
-    ui.text(tip, x + 10.0, y + 18.0, 12.0, INK());
+    ui.body(tip, x + 10.0, y + 18.0, 12.0, INK());
 }
 
 /// The settings panel, drawn last so it floats above every screen.
@@ -556,7 +583,7 @@ pub(crate) fn draw_settings_panel(settings: &Settings, ui: &Ui, m: Vec2) {
             .collect();
         seg_group(ui, m, !locked, &items, 12.0);
     }
-    ui.text_centered(
+    ui.body_centered(
         "M sound · F8 motion · F9 color · F10 theme",
         p.x + p.w * 0.5,
         p.y + p.h - 16.0,
@@ -581,18 +608,81 @@ pub(crate) fn control_fill(fill: Color, hovered: bool) -> Color {
     }
 }
 
+/// `control_fill` part of the way to hovered (0 = rest, 1 = hovered).
+pub(crate) fn control_fill_t(fill: Color, t: f32) -> Color {
+    if t <= 0.0 {
+        fill
+    } else {
+        mix(fill, control_fill(fill, true), t.min(1.0))
+    }
+}
+
+// ---- hover animation: every control eases into and out of its hover look
+thread_local! {
+    static HOVERS: std::cell::RefCell<std::collections::HashMap<[i32; 4], (f32, usize)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+static ANIMATING: AtomicBool = AtomicBool::new(false);
+// quick to light up, a little slower to let go
+const HOVER_IN: f32 = 0.08;
+const HOVER_OUT: f32 = 0.16;
+
+/// How hovered the control at `r` looks now (0..1). It steps once per frame
+/// by the frame time, so calling it twice in a frame is harmless.
+pub(crate) fn hover_t(r: Rect, hovered: bool) -> f32 {
+    let target = if hovered { 1.0 } else { 0.0 };
+    if REDUCED_MOTION.load(Ordering::Relaxed) {
+        return target;
+    }
+    let frame = engine::frame_index();
+    let dt = get_frame_time().min(0.1);
+    let key = [r.x as i32, r.y as i32, r.w as i32, r.h as i32];
+    HOVERS.with(|h| {
+        let mut h = h.borrow_mut();
+        if h.len() > 512 {
+            h.clear();
+        }
+        let (v, last) = h.entry(key).or_insert((0.0, frame));
+        if *last != frame {
+            *last = frame;
+            *v = if *v < target {
+                (*v + dt / HOVER_IN).min(target)
+            } else {
+                (*v - dt / HOVER_OUT).max(target)
+            };
+        }
+        if *v != target {
+            ANIMATING.store(true, Ordering::Relaxed);
+        }
+        *v
+    })
+}
+
+/// Whether a hover animation ran last frame (and resets the flag), so idle
+/// screens keep drawing until it settles.
+pub(crate) fn ui_animating() -> bool {
+    ANIMATING.swap(false, Ordering::Relaxed)
+}
+
+/// A flat button: hairline edge, eased hover tint, a 1 px press.
 pub(crate) fn menu_button(r: Rect, fill: Color, edge: Color, hovered: bool) {
-    let f = control_fill(fill, hovered);
-    soft_shadow(r.x, r.y, r.w, r.h, 14.0, 1.0);
+    let t = hover_t(r, hovered);
+    let pressed = hovered && is_mouse_button_down(MouseButton::Left);
+    let f = if pressed {
+        darken(control_fill(fill, true), 0.94)
+    } else {
+        control_fill_t(fill, t)
+    };
+    let dy = if pressed { 1.0 } else { 0.0 };
     draw_round_frame(
         r.x,
-        r.y,
+        r.y + dy,
         r.w,
         r.h,
         14.0,
-        2.5,
+        2.0,
         f,
-        if hovered { ACCENT() } else { edge },
+        mix(edge, ACCENT(), t),
     );
 }
 
@@ -602,6 +692,7 @@ pub(crate) fn menu_button(r: Rect, fill: Color, edge: Color, hovered: bool) {
 // - the selected option of any choice is filled with your color
 // - the accent color marks hover and keyboard/text focus only
 // - one filled primary button per screen; everything else is outlined
+// - flat controls with hairline edges; only floating things cast shadows
 
 pub(crate) const LABEL_SIZE: f32 = 12.0;
 
@@ -622,25 +713,39 @@ pub(crate) fn primary_button(ui: &Ui, r: Rect, text: &str, size: f32, m: Vec2, e
     } else {
         mix(SRF(), BG(), 0.5)
     };
-    let edge = if enabled { BORDER() } else { CARD_EDGE() };
+    let edge = if enabled {
+        darken(base, 0.72)
+    } else {
+        CARD_EDGE()
+    };
     menu_button(r, base, edge, hovered);
     let ink = if enabled {
         on_color(control_fill(base, hovered))
     } else {
         with_alpha(INK(), 0.5)
     };
-    ui.text_centered(text, r.x + r.w * 0.5, baseline(r, size), size, ink);
+    let dy = press_offset(hovered);
+    ui.text_centered(text, r.x + r.w * 0.5, baseline(r, size) + dy, size, ink);
+}
+
+fn press_offset(hovered: bool) -> f32 {
+    if hovered && is_mouse_button_down(MouseButton::Left) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 /// Every other button: outlined on the surface color.
 pub(crate) fn secondary_button(ui: &Ui, r: Rect, text: &str, size: f32, m: Vec2) {
     menu_button(r, SRF(), CARD_EDGE(), r.contains(m));
-    ui.text_centered(text, r.x + r.w * 0.5, baseline(r, size), size, INK());
+    let dy = press_offset(r.contains(m));
+    ui.text_centered(text, r.x + r.w * 0.5, baseline(r, size) + dy, size, INK());
 }
 
 /// A titled card: the container for one group of related controls.
 pub(crate) fn card(ui: &Ui, r: Rect, title: &str) {
-    draw_round_frame(r.x, r.y, r.w, r.h, 16.0, 2.0, SRF(), CARD_EDGE());
+    draw_round_frame(r.x, r.y, r.w, r.h, 16.0, 1.5, SRF(), CARD_EDGE());
     if !title.is_empty() {
         label(ui, title, r.x + 18.0, r.y + 30.0);
     }
@@ -659,7 +764,7 @@ pub(crate) fn seg_group(ui: &Ui, m: Vec2, live: bool, items: &[(Rect, &str, bool
         last.x + last.w - x0,
         h,
         h * 0.5,
-        2.0,
+        1.5,
         SRF(),
         CARD_EDGE(),
     );
@@ -667,8 +772,9 @@ pub(crate) fn seg_group(ui: &Ui, m: Vec2, live: bool, items: &[(Rect, &str, bool
         if i > 0 && !sel && !items[i - 1].2 {
             draw_line(r.x, y + 8.0, r.x, y + h - 8.0, 1.5, CARD_EDGE());
         }
-        let hov = live && r.contains(m);
+        let t = hover_t(*r, live && r.contains(m));
         if *sel {
+            let fill = palette(HUMAN).fill;
             draw_round_frame(
                 r.x + 2.5,
                 y + 2.5,
@@ -676,17 +782,17 @@ pub(crate) fn seg_group(ui: &Ui, m: Vec2, live: bool, items: &[(Rect, &str, bool
                 h - 5.0,
                 (h - 5.0) * 0.5,
                 2.0,
-                control_fill(palette(HUMAN).fill, hov),
-                BORDER(),
+                control_fill_t(fill, t),
+                darken(fill, 0.62),
             );
-        } else if hov {
+        } else if t > 0.0 {
             draw_round_rect(
                 r.x + 2.5,
                 y + 2.5,
                 r.w - 5.0,
                 h - 5.0,
                 (h - 5.0) * 0.5,
-                control_fill(SRF(), hov),
+                control_fill_t(SRF(), t),
             );
         }
         let ink = if *sel { INK_ON_FILL } else { INK() };
@@ -721,15 +827,16 @@ pub(crate) fn seg_row(
 // checkbox row shared by the menu card and both lobbies
 pub(crate) fn draw_toggle(r: Rect, label: &str, on: bool, ui: &Ui, m: Vec2) {
     let hov = r.contains(m);
+    let t = hover_t(r, hov);
     let (bx, by) = (r.x, r.y + 2.0);
-    if hov {
+    if t > 0.0 {
         draw_round_rect(
             r.x - 4.0,
             r.y - 2.0,
             r.w + 8.0,
             r.h + 4.0,
             6.0,
-            control_fill(SRF(), true),
+            control_fill_t(SRF(), t),
         );
     }
     draw_round_frame(
@@ -739,8 +846,8 @@ pub(crate) fn draw_toggle(r: Rect, label: &str, on: bool, ui: &Ui, m: Vec2) {
         20.0,
         6.0,
         2.0,
-        control_fill(if on { palette(HUMAN).mid } else { SRF() }, hov),
-        if hov { ACCENT() } else { CARD_EDGE() },
+        control_fill_t(if on { palette(HUMAN).mid } else { SRF() }, t),
+        mix(CARD_EDGE(), ACCENT(), t),
     );
     if on {
         // round caps at the elbow and tips keep the check seamless

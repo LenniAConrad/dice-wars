@@ -11,7 +11,7 @@ pub(super) struct Surface {
     pub pixels: Vec<u8>,
     opaque: bool,
     painted_bounds: Cell<(usize, usize, usize, usize)>,
-    glyphs: HashMap<(char, usize, usize), Vec<u8>>,
+    glyphs: HashMap<(usize, char, usize, usize), Vec<u8>>,
     // A clear is recorded, not written: an opaque full-surface blit right
     // after it (the usual start of a frame) makes the fill unnecessary.
     pending: Option<([u8; 4], PixelRect)>,
@@ -777,7 +777,7 @@ impl Surface {
             let h = (glyph.h as f32 * scale * t.sy.abs()).round().max(0.0) as usize;
             if w > 0 && h > 0 && w <= 1024 && h <= 1024 {
                 self.bounds(pos, pos + vec2(w as f32 + 1.0, h as f32 + 1.0));
-                let key = (ch, w, h);
+                let key = (font.id(), ch, w, h);
                 if self.glyphs.len() > 4096 {
                     self.glyphs.clear();
                 }

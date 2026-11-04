@@ -146,6 +146,7 @@ impl App {
     fn new() -> App {
         let ui = Ui {
             font: Font::embedded(),
+            body: Font::embedded_body(),
         };
         let sounds = Sounds::load();
         let mut settings = load_settings();
@@ -438,7 +439,11 @@ impl App {
                         .iter()
                         .all(|f| f.shake <= 0.0 && f.bounce <= 0.0 && f.flash <= 0.0)
             });
-        if (quiet_menu || quiet_play) && self.screen_fade <= 0.0 && !engine::input_changed() {
+        if (quiet_menu || quiet_play)
+            && self.screen_fade <= 0.0
+            && !engine::input_changed()
+            && !crate::ui::ui_animating()
+        {
             if quiet_menu {
                 self.menu_time += dt;
             }

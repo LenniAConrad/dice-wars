@@ -309,9 +309,9 @@ pub fn board(game: &Game) -> String {
     }
     let _ = write!(
         body,
-        r#"<path d="{inner}" fill="none" stroke="{}" stroke-width="1.6" stroke-linecap="round"/><path d="{coast}" fill="none" stroke="{}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>"#,
+        r#"<path d="{inner}" fill="none" stroke="{}" stroke-width="1.6" stroke-linecap="round"/><path d="{coast}" fill="none" stroke="{}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>"#,
         hex(mix(MAP_EDGE, WHITE, 0.38)),
-        hex(MAP_EDGE)
+        hex(mix(MAP_EDGE, WHITE, 0.14))
     );
 
     // dice stacks back to front, laid out like `draw_stack`
@@ -400,7 +400,7 @@ pub fn board(game: &Game) -> String {
     let (vx, vy) = (x0 - pad, y0 - pad);
     let (vw, vh) = (x1 - x0 + pad * 2.0, y1 - y0 + pad * 2.0 + 12.0);
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="{vx:.0} {vy:.0} {vw:.0} {vh:.0}" width="{:.0}" height="{:.0}" role="img" aria-label="A Dice Wars board in the middle of a game"><title>Dice Wars board</title><style>text{{font:bold 13px "DejaVu Sans",Verdana,sans-serif;text-anchor:middle}}</style><defs>{defs}</defs>{body}</svg>
+        r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="{vx:.0} {vy:.0} {vw:.0} {vh:.0}" width="{:.0}" height="{:.0}" role="img" aria-label="A Dice Wars board in the middle of a game"><title>Dice Wars board</title><style>text{{font:800 13px Nunito,"Arial Rounded MT Bold","DejaVu Sans",Verdana,sans-serif;text-anchor:middle}}</style><defs>{defs}</defs>{body}</svg>
 "#,
         vw * 1.0,
         vh * 1.0

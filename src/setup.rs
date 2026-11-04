@@ -20,8 +20,8 @@ use crate::game::{team_letter, Difficulty, Game, TeamCfg, MAX_PLAYERS, MAX_TEAMS
 use crate::menu::draw_map_mini;
 use crate::theme::{base_color, darken, with_alpha, ACCENT, BORDER, CARD_EDGE, INK, SRF};
 use crate::ui::{
-    control_fill, draw_round_frame, draw_round_rect, draw_toggle, label, menu_button, seg_group,
-    seg_row, Ui, WIN_W,
+    control_fill_t, draw_round_frame, draw_round_rect, draw_toggle, hover_t, label, menu_button,
+    seg_group, seg_row, Ui, WIN_W,
 };
 
 // ---- the grid
@@ -110,7 +110,7 @@ pub(crate) fn draw_preview(ui: &Ui, game: Option<&Game>, waiting: &str) {
             g,
             Rect::new(pv.x + 10.0, pv.y + 10.0, pv.w - 20.0, pv.h - 20.0),
         ),
-        None => ui.text_centered(
+        None => ui.body_centered(
             waiting,
             pv.x + pv.w * 0.5,
             pv.y + pv.h * 0.5,
@@ -220,7 +220,7 @@ pub(crate) fn draw_color_row(ui: &Ui, m: Vec2, selected: usize, taken: &[usize])
             r.w,
             r.h,
             7.0,
-            control_fill(base, free && r.contains(m)),
+            control_fill_t(base, hover_t(r, free && r.contains(m))),
         );
         if !free {
             draw_line(
@@ -287,7 +287,7 @@ pub(crate) fn draw_team_block(
     seg_group(ui, if live_rules { m } else { off }, live_rules, &row, 13.0);
     label(ui, "YOUR TEAM", o.x, o.y + 76.0);
     if cfg.hvb {
-        ui.text(
+        ui.body(
             "Every human plays against all the bots.",
             o.x,
             o.y + 106.0,
