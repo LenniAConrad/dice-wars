@@ -542,16 +542,34 @@ fn accept_loop(listener: TcpListener, state: Arc<State>) {
                             state.log(format_args!("could not start a thread for {ip}"));
                         }
                     }
-                    Err(why) => {
-                        let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
-                        let _ = write_line(&stream, &format!("BYE {why}"));
-                    }
+                    Err(why) => refuse(stream, why),
                 }
             }
             // out of file descriptors and the like: back off briefly
             Err(_) => std::thread::sleep(Duration::from_millis(100)),
         }
     }
+}
+
+// Tell a refused client why, then close gracefully. Closing a socket whose
+// request is still unread makes Windows (and sometimes others) send a reset
+// that destroys the BYE line before the client reads it, so the request is
+// drained first, briefly, on a short-lived thread.
+fn refuse(stream: TcpStream, why: &str) {
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+    let _ = write_line(&stream, &format!("BYE {why}"));
+    let _ = stream.shutdown(Shutdown::Write);
+    let _ = std::thread::Builder::new().spawn(move || {
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+        let mut buf = [0u8; 512];
+        let mut total = 0;
+        while total < 4096 {
+            match std::io::Read::read(&mut &stream, &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => total += n,
+            }
+        }
+    });
 }
 
 fn handle_conn(stream: TcpStream, ip: IpAddr, guard: ConnGuard, state: Arc<State>) {
