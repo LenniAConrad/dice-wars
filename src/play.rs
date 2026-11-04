@@ -359,7 +359,7 @@ impl App {
             } else {
                 self.confirm = Some(Confirm::Menu);
             }
-        } else if is_key_pressed(KeyCode::R) && self.guest.is_none() {
+        } else if is_key_pressed(KeyCode::R) && self.guest.is_none() && !modifier_down() {
             if g.over.is_some() && self.host.is_none() {
                 self.menu.seed = random_seed();
                 *g = gen_map_local(

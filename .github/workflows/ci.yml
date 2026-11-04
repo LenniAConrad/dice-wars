@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# Every job is headless: DW_FORBID_WINDOW makes any accidental windowed start
+# fail instead of opening a window on the runner.
+env:
+  DW_FORBID_WINDOW: "1"
+  CARGO_TERM_COLOR: always
+
 jobs:
   headless-checks:
     runs-on: ubuntu-latest
@@ -23,3 +29,55 @@ jobs:
         run: rustup target add x86_64-pc-windows-gnu aarch64-apple-darwin x86_64-apple-darwin
       - name: Headless checks
         run: scripts/check.sh
+
+  windows-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, x86_64-pc-windows-gnu]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install the ${{ matrix.target }} toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable-${{ matrix.target }} --profile minimal
+          rustup override set stable-${{ matrix.target }}
+          rustc -vV
+      - name: Build
+        run: cargo build --release --locked -j 2
+      - name: Unit tests (headless)
+        run: cargo test --release --locked -j 2 -- --test-threads=1
+
+  macos-tests:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Build
+        run: cargo build --release --locked -j 2
+      - name: Unit tests (headless)
+        run: cargo test --release --locked -j 2 -- --test-threads=1
+
+  minimum-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-6 libpulse0
+      - name: Install Rust 1.82 (Cargo.toml rust-version)
+        run: |
+          rustup toolchain install 1.82 --profile minimal
+          rustup override set 1.82
+          rustc --version
+      - name: Build and test on the minimum version
+        run: |
+          cargo build --release --locked -j 2
+          cargo test --release --locked -j 2 -- --test-threads=1

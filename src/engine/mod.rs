@@ -30,10 +30,10 @@ pub mod prelude {
     pub use super::{
         clear_background, draw_circle, draw_line, draw_mesh, draw_poly, draw_rectangle,
         draw_text_ex, draw_triangle, get_char_pressed, get_frame_time, is_key_down, is_key_pressed,
-        is_mouse_button_down, is_mouse_button_pressed, measure_text, mouse_position, mouse_wheel,
-        render_target, screen_height, screen_width, set_camera, set_default_camera, vec2, vec3,
-        vec4, Camera2D, Color, Font, Image, KeyCode, Mesh, MouseButton, Rect, RenderTarget,
-        TextParams, Vec2, Vertex, BLACK, WHITE,
+        is_mouse_button_down, is_mouse_button_pressed, measure_text, modifier_down, mouse_position,
+        mouse_wheel, render_target, screen_height, screen_width, set_camera, set_default_camera,
+        vec2, vec3, vec4, Camera2D, Color, Font, Image, KeyCode, Mesh, MouseButton, Rect,
+        RenderTarget, TextParams, Vec2, Vertex, BLACK, WHITE,
     };
 }
 
@@ -50,6 +50,10 @@ pub enum KeyCode {
     V,
     LeftControl,
     RightControl,
+    /// Either Alt (Option on macOS).
+    Alt,
+    /// Either Windows/Super key. Command on macOS reports as Control.
+    Super,
     F8,
     F9,
     F10,
@@ -101,6 +105,16 @@ impl Input {
         self.clicked = false;
         self.wheel = (0.0, 0.0);
         self.repaint = false;
+    }
+    pub fn modifier_down(&self) -> bool {
+        [
+            KeyCode::LeftControl,
+            KeyCode::RightControl,
+            KeyCode::Alt,
+            KeyCode::Super,
+        ]
+        .iter()
+        .any(|k| self.keys.contains(k))
     }
     pub fn blur(&mut self) {
         self.keys.clear();
@@ -325,6 +339,10 @@ pub fn is_key_pressed(key: KeyCode) -> bool {
 }
 pub fn is_key_down(key: KeyCode) -> bool {
     read(false, |r| r.input.keys.contains(&key))
+}
+/// Ctrl, Alt or Super/Command is held: plain-letter shortcuts should not fire.
+pub fn modifier_down() -> bool {
+    read(false, |r| r.input.modifier_down())
 }
 /// Swallow this frame's click, e.g. when an overlay already handled it.
 pub fn consume_click() {
@@ -834,6 +852,16 @@ pub fn shutdown() {
 pub fn clipboard_set(text: &str) {
     platform::clipboard_set(text);
 }
+/// Report an error that stops the game from starting. Windows release builds
+/// have no console, so the message is also shown in a dialog there (never in
+/// headless or window-forbidden runs).
+pub fn fatal_error(message: &str) {
+    eprintln!("{message}");
+    #[cfg(windows)]
+    if std::env::var_os("DW_HEADLESS").is_none() && std::env::var_os("DW_FORBID_WINDOW").is_none() {
+        platform::show_error("Dice Wars", message);
+    }
+}
 pub fn clipboard_get() -> Option<String> {
     platform::clipboard_get()
 }
@@ -873,5 +901,20 @@ mod tests {
         assert!(input.pressed.contains(&KeyCode::F10));
         input.blur();
         assert!(input.keys.is_empty());
+    }
+    #[test]
+    fn modifiers_block_plain_shortcuts() {
+        let mut input = Input::default();
+        input.key(KeyCode::R, true);
+        assert!(!input.modifier_down());
+        for key in [KeyCode::RightControl, KeyCode::Alt, KeyCode::Super] {
+            input.key(key, true);
+            assert!(input.modifier_down());
+            input.key(key, false);
+            assert!(!input.modifier_down());
+        }
+        input.key(KeyCode::LeftControl, true);
+        input.blur();
+        assert!(!input.modifier_down());
     }
 }

@@ -306,6 +306,9 @@ fn set_option(settings: &mut Settings, row: usize, k: usize) {
 /// Keyboard shortcuts for the toolbar: M sound, F8 motion, F9 color assist,
 /// F10 next theme.
 pub(crate) fn toolbar_shortcut(settings: &mut Settings, snd: &mut Vec<Snd>, text_editing: bool) {
+    if modifier_down() {
+        return; // Ctrl/Alt/Cmd combinations belong to the system or other actions
+    }
     let changed = if is_key_pressed(KeyCode::F10) {
         settings.theme = (settings.theme + 1) % THEMES.len();
         set_theme(settings.theme);

@@ -404,7 +404,9 @@ impl Window {
                         if size != self.size {
                             self.size = size;
                             self.stale = true;
-                            input.size = size;
+                            // The framebuffer stops at 4096 px and is shown 1:1 at
+                            // the top left, so layout and mouse use that size too.
+                            input.size = (size.0.min(4096), size.1.min(4096));
                             input.repaint = true;
                         }
                     }
@@ -438,7 +440,11 @@ impl Window {
                 let src = &surface.pixels[(y * w + x0) * 4..(y * w + x1) * 4];
                 let dst = &mut self.pixels[y * w + x0..y * w + x1];
                 for (dst, rgba) in dst.iter_mut().zip(src.chunks_exact(4)) {
-                    *dst = (rgba[0] as u32) << 16 | (rgba[1] as u32) << 8 | rgba[2] as u32;
+                    // Opaque alpha for 32-bit (ARGB) visuals; 24-bit ones ignore it.
+                    *dst = 0xff00_0000
+                        | (rgba[0] as u32) << 16
+                        | (rgba[1] as u32) << 8
+                        | rgba[2] as u32;
                 }
             }
         }
@@ -511,6 +517,8 @@ fn key_code(sym: c_ulong) -> Option<KeyCode> {
         86 | 118 => KeyCode::V,
         0xffe3 => KeyCode::LeftControl,
         0xffe4 => KeyCode::RightControl,
+        0xffe7..=0xffea => KeyCode::Alt, // Meta_L/R, Alt_L/R (AltGr is separate)
+        0xffeb | 0xffec => KeyCode::Super,
         0xffc5 => KeyCode::F8,
         0xffc6 => KeyCode::F9,
         0xffc7 => KeyCode::F10,

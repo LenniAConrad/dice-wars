@@ -91,7 +91,7 @@ pub(crate) struct App {
 
 fn main() {
     if let Err(error) = engine::init("Dice Wars", WIN_W as usize, WIN_H as usize) {
-        eprintln!("{error}");
+        engine::fatal_error(&error);
         std::process::exit(1);
     }
     engine::random::srand(engine::now() as u64);

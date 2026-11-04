@@ -5,14 +5,12 @@ pub struct Sound {
     samples: Arc<Vec<i16>>,
 }
 pub struct PlaySoundParams {
-    pub looped: bool,
     pub volume: f32,
 }
 struct Voice {
     samples: Arc<Vec<i16>>,
     position: usize,
     volume: f32,
-    looped: bool,
 }
 /// Headless runs are silent unless DW_HEADLESS_AUDIO opts in, which lets the
 /// audio audit exercise the real output path without opening a window.
@@ -53,9 +51,6 @@ fn mixer() -> Option<&'static mpsc::SyncSender<Voice>> {
                     for sample in &mut output {
                         let mut sum = 0.0;
                         for v in &mut voices {
-                            if v.position == v.samples.len() && v.looped {
-                                v.position = 0;
-                            }
                             if let Some(&s) = v.samples.get(v.position) {
                                 sum += s as f32 * v.volume;
                                 v.position += 1;
@@ -63,7 +58,7 @@ fn mixer() -> Option<&'static mpsc::SyncSender<Voice>> {
                         }
                         *sample = soft_limit(sum);
                     }
-                    voices.retain(|v| v.looped || v.position < v.samples.len());
+                    voices.retain(|v| v.position < v.samples.len());
                     if !device.write(&output) {
                         eprintln!("Dice Wars: audio output disconnected");
                         break;
@@ -131,7 +126,6 @@ pub fn play_sound(sound: &Sound, params: PlaySoundParams) {
             samples: sound.samples.clone(),
             position: 0,
             volume: params.volume.clamp(0.0, 1.0),
-            looped: params.looped,
         });
     }
 }
