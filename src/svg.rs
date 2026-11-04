@@ -1,11 +1,21 @@
 //! Vector exports of the board and the logo for documentation.
 //!
-//! These mirror the raster drawing in `main.rs` (die geometry, pips, map
-//! colors) with compact, reusable SVG symbols, so the README art is a few
-//! kilobytes, sharp at any zoom, and always matches the game.
+//! These mirror the raster drawing in `dice.rs` and `draw_game.rs` (die
+//! geometry, pips, map colors) with compact, reusable SVG symbols, so the
+//! README art is a few kilobytes, sharp at any zoom, and always matches the
+//! game.
 
-use super::*;
+use std::collections::HashSet;
 use std::fmt::Write as _;
+
+use dicegame::engine::prelude::*;
+
+use crate::board::{cell_pos, neighbor_of, COLS, HEX, ROWS};
+use crate::dice::{face_val, DIE_W, PIPS};
+use crate::game::Game;
+use crate::theme::{
+    darken, lighten, map_fill, mix, on_color, palette, pip_color, Palette, MAP_EDGE, PLAYER_BASE,
+};
 
 fn hex(c: Color) -> String {
     let [r, g, b, _] = c.bytes();
@@ -124,9 +134,24 @@ fn die_body(out: &mut String, x: f32, y: f32, w: f32, pal: &Palette, shade: Opti
     let off_a = vec2(-bw * 0.7, -bw * 0.35);
     let off_l = vec2(bw * 0.5, bw * 0.8);
     let off_r = vec2(-bw * 0.5, bw * 0.8);
-    poly(out, &[sa, s.a, s.a + off_a, sa + off_a], "#fff", r#" fill-opacity=".3""#);
-    poly(out, &[sl, s.lt, s.lt + off_l, sl + off_l], "#fff", r#" fill-opacity=".35""#);
-    poly(out, &[sr, s.rt, s.rt + off_r, sr + off_r], "#fff", r#" fill-opacity=".22""#);
+    poly(
+        out,
+        &[sa, s.a, s.a + off_a, sa + off_a],
+        "#fff",
+        r#" fill-opacity=".3""#,
+    );
+    poly(
+        out,
+        &[sl, s.lt, s.lt + off_l, sl + off_l],
+        "#fff",
+        r#" fill-opacity=".35""#,
+    );
+    poly(
+        out,
+        &[sr, s.rt, s.rt + off_r, sr + off_r],
+        "#fff",
+        r#" fill-opacity=".22""#,
+    );
     poly(out, &[s.a, s.l, s.lt, s.tt, s.rt, s.r], "none", &stroke);
 }
 
@@ -134,9 +159,30 @@ fn die_body(out: &mut String, x: f32, y: f32, w: f32, pal: &Palette, shade: Opti
 fn die_pips(out: &mut String, x: f32, y: f32, w: f32, pal: &Palette, side: usize, value: usize) {
     let s = die_shape(x, y, w);
     match side {
-        0 => pips(out, s.a, s.l - s.a, s.at - s.a, value, pip_color(pal, pal.mid)),
-        1 => pips(out, s.a, s.r - s.a, s.at - s.a, value, pip_color(pal, pal.dark)),
-        _ => pips(out, s.at, s.lt - s.at, s.rt - s.at, value, pip_color(pal, pal.light)),
+        0 => pips(
+            out,
+            s.a,
+            s.l - s.a,
+            s.at - s.a,
+            value,
+            pip_color(pal, pal.mid),
+        ),
+        1 => pips(
+            out,
+            s.a,
+            s.r - s.a,
+            s.at - s.a,
+            value,
+            pip_color(pal, pal.dark),
+        ),
+        _ => pips(
+            out,
+            s.at,
+            s.lt - s.at,
+            s.rt - s.at,
+            value,
+            pip_color(pal, pal.light),
+        ),
     }
 }
 
@@ -166,9 +212,30 @@ pub fn logo() -> String {
     let (w, x, y) = (176.0, 128.0, 232.0);
     let s = die_shape(x, y, w);
     let mut defs = String::new();
-    gradient(&mut defs, "gl", s.a, s.lt, darken(pal.mid, 0.88), lighten(pal.mid, 0.10));
-    gradient(&mut defs, "gr", s.a, s.rt, darken(pal.dark, 0.86), lighten(pal.dark, 0.08));
-    gradient(&mut defs, "gt", s.at, s.tt, lighten(pal.light, 0.10), darken(pal.light, 0.96));
+    gradient(
+        &mut defs,
+        "gl",
+        s.a,
+        s.lt,
+        darken(pal.mid, 0.88),
+        lighten(pal.mid, 0.10),
+    );
+    gradient(
+        &mut defs,
+        "gr",
+        s.a,
+        s.rt,
+        darken(pal.dark, 0.86),
+        lighten(pal.dark, 0.08),
+    );
+    gradient(
+        &mut defs,
+        "gt",
+        s.at,
+        s.tt,
+        lighten(pal.light, 0.10),
+        darken(pal.light, 0.96),
+    );
     let mut body = String::new();
     die_body(&mut body, x, y, w, &pal, Some("g"));
     for (side, value) in [(0, 2), (1, 3), (2, 1)] {
@@ -227,7 +294,7 @@ pub fn board(game: &Game) -> String {
             if n.is_some_and(|n| game.cell_terr[n] == t) {
                 continue;
             }
-            let is_coast = n.map_or(true, |n| game.cell_terr[n] < 0);
+            let is_coast = n.is_none_or(|n| game.cell_terr[n] < 0);
             // shared borders are listed by both sides; keep one copy
             if !is_coast && n.is_some_and(|n| n < i) {
                 continue;
@@ -256,31 +323,39 @@ pub fn board(game: &Game) -> String {
     // defined once at the origin.
     let mut defs = String::new();
     let mut defined = HashSet::new();
-    let mut place = |body: &mut String, x: f32, y: f32, owner: usize, faces: (usize, usize, usize)| {
-        let pal = palette(owner);
-        let (tv, lv, rv) = faces;
-        let body_id = format!("b{owner}");
-        if defined.insert(body_id.clone()) {
-            let _ = write!(defs, r#"<g id="{body_id}">"#);
-            die_body(&mut defs, 0.0, 0.0, w, &pal, None);
-            defs.push_str("</g>");
-        }
-        let _ = write!(body, r##"<use xlink:href="#{body_id}" x="{x:.1}" y="{y:.1}"/>"##);
-        for (side, value) in [(0, lv), (1, rv), (2, tv)] {
-            let id = format!("p{owner}{side}{value}");
-            if defined.insert(id.clone()) {
-                let _ = write!(defs, r#"<g id="{id}">"#);
-                die_pips(&mut defs, 0.0, 0.0, w, &pal, side, value);
+    let mut place =
+        |body: &mut String, x: f32, y: f32, owner: usize, faces: (usize, usize, usize)| {
+            let pal = palette(owner);
+            let (tv, lv, rv) = faces;
+            let body_id = format!("b{owner}");
+            if defined.insert(body_id.clone()) {
+                let _ = write!(defs, r#"<g id="{body_id}">"#);
+                die_body(&mut defs, 0.0, 0.0, w, &pal, None);
                 defs.push_str("</g>");
             }
-            let _ = write!(body, r##"<use xlink:href="#{id}" x="{x:.1}" y="{y:.1}"/>"##);
-        }
-    };
+            let _ = write!(
+                body,
+                r##"<use xlink:href="#{body_id}" x="{x:.1}" y="{y:.1}"/>"##
+            );
+            for (side, value) in [(0, lv), (1, rv), (2, tv)] {
+                let id = format!("p{owner}{side}{value}");
+                if defined.insert(id.clone()) {
+                    let _ = write!(defs, r#"<g id="{id}">"#);
+                    die_pips(&mut defs, 0.0, 0.0, w, &pal, side, value);
+                    defs.push_str("</g>");
+                }
+                let _ = write!(body, r##"<use xlink:href="#{id}" x="{x:.1}" y="{y:.1}"/>"##);
+            }
+        };
     for &t in &order {
         let terr = &game.terrs[t];
         let n = terr.dice as usize;
         let two_cols = n > 4;
-        let (fdx, bdx) = if two_cols { (-w * 0.46, w * 0.46) } else { (0.0, 0.0) };
+        let (fdx, bdx) = if two_cols {
+            (-w * 0.46, w * 0.46)
+        } else {
+            (0.0, 0.0)
+        };
         let base = terr.anchor + vec2(0.0, 4.0);
         let _ = write!(
             body,
@@ -292,7 +367,13 @@ pub fn board(game: &Game) -> String {
         );
         for i in 0..n.saturating_sub(4) {
             let (x, y) = (base.x + bdx, base.y - w * 0.26 - i as f32 * ch);
-            place(&mut body, x, y, terr.owner, die_faces(terr.seed, (i + 4) as u32));
+            place(
+                &mut body,
+                x,
+                y,
+                terr.owner,
+                die_faces(terr.seed, (i + 4) as u32),
+            );
             y0 = y0.min(y - w * 1.2);
         }
         for i in 0..n.min(4) {
@@ -324,4 +405,30 @@ pub fn board(game: &Game) -> String {
         vw * 1.0,
         vh * 1.0
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::board::gen_map_local;
+    use crate::game::{Difficulty, TeamCfg};
+    use crate::svg;
+    use crate::testutil::GLOBALS;
+
+    #[test]
+    fn svg_exports_are_complete_documents() {
+        let _guard = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+        let logo = svg::logo();
+        assert!(logo.starts_with("<svg") && logo.trim_end().ends_with("</svg>"));
+        let g = gen_map_local(31337, 6, 1, Difficulty::Normal, TeamCfg::default());
+        let board = svg::board(&g);
+        assert!(board.starts_with("<svg") && board.trim_end().ends_with("</svg>"));
+        let dice: u32 = g.terrs.iter().map(|t| t.dice).sum();
+        // one body and three pip uses per die
+        assert_eq!(board.matches("<use ").count() as u32, dice * 4);
+        assert!(
+            board.len() < 400_000,
+            "board SVG grew to {} bytes",
+            board.len()
+        );
+    }
 }

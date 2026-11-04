@@ -1,9 +1,12 @@
 # build artifacts
 /target/
+*.pdb
 
-# per-user saved data
+# per-user saved data; lands in the working directory when the platform
+# data directory is unknown (or with older versions)
 bookmarks.txt
 settings.txt
+/replays/
 
 # exported replays
 replay-*.gif
@@ -13,3 +16,13 @@ dist/
 
 # local agent state and worktrees
 /.claude/
+
+# Python caches from scripts/
+__pycache__/
+
+# editor and OS clutter
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

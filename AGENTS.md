@@ -41,8 +41,14 @@ Never run `./target/release/dicegame` or `cargo run` without `DW_HEADLESS=1`.
 
 ## Code notes
 
-- `src/main.rs` holds the game, UI and networking; `src/engine/` is the
-  renderer, windowing and audio.
+- `src/engine/` is the renderer, windowing and audio (the `dicegame` library).
+  The game is the binary: `src/main.rs` (entry point and frame loop) plus one
+  module per concern: `game.rs` (rules), `board.rs` (hex grid, map
+  generation), `ai.rs`, `theme.rs` (colors), `ui.rs` (text, widgets,
+  toolbar), `dice.rs`, `draw_game.rs`, `play.rs`, `menu.rs`, `lobby.rs`,
+  `net.rs`, `lan.rs`, `replay.rs`, `gif.rs`, `settings.rs`, `sound.rs`,
+  `clipboard.rs`, `svg.rs`. Unit tests sit next to the code they test; shared
+  test helpers and the `GLOBALS` lock are in `testutil.rs`.
 - The global RNG is for dice and map generation only. Seeds, bookmarks and
   replays depend on its exact sequence; never draw from it for effects or sound.
 - Map art keeps identical pastel colors in light and dark mode (the screenshot

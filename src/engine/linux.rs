@@ -363,7 +363,7 @@ impl Window {
                             }
                         }
                     }
-                    4 | 5 | 6 => {
+                    4..=6 => {
                         let e = &*event.as_ptr().cast::<KeyEvent>();
                         input.mouse = (e.x as f32, e.y as f32);
                         if kind == 4 {
@@ -521,7 +521,7 @@ fn key_code(sym: c_ulong) -> Option<KeyCode> {
         _ => return None,
     })
 }
-// Linux clipboard helpers in main.rs run off the render thread.
+// Linux clipboard helpers in src/clipboard.rs run off the render thread.
 pub(super) fn clipboard_set(_: &str) {}
 pub(super) fn clipboard_get() -> Option<String> {
     None
