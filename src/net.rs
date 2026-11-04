@@ -18,7 +18,7 @@ use crate::theme::{color_map, resolve_colors};
 
 const NET_PORT_DEFAULT: u16 = 7777;
 
-pub(crate) const NET_PROTO: &str = "7"; // bumped whenever map generation or messages change
+pub(crate) const NET_PROTO: &str = "8"; // bumped whenever map generation or messages change
 
 pub(crate) const NET_ROOM_CODE_LEN: usize = 6;
 
@@ -90,6 +90,14 @@ pub(crate) fn parse_reinforcement_lands(s: &str) -> Option<Vec<usize>> {
         return None;
     }
     parts.into_iter().map(|x| x.parse().ok()).collect()
+}
+
+// The host's game speed (START, RESUME and SPEED lines). Everyone in a
+// network game animates at this pace so no guest falls behind the host.
+pub(crate) fn parse_speed(s: Option<&str>) -> f32 {
+    s.and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .map_or(1.0, |v| v.clamp(1.0, 4.0))
 }
 
 // what every human picked in the lobby, keyed by 1-based lobby seat
@@ -240,11 +248,32 @@ pub(crate) struct HostNet {
     pub(crate) code: String,
     pub(crate) remap: HashMap<usize, usize>, // lobby seat -> game seat, set at start
     pub(crate) sent: usize,                  // events broadcast so far
+    pub(crate) speed: f32,                   // game speed last sent to the guests
 }
 
 impl Drop for HostNet {
     fn drop(&mut self) {
-        *host_slot().lock().unwrap() = None; // lobby gone; listener stays
+        // Lobby gone; the listener stays. A newer lobby may already own the
+        // slot (hosting again before this one was dropped): leave that alone.
+        {
+            let slot = host_slot();
+            let mut slot = slot.lock().unwrap();
+            if slot
+                .as_ref()
+                .is_some_and(|s| std::sync::Arc::ptr_eq(&s.shared, &self.shared))
+            {
+                *slot = None;
+            }
+        }
+        // Tell every guest the host is gone, so nobody waits to reconnect.
+        let mut sh = self.shared.lock().unwrap();
+        sh.tokens.clear();
+        for seat in sh.seats.iter_mut() {
+            if let Some(mut s) = seat.take() {
+                let _ = write_net_line(&mut s, "BYE The host left the game");
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+        }
     }
 }
 
@@ -336,6 +365,7 @@ impl HostNet {
             code,
             remap: HashMap::new(),
             sent: 0,
+            speed: 1.0,
         })
     }
 
@@ -363,6 +393,8 @@ impl HostNet {
         let n = guests.max(min).max(1);
         sh.seats.resize_with(n, || None);
         sh.gens.resize(n, 0);
+        // a removed seat's reconnect token must not outlive the seat
+        sh.tokens.retain(|_, seat| *seat <= n);
         n
     }
 
@@ -400,6 +432,7 @@ impl HostNet {
         picks: &LobbyPicks,
         host_color: usize,
         host_name: &str,
+        speed: f32,
     ) -> (usize, Vec<usize>, Vec<usize>, Vec<String>) {
         let mut sh = self.shared.lock().unwrap();
         sh.started = true;
@@ -409,6 +442,10 @@ impl HostNet {
             .enumerate()
             .filter_map(|(i, s)| s.as_ref().map(|_| i + 1))
             .collect();
+        // Guests left out of this round (say, still in the reconnect window
+        // during a rematch) must not reclaim a seat in it with an old token.
+        sh.tokens.retain(|_, seat| occupied.contains(seat));
+        self.speed = speed;
         let humans = occupied.len() + 1;
         let (team_v, color_v) = lobby_layout(&occupied, players, teams, picks, host_color);
         let mut names: Vec<String> = vec![if host_name.is_empty() {
@@ -423,7 +460,7 @@ impl HostNet {
             });
         }
         let line_tail = format!(
-            "{} {} {} {} {} {} {} {}",
+            "{} {} {} {} {} {} {} {} {}",
             csv_usize(&color_v),
             teams.on as u8,
             teams.bridge as u8,
@@ -431,7 +468,8 @@ impl HostNet {
             teams.count.clamp(2, MAX_TEAMS),
             teams.hvb as u8,
             csv_usize(&team_v),
-            names.join(",")
+            names.join(","),
+            speed
         );
         self.remap.clear();
         for (k, &seat) in occupied.iter().enumerate() {
@@ -462,6 +500,15 @@ impl HostNet {
     pub(crate) fn send_resume(&mut self, lobby_seat: usize, g: &Game, seed: u64, diff: Difficulty) {
         let mut sh = self.shared.lock().unwrap();
         let Some(&game_seat) = self.remap.get(&lobby_seat) else {
+            // not part of this round (it started without them): let them go
+            if let Some(mut s) = sh
+                .seats
+                .get_mut(lobby_seat.wrapping_sub(1))
+                .and_then(Option::take)
+            {
+                let _ = write_net_line(&mut s, "BYE The host started a new round without you");
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
             return;
         };
         let colors: Vec<usize> = (0..g.players).map(color_map).collect();
@@ -472,9 +519,9 @@ impl HostNet {
             })
             .collect();
         let absent: Vec<usize> = g.absent.iter().map(|&a| a as usize).collect();
-        if let Some(s) = sh.seats[lobby_seat - 1].as_mut() {
+        if let Some(s) = sh.seats.get_mut(lobby_seat - 1).and_then(Option::as_mut) {
             let header = format!(
-                "RESUME {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+                "RESUME {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
                 seed,
                 g.players,
                 g.humans,
@@ -488,7 +535,8 @@ impl HostNet {
                 g.teams.hvb as u8,
                 csv_usize(&g.team),
                 names.join(","),
-                csv_usize(&absent)
+                csv_usize(&absent),
+                self.speed
             );
             if write_net_line(s, &header).is_err() {
                 let _ = s.shutdown(std::net::Shutdown::Both);
@@ -625,9 +673,13 @@ fn host_handle_client(
                         if let Some(tok) = it.next() {
                             if let Ok(next_token) = new_reconnect_token() {
                                 let mut sh = shared.lock().unwrap();
-                                if let (Some(&slot_seat), Ok(clone)) =
-                                    (sh.tokens.get(tok), w.try_clone())
-                                {
+                                let seats = sh.seats.len();
+                                let known = sh
+                                    .tokens
+                                    .get(tok)
+                                    .copied()
+                                    .filter(|&s| (1..=seats).contains(&s));
+                                if let (Some(slot_seat), Ok(clone)) = (known, w.try_clone()) {
                                     sh.seats[slot_seat - 1] = Some(clone);
                                     sh.gens[slot_seat - 1] += 1;
                                     sh.tokens.retain(|_, token_seat| *token_seat != slot_seat);
@@ -791,7 +843,15 @@ pub(crate) struct GuestNet {
     pub(crate) token: String,
     pub(crate) catching_up: bool, // replaying the backlog after a reconnect
     pub(crate) rec_failed: bool,  // auto-reconnect gave up; the player may retry
-    pub(crate) rec_rx: Option<std::sync::mpsc::Receiver<Result<NetParts, String>>>,
+    pub(crate) rec_rx: Option<std::sync::mpsc::Receiver<Result<NetParts, ReconnectError>>>,
+    // Events seen before the host's RESUME are dropped: RESUME resends them.
+    pub(crate) awaiting_resume: bool,
+    pub(crate) speed: f32, // the host's game speed; guests never use their own
+}
+
+pub(crate) enum ReconnectError {
+    Unreachable,      // no answer within the reconnect window; may retry
+    Rejected(String), // the host refused the seat (left, or moved on)
 }
 
 pub(crate) fn reject_invalid_host_data(g: &mut Game, gn: &mut GuestNet) {
@@ -803,28 +863,58 @@ pub(crate) fn reject_invalid_host_data(g: &mut Game, gn: &mut GuestNet) {
     g.banner_t = 0.0;
 }
 
-// spawn a reader thread over a connected socket, yielding its line channel
-fn spawn_reader(stream: &std::net::TcpStream) -> Result<std::sync::mpsc::Receiver<String>, String> {
-    let mut reader =
-        std::io::BufReader::new(stream.try_clone().map_err(|_| "Socket error".to_string())?);
+// Spawn a reader thread over a connected socket, yielding its line channel.
+// It keeps the reader that read the handshake: its buffer may already hold
+// the lines that followed. `first` is delivered before anything else.
+fn spawn_reader(
+    mut reader: std::io::BufReader<std::net::TcpStream>,
+    first: Option<String>,
+) -> std::sync::mpsc::Receiver<String> {
+    let _ = reader.get_ref().set_read_timeout(None);
     // Bound host-to-guest buffering so an untrusted host cannot grow the
     // client's memory without limit. Blocking this background reader applies
     // ordinary TCP backpressure and never stalls the render thread.
     let (tx, rx) = std::sync::mpsc::sync_channel(NET_EVENT_QUEUE);
-    std::thread::spawn(move || loop {
-        match read_net_line(&mut reader, NET_MAX_HOST_LINE) {
-            Some(l) => {
-                if tx.send(l).is_err() {
+    std::thread::spawn(move || {
+        if let Some(l) = first {
+            if tx.send(l).is_err() {
+                return;
+            }
+        }
+        loop {
+            match read_net_line(&mut reader, NET_MAX_HOST_LINE) {
+                Some(l) => {
+                    if tx.send(l).is_err() {
+                        break;
+                    }
+                }
+                None => {
+                    let _ = tx.send("LOST".to_string());
                     break;
                 }
             }
-            None => {
-                let _ = tx.send("LOST".to_string());
-                break;
-            }
         }
     });
-    Ok(rx)
+    rx
+}
+
+// Wait for the host's answer to REJOIN. Ok carries the RECONNECTED line;
+// Err(Some) a refusal (BYE), Err(None) silence or a dropped connection.
+// Broadcasts that race the answer are skipped: RESUME resends them.
+fn await_reconnected(
+    reader: &mut std::io::BufReader<std::net::TcpStream>,
+    timeout: std::time::Duration,
+) -> Result<String, Option<String>> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let line = read_net_line_inner(reader, NET_MAX_HOST_LINE, Some(deadline)).ok_or(None)?;
+        let mut it = line.split_whitespace();
+        match it.next() {
+            Some("RECONNECTED") => return Ok(line),
+            Some("BYE") => return Err(Some(it.collect::<Vec<_>>().join(" "))),
+            _ => {}
+        }
+    }
 }
 
 // background auto-reconnect: keep trying to reclaim our seat with the token
@@ -832,7 +922,7 @@ pub(crate) fn spawn_reconnect(
     addr: String,
     code: String,
     token: String,
-) -> std::sync::mpsc::Receiver<Result<NetParts, String>> {
+) -> std::sync::mpsc::Receiver<Result<NetParts, ReconnectError>> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let full = if addr.contains(':') {
@@ -856,13 +946,22 @@ pub(crate) fn spawn_reconnect(
                 if write_net_line(&mut w, &format!("REJOIN {} {}", code, token)).is_err() {
                     continue;
                 }
-                if let Ok(lines) = spawn_reader(&stream) {
-                    let _ = tx.send(Ok((w, lines)));
-                    return;
+                // only the host's RECONNECTED means we have our seat back
+                let mut reader = std::io::BufReader::new(stream);
+                match await_reconnected(&mut reader, std::time::Duration::from_secs(5)) {
+                    Ok(line) => {
+                        let _ = tx.send(Ok((w, spawn_reader(reader, Some(line)))));
+                        return;
+                    }
+                    Err(Some(why)) => {
+                        let _ = tx.send(Err(ReconnectError::Rejected(why)));
+                        return;
+                    }
+                    Err(None) => {}
                 }
             }
         }
-        let _ = tx.send(Err("Could not reconnect".to_string()));
+        let _ = tx.send(Err(ReconnectError::Unreachable));
     });
     rx
 }
@@ -878,7 +977,10 @@ pub(crate) fn guest_connect(addr: &str, code: &str, name: &str) -> Result<GuestN
     let sock: std::net::SocketAddr = full.parse().map_err(|_| "Bad address".to_string())?;
     let stream = std::net::TcpStream::connect_timeout(&sock, std::time::Duration::from_secs(5))
         .map_err(|_| {
-            "Could not connect — wrong address, or firewall blocking port 7777".to_string()
+            format!(
+                "Could not connect — wrong address, or firewall blocking port {}",
+                sock.port()
+            )
         })?;
     let _ = stream.set_write_timeout(Some(NET_WRITE_TIMEOUT));
     let mut w = stream.try_clone().map_err(|_| "Socket error".to_string())?;
@@ -895,7 +997,10 @@ pub(crate) fn guest_connect(addr: &str, code: &str, name: &str) -> Result<GuestN
         std::time::Duration::from_secs(8),
     )
     .ok_or_else(|| {
-        "Host unreachable — check the code, and the host's firewall (port 7777)".to_string()
+        format!(
+            "Host unreachable — check the code, and the host's firewall (port {})",
+            sock.port()
+        )
     })?;
     let mut it = hello.split_whitespace();
     match it.next() {
@@ -919,9 +1024,7 @@ pub(crate) fn guest_connect(addr: &str, code: &str, name: &str) -> Result<GuestN
         return Err("Bad reply".to_string());
     }
     let token = token.to_string();
-    let _ = stream.set_read_timeout(None);
-    drop(reader);
-    let rx = spawn_reader(&stream)?;
+    let rx = spawn_reader(reader, None);
     Ok(GuestNet {
         stream: w,
         rx,
@@ -933,6 +1036,8 @@ pub(crate) fn guest_connect(addr: &str, code: &str, name: &str) -> Result<GuestN
         catching_up: false,
         rec_failed: false,
         rec_rx: None,
+        awaiting_resume: false,
+        speed: 1.0,
     })
 }
 
@@ -1042,10 +1147,7 @@ mod tests {
     #[test]
     fn host_and_guest_complete_secure_handshake() {
         let _g = GLOBALS.lock().unwrap();
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-        std::env::set_var("DW_PORT", port.to_string());
+        let port = test_port();
 
         let host = HostNet::start(1).unwrap();
         let guest = guest_connect("127.0.0.1", &host.code, "Test_Player").unwrap();
@@ -1106,7 +1208,164 @@ mod tests {
         let _ = rejoined.shutdown(std::net::Shutdown::Both);
         let _ = replay.shutdown(std::net::Shutdown::Both);
         drop(host);
-        std::env::remove_var("DW_PORT");
+    }
+
+    #[test]
+    fn a_replaced_lobby_survives_and_a_leaving_host_says_bye() {
+        let _g = GLOBALS.lock().unwrap();
+        test_port();
+        let old = HostNet::start(1).unwrap();
+        let guest = guest_connect("127.0.0.1", &old.code, "Old").unwrap();
+        assert!(matches!(
+            old.rx.recv_timeout(std::time::Duration::from_secs(2)),
+            Ok(HostMsg::Joined(1, _))
+        ));
+
+        // Hosting again before the old session is dropped (as the menu did
+        // after a replay) must leave the new lobby reachable.
+        let new = HostNet::start(1).unwrap();
+        drop(old);
+        assert!(host_slot()
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|s| std::sync::Arc::ptr_eq(&s.shared, &new.shared)));
+        let joined = guest_connect("127.0.0.1", &new.code, "New").unwrap();
+        assert_eq!(joined.seat, 1);
+
+        // ...and the old host's guest hears that the host left
+        let bye = (0..4)
+            .filter_map(|_| guest.rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+            .find(|l| l.starts_with("BYE"));
+        assert_eq!(bye.as_deref(), Some("BYE The host left the game"));
+        drop(new);
+        assert!(host_slot().lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn rejoin_succeeds_only_on_the_hosts_answer_and_keeps_what_follows() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let token = "0123456789abcdef0123456789abcdef";
+        let fake_host = std::thread::spawn(move || {
+            for reply in [
+                format!("PING\nATK 0 1 7 6 1\nRECONNECTED 1 {token}\nRESUME 7\nSYNCED\n"),
+                "PING\nBYE wrong code\n".to_string(),
+                String::new(), // hangs up without an answer
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                if !reply.is_empty() {
+                    use std::io::Write;
+                    stream.write_all(reply.as_bytes()).unwrap();
+                }
+            }
+        });
+        let connect = || {
+            let s = std::net::TcpStream::connect(addr).unwrap();
+            std::io::BufReader::new(s)
+        };
+        let wait = std::time::Duration::from_secs(2);
+
+        let mut reader = connect();
+        let line = await_reconnected(&mut reader, wait).unwrap();
+        assert_eq!(line, format!("RECONNECTED 1 {token}"));
+        // lines that arrived with the answer are not lost
+        let rx = spawn_reader(reader, Some(line));
+        let got: Vec<String> = (0..3).map(|_| rx.recv_timeout(wait).unwrap()).collect();
+        assert_eq!(got[0], format!("RECONNECTED 1 {token}"));
+        assert_eq!(got[1], "RESUME 7");
+        assert_eq!(got[2], "SYNCED");
+
+        let mut reader = connect();
+        assert_eq!(
+            await_reconnected(&mut reader, wait),
+            Err(Some("wrong code".to_string()))
+        );
+        let mut reader = connect();
+        assert_eq!(await_reconnected(&mut reader, wait), Err(None));
+        fake_host.join().unwrap();
+    }
+
+    #[test]
+    fn stale_tokens_cannot_rejoin_removed_or_skipped_seats() {
+        let _g = GLOBALS.lock().unwrap();
+        let port = test_port();
+        let mut host = HostNet::start(3).unwrap();
+        let tok = |c: char| c.to_string().repeat(32);
+        {
+            let mut sh = host.shared.lock().unwrap();
+            for (c, seat) in [('a', 1), ('b', 2), ('c', 3)] {
+                sh.tokens.insert(tok(c), seat);
+            }
+        }
+        assert_eq!(host.resize_guests(1), 1);
+        let seats: Vec<usize> = host.shared.lock().unwrap().tokens.values().copied().collect();
+        assert_eq!(seats, vec![1]);
+
+        // a token naming a seat that no longer exists is refused, not a panic
+        host.shared.lock().unwrap().tokens.insert(tok('d'), 3);
+        let mut stale = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write_net_line(&mut stale, &format!("REJOIN {} {}", host.code, tok('d'))).unwrap();
+        let mut reply = std::io::BufReader::new(stale.try_clone().unwrap());
+        let line =
+            read_net_line_before(&mut reply, NET_MAX_HOST_LINE, std::time::Duration::from_secs(2));
+        assert!(line.is_some_and(|l| l.starts_with("BYE")));
+        assert!(!host.shared.is_poisoned());
+
+        // A (re)match only keeps the tokens of the guests who are in it.
+        assert_eq!(host.resize_guests(2), 2);
+        host.shared.lock().unwrap().tokens.clear();
+        host.shared
+            .lock()
+            .unwrap()
+            .last_try
+            .remove(&"127.0.0.1".parse().unwrap());
+        let guest = guest_connect("127.0.0.1", &host.code, "In").unwrap();
+        host.shared.lock().unwrap().tokens.insert(tok('e'), 2); // dropped out
+        let (humans, ..) = host.start_game(
+            1,
+            3,
+            Difficulty::Normal,
+            TeamCfg::default(),
+            &LobbyPicks::default(),
+            0,
+            "Host",
+            4.0,
+        );
+        assert_eq!(humans, 2);
+        let tokens = host.shared.lock().unwrap().tokens.clone();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens.get(&guest.token), Some(&1));
+
+        // the START line carries the host's speed for the guests to follow
+        let start = (0..4)
+            .filter_map(|_| guest.rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+            .find(|l| l.starts_with("START"))
+            .unwrap();
+        assert_eq!(parse_speed(start.split_whitespace().nth(14)), 4.0);
+        let _ = stale.shutdown(std::net::Shutdown::Both);
+    }
+
+    #[test]
+    fn speed_from_the_host_is_bounded() {
+        assert_eq!(parse_speed(Some("2")), 2.0);
+        assert_eq!(parse_speed(Some("1000")), 4.0);
+        assert_eq!(parse_speed(Some("NaN")), 1.0);
+        assert_eq!(parse_speed(Some("-3")), 1.0);
+        assert_eq!(parse_speed(None), 1.0);
+    }
+
+    // Every test that hosts uses one port: the listener is bound once per
+    // process and stays on the port it was first given.
+    fn test_port() -> u16 {
+        static PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+        *PORT.get_or_init(|| {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = probe.local_addr().unwrap().port();
+            drop(probe);
+            std::env::set_var("DW_PORT", port.to_string());
+            port
+        })
     }
 
     #[test]

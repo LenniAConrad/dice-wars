@@ -229,6 +229,7 @@ impl App {
         }
         if exit {
             self.replay = None;
+            self.leave_network(); // a replay after a network game ends it
             self.screen = Screen::Menu;
             self.menu.regen();
         }

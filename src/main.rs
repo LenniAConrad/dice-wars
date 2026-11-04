@@ -356,6 +356,15 @@ impl App {
         }
     }
 
+    // End any network session: guests are told the host left, and the local
+    // colors come back. Used whenever play ends up back at the menu.
+    pub(crate) fn leave_network(&mut self) {
+        self.host = None;
+        self.guest = None;
+        self.awaiting.clear();
+        apply_local_colors(self.settings.color);
+    }
+
     // One frame; false once the window is closed or the frame limit is hit.
     fn frame(&mut self) -> bool {
         let dt = get_frame_time().min(0.05);

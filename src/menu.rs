@@ -783,7 +783,10 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
 
     if menu.host_err > 0.0 {
         ui.text_centered(
-            "Could not open port 7777 — is another instance hosting?",
+            &format!(
+                "Could not open port {} — is another instance hosting?",
+                crate::net::net_port()
+            ),
             COL_L,
             800.0,
             15.0,
@@ -1006,7 +1009,11 @@ impl App {
     // One frame of the main menu.
     pub(crate) fn run_menu(&mut self, dt: f32) {
         self.menu_time += dt;
-        match update_menu(&mut self.menu, &mut self.settings, &mut self.snd_queue, dt) {
+        let action = update_menu(&mut self.menu, &mut self.settings, &mut self.snd_queue, dt);
+        if !matches!(action, MenuAction::None) {
+            self.leave_network(); // nothing from an earlier network game carries over
+        }
+        match action {
             MenuAction::Start => {
                 self.game = Some(gen_map_local(
                     self.menu.seed,
