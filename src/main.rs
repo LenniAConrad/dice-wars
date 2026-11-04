@@ -2822,10 +2822,13 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
                 } else {
                     (1.6, soft_edge)
                 };
-                // round caps at the corners keep the border joints clean
                 draw_line(p0.x, p0.y, p1.x, p1.y, width, col);
-                draw_circle(p0.x, p0.y, width * 0.5, col);
-                draw_circle(p1.x, p1.y, width * 0.5, col);
+                // Round caps keep thick joints clean. Hairlines meet without
+                // visible gaps, so they skip the (costly) cap discs.
+                if coast {
+                    draw_circle(p0.x, p0.y, width * 0.5, col);
+                    draw_circle(p1.x, p1.y, width * 0.5, col);
+                }
             }
         }
     }
