@@ -2,6 +2,9 @@ use super::{vec2, Camera2D, Color, Font, Vec2};
 use std::cell::Cell;
 use std::collections::HashMap;
 
+/// (x0, y0, x1, y1) in pixels, end-exclusive.
+type PixelRect = (usize, usize, usize, usize);
+
 pub(super) struct Surface {
     pub width: usize,
     pub height: usize,
@@ -9,6 +12,12 @@ pub(super) struct Surface {
     opaque: bool,
     painted_bounds: Cell<(usize, usize, usize, usize)>,
     glyphs: HashMap<(char, usize, usize), Vec<u8>>,
+    // A clear is recorded, not written: an opaque full-surface blit right
+    // after it (the usual start of a frame) makes the fill unnecessary.
+    pending: Option<([u8; 4], PixelRect)>,
+    // Drawing is limited to this rectangle (x0, y0, x1, y1); partial layer
+    // updates use it to repaint one region of a cached picture.
+    clip: (usize, usize, usize, usize),
 }
 #[derive(Clone, Copy)]
 pub(super) struct Transform {
@@ -79,10 +88,18 @@ impl Surface {
     /// Compare bounded tiles so unchanged board pixels need no filtering.
     /// Keeping one prior raster costs at most the renderer's fixed budget.
     pub fn resolve_changed_into(
-        &self,
+        &mut self,
         output: &mut Self,
         previous: &mut Vec<u8>,
     ) -> Vec<(usize, usize, usize, usize)> {
+        self.settle();
+        if (self.width, self.height) == (output.width, output.height) {
+            // Native-resolution raster: the presented frame is the previous
+            // one, so compare against it and copy only the changed tiles.
+            previous.clear();
+            previous.shrink_to_fit();
+            return self.copy_changed_into(output);
+        }
         if previous.len() != self.pixels.len() {
             self.resolve_into(output);
             previous.clone_from(&self.pixels);
@@ -147,9 +164,62 @@ impl Surface {
         }
         regions
     }
+    fn copy_changed_into(&self, output: &mut Self) -> Vec<(usize, usize, usize, usize)> {
+        const TW: usize = 64;
+        const TH: usize = 32;
+        let columns = self.width.div_ceil(TW);
+        let mut dirty = vec![false; columns * self.height.div_ceil(TH)];
+        let stride = self.width * 4;
+        for (y, (current, shown)) in self
+            .pixels
+            .chunks_exact(stride)
+            .zip(output.pixels.chunks_exact_mut(stride))
+            .enumerate()
+        {
+            if current == shown {
+                continue;
+            }
+            for (x, (current, shown)) in current
+                .chunks(TW * 4)
+                .zip(shown.chunks_mut(TW * 4))
+                .enumerate()
+            {
+                if current != shown {
+                    dirty[y / TH * columns + x] = true;
+                    shown.copy_from_slice(current);
+                }
+            }
+        }
+        let count = dirty.iter().filter(|&&d| d).count();
+        if count > dirty.len() / 2 {
+            return vec![(0, 0, self.width, self.height)];
+        }
+        let mut regions = Vec::new();
+        for ty in 0..self.height.div_ceil(TH) {
+            let mut column = 0;
+            while column < columns {
+                if dirty[ty * columns + column] {
+                    let x = column * TW;
+                    while column < columns && dirty[ty * columns + column] {
+                        column += 1;
+                    }
+                    regions.push((
+                        x,
+                        ty * TH,
+                        (column * TW).min(self.width),
+                        ((ty + 1) * TH).min(self.height),
+                    ));
+                } else {
+                    column += 1;
+                }
+            }
+        }
+        regions
+    }
     /// Resolve subpixels once per changed frame, rather than enlarging jagged
     /// geometry in the native blitter. All on-screen frames are opaque.
-    pub fn resolve_into(&self, output: &mut Self) {
+    pub fn resolve_into(&mut self, output: &mut Self) {
+        self.settle();
         if (self.width, self.height) == (output.width, output.height) {
             output.pixels.copy_from_slice(&self.pixels);
             return;
@@ -242,6 +312,7 @@ impl Surface {
         fill: Color,
         border: Color,
     ) {
+        self.settle();
         let radius = radius
             .max(0.0)
             .min((b.x - a.x) * 0.5)
@@ -264,7 +335,38 @@ impl Surface {
         let fill = fill.bytes();
         let border = border.bytes();
         for y in y0..y1 {
-            for x in x0..x1 {
+            // Pixels whose centers lie half a pixel inside the shape (the
+            // rounded rectangle inset by 0.5, radius shrunk by 0.5) are pure
+            // fill: only the ends of each row need the distance test.
+            let py = y as f32 + 0.5;
+            let (cx, cy) = ((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+            let (hw, hh) = ((b.x - a.x) * 0.5 - 0.5, (b.y - a.y) * 0.5 - 0.5);
+            let ri = (radius - 0.5).max(0.0);
+            let dy = (py - cy).abs();
+            let (mut inner0, mut inner1) = (x1, x1);
+            if hw > 0.0 && dy <= hh {
+                let e = if dy <= hh - ri {
+                    hw
+                } else {
+                    let k = dy - (hh - ri);
+                    (hw - ri) + (ri * ri - k * k).max(0.0).sqrt()
+                } - 0.001;
+                inner0 = ((cx - e - 0.5).ceil() as isize).clamp(x0 as isize, x1 as isize) as usize;
+                inner1 = (((cx + e - 0.5).floor() as isize) + 1).clamp(inner0 as isize, x1 as isize)
+                    as usize;
+                let row =
+                    &mut self.pixels[(y * self.width + inner0) * 4..(y * self.width + inner1) * 4];
+                if fill[3] == 255 {
+                    for px in row.chunks_exact_mut(4) {
+                        px.copy_from_slice(&fill);
+                    }
+                } else if fill[3] > 0 {
+                    for px in row.chunks_exact_mut(4) {
+                        blend(px, fill);
+                    }
+                }
+            }
+            for x in (x0..inner0).chain(inner1..x1) {
                 let p = vec2(x as f32 + 0.5, y as f32 + 0.5);
                 let inner = (0.5 - distance(p, a, b, radius)).clamp(0.0, 1.0);
                 let pixel = &mut self.pixels[(y * self.width + x) * 4..][..4];
@@ -284,12 +386,15 @@ impl Surface {
     }
     pub fn blit(&mut self, source: &Self) {
         assert_eq!((self.width, self.height), (source.width, source.height));
+        debug_assert!(source.pending.is_none(), "blit from an unsettled surface");
         if source.opaque {
+            self.pending = None;
             self.pixels.copy_from_slice(&source.pixels);
             self.opaque = true;
             self.painted_bounds.set((0, 0, self.width, self.height));
             return;
         }
+        self.settle();
         let (x0, y0, x1, y1) = source.painted_bounds.get();
         self.include_bounds(x0, y0, x1, y1);
         for y in y0..y1 {
@@ -304,12 +409,14 @@ impl Surface {
         }
     }
     pub fn blit_at(&mut self, source: &Self, position: Vec2) {
+        self.settle();
         let px = position.x.round() as isize;
         let py = position.y.round() as isize;
-        let x0 = (-px).max(0).min(source.width as isize) as usize;
-        let y0 = (-py).max(0).min(source.height as isize) as usize;
-        let x1 = (self.width as isize - px).clamp(0, source.width as isize) as usize;
-        let y1 = (self.height as isize - py).clamp(0, source.height as isize) as usize;
+        let (cx0, cy0, cx1, cy1) = self.clip;
+        let x0 = (cx0 as isize - px).max(0).min(source.width as isize) as usize;
+        let y0 = (cy0 as isize - py).max(0).min(source.height as isize) as usize;
+        let x1 = (cx1 as isize - px).clamp(0, source.width as isize) as usize;
+        let y1 = (cy1 as isize - py).clamp(0, source.height as isize) as usize;
         if x0 >= x1 || y0 >= y1 {
             return;
         }
@@ -340,26 +447,91 @@ impl Surface {
             opaque: false,
             painted_bounds: Cell::new((width, height, 0, 0)),
             glyphs: HashMap::new(),
+            pending: None,
+            clip: (0, 0, width, height),
         }
     }
+    /// Limits drawing to a rectangle, or lifts the limit with None.
+    pub fn set_clip(&mut self, clip: Option<(usize, usize, usize, usize)>) {
+        self.clip = match clip {
+            Some((x0, y0, x1, y1)) => (
+                x0.min(self.width),
+                y0.min(self.height),
+                x1.min(self.width),
+                y1.min(self.height),
+            ),
+            None => (0, 0, self.width, self.height),
+        };
+    }
+    fn clipped(&self) -> bool {
+        self.clip != (0, 0, self.width, self.height)
+    }
     pub fn clear(&mut self, color: Color) {
+        if self.clipped() {
+            // a clipped clear repaints just the clip rectangle
+            self.settle();
+            let (x0, y0, x1, y1) = self.clip;
+            self.pending = Some((color.bytes(), self.clip));
+            self.include_bounds(x0, y0, x1, y1);
+            return;
+        }
         let c = color.bytes();
+        // Only what was painted since the last clear can differ from a
+        // transparent clear; an opaque clear covers everything.
+        let region = if c[3] == 0 && self.pending.is_none_or(|(p, _)| p[3] == 0) {
+            let (x0, y0, x1, y1) = self.painted_bounds.get();
+            let previous = self.pending.map(|(_, r)| r);
+            match previous {
+                Some((a, b, cc, d)) if a < cc && b < d => {
+                    (x0.min(a), y0.min(b), x1.max(cc), y1.max(d))
+                }
+                _ => (x0, y0, x1, y1),
+            }
+        } else {
+            (0, 0, self.width, self.height)
+        };
+        self.pending = Some((c, region));
         self.opaque = c[3] == 255;
         self.painted_bounds.set(if c[3] == 0 {
             (self.width, self.height, 0, 0)
         } else {
             (0, 0, self.width, self.height)
         });
-        for pixel in self.pixels.chunks_exact_mut(4) {
-            pixel.copy_from_slice(&c);
+    }
+    /// Writes a recorded clear. Every drawing call starts with this.
+    pub fn settle(&mut self) {
+        let Some((c, (x0, y0, x1, y1))) = self.pending.take() else {
+            return;
+        };
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let word = u32::from_ne_bytes(c);
+        for y in y0..y1 {
+            let row = &mut self.pixels[(y * self.width + x0) * 4..(y * self.width + x1) * 4];
+            // SAFETY: u32 has no invalid bit patterns; align_to_mut only
+            // returns the correctly aligned middle part as u32.
+            let (head, words, tail) = unsafe { row.align_to_mut::<u32>() };
+            for px in head.chunks_exact_mut(4).chain(tail.chunks_exact_mut(4)) {
+                px.copy_from_slice(&c);
+            }
+            if head.len() % 4 == 0 {
+                words.fill(word);
+            } else {
+                // misaligned rows: fall back to byte copies
+                for px in row.chunks_exact_mut(4) {
+                    px.copy_from_slice(&c);
+                }
+            }
         }
     }
     fn bounds(&self, a: Vec2, b: Vec2) -> (usize, usize, usize, usize) {
+        let (cx0, cy0, cx1, cy1) = self.clip;
         let bounds = (
-            a.x.floor().clamp(0.0, self.width as f32) as usize,
-            a.y.floor().clamp(0.0, self.height as f32) as usize,
-            b.x.ceil().clamp(0.0, self.width as f32) as usize,
-            b.y.ceil().clamp(0.0, self.height as f32) as usize,
+            a.x.floor().clamp(cx0 as f32, cx1 as f32) as usize,
+            a.y.floor().clamp(cy0 as f32, cy1 as f32) as usize,
+            b.x.ceil().clamp(cx0 as f32, cx1 as f32) as usize,
+            b.y.ceil().clamp(cy0 as f32, cy1 as f32) as usize,
         );
         self.include_bounds(bounds.0, bounds.1, bounds.2, bounds.3);
         bounds
@@ -373,6 +545,7 @@ impl Surface {
             .set((a.min(x0), b.min(y0), c.max(x1), d.max(y1)));
     }
     pub fn rect(&mut self, a: Vec2, b: Vec2, color: Color) {
+        self.settle();
         let (x0, y0, x1, y1) = self.bounds(
             vec2(a.x.min(b.x), a.y.min(b.y)),
             vec2(a.x.max(b.x), a.y.max(b.y)),
@@ -388,6 +561,7 @@ impl Surface {
         }
     }
     pub fn ellipse(&mut self, center: Vec2, rx: f32, ry: f32, color: Color) {
+        self.settle();
         if rx <= 0.0 || ry <= 0.0 {
             return;
         }
@@ -410,7 +584,17 @@ impl Surface {
             }
         }
     }
-    pub fn triangle(&mut self, mut p: [Vec2; 3], mut colors: [Color; 3]) {
+    /// A triangle without anti-aliasing: for tessellations whose shared
+    /// edges must not let the background bleed through.
+    pub fn triangle(&mut self, p: [Vec2; 3], colors: [Color; 3]) {
+        self.triangle_aa(p, colors, [false; 3]);
+    }
+
+    /// A triangle whose edges listed in `aa` (the edge opposite vertex i)
+    /// get analytic coverage anti-aliasing; the others keep the exact
+    /// top-left fill rule, so triangles sharing them tile without seams.
+    pub fn triangle_aa(&mut self, mut p: [Vec2; 3], mut colors: [Color; 3], mut aa: [bool; 3]) {
+        self.settle();
         let cross = |a: Vec2, b: Vec2| a.x * b.y - a.y * b.x;
         let mut area = cross(p[1] - p[0], p[2] - p[0]);
         if !area.is_finite() || area.abs() < 0.0001 {
@@ -419,22 +603,46 @@ impl Surface {
         if area < 0.0 {
             p.swap(1, 2);
             colors.swap(1, 2);
+            aa.swap(1, 2);
             area = -area;
         }
-        let lo = vec2(
-            p.iter().map(|v| v.x).fold(f32::INFINITY, f32::min),
-            p.iter().map(|v| v.y).fold(f32::INFINITY, f32::min),
-        );
-        let hi = vec2(
-            p.iter().map(|v| v.x).fold(f32::NEG_INFINITY, f32::max),
-            p.iter().map(|v| v.y).fold(f32::NEG_INFINITY, f32::max),
-        );
-        let (x0, y0, x1, y1) = self.bounds(lo, hi);
         let edges = [p[2] - p[1], p[0] - p[2], p[1] - p[0]];
         let starts = [p[1], p[2], p[0]];
         let top_left = edges.map(|v| v.y < 0.0 || (v.y == 0.0 && v.x > 0.0));
+        // Per edge: 1/length turns the edge function into a pixel distance.
+        let inv_len: [f32; 3] = std::array::from_fn(|i| {
+            if aa[i] {
+                1.0 / edges[i].length().max(1e-6)
+            } else {
+                0.0
+            }
+        });
+        let any_aa = aa.iter().any(|&a| a);
+        let pad = if any_aa { 1.0 } else { 0.0 };
+        let lo = vec2(
+            p.iter().map(|v| v.x).fold(f32::INFINITY, f32::min) - pad,
+            p.iter().map(|v| v.y).fold(f32::INFINITY, f32::min) - pad,
+        );
+        let hi = vec2(
+            p.iter().map(|v| v.x).fold(f32::NEG_INFINITY, f32::max) + pad,
+            p.iter().map(|v| v.y).fold(f32::NEG_INFINITY, f32::max) + pad,
+        );
+        let (x0, y0, x1, y1) = self.bounds(lo, hi);
         let solid = colors[0] == colors[1] && colors[1] == colors[2];
         let bytes = colors.map(Color::bytes);
+        // Coverage of the pixel whose edge functions are `w`: hard edges
+        // are in or out, anti-aliased edges ramp over one pixel.
+        let coverage = |w: [f32; 3]| -> f32 {
+            let mut c = 1.0f32;
+            for i in 0..3 {
+                if aa[i] {
+                    c *= (w[i] * inv_len[i] + 0.5).clamp(0.0, 1.0);
+                } else if !(w[i] > 0.0 || (w[i] == 0.0 && top_left[i])) {
+                    return 0.0;
+                }
+            }
+            c
+        };
         for y in y0..y1 {
             let point = vec2(x0 as f32 + 0.5, y as f32 + 0.5);
             let mut weights = [
@@ -443,17 +651,21 @@ impl Surface {
                 cross(edges[2], point - starts[2]),
             ];
             // Each edge function is linear along the row, so solve for the
-            // covered span and test only that (plus a one-pixel margin) rather
-            // than the whole bounding box. The exact per-pixel test below keeps
-            // the fill rule unchanged.
+            // covered span (anti-aliased edges moved out by half a pixel) and
+            // test only that, plus a one-pixel margin.
             let (mut xs, mut xe) = (x0 as f32, x1 as f32);
             for i in 0..3 {
                 let ey = edges[i].y;
+                let w = if aa[i] {
+                    weights[i] + 0.5 / inv_len[i]
+                } else {
+                    weights[i]
+                };
                 if ey > 0.0 {
-                    xe = xe.min(x0 as f32 + (weights[i] / ey).floor() + 2.0);
+                    xe = xe.min(x0 as f32 + (w / ey).floor() + 2.0);
                 } else if ey < 0.0 {
-                    xs = xs.max(x0 as f32 + (weights[i] / ey).floor() - 1.0);
-                } else if !(weights[i] > 0.0 || (weights[i] == 0.0 && top_left[i])) {
+                    xs = xs.max(x0 as f32 + (w / ey).floor() - 1.0);
+                } else if !(w > 0.0 || (w == 0.0 && top_left[i])) {
                     xe = xs;
                 }
             }
@@ -472,42 +684,72 @@ impl Surface {
             for i in 0..3 {
                 weights[i] -= edges[i].y * (xs - x0) as f32;
             }
-            if solid && bytes[0][3] == 255 {
-                // Opaque flat fills: a triangle row is one contiguous run, so
-                // find its exact ends with the same test and copy the run.
-                let inside =
-                    |w: [f32; 3]| (0..3).all(|i| w[i] > 0.0 || (w[i] == 0.0 && top_left[i]));
-                let at = |x: usize| -> [f32; 3] {
-                    std::array::from_fn(|i| weights[i] - edges[i].y * (x - xs) as f32)
-                };
+            let at = |x: usize| -> [f32; 3] {
+                std::array::from_fn(|i| weights[i] - edges[i].y * (x - xs) as f32)
+            };
+            let row = y * self.width;
+            if solid {
+                // Flat fills: a triangle row is one contiguous run. Blend the
+                // anti-aliased fringes, then fill the fully covered middle.
                 let mut a = xs;
-                while a < xe && !inside(at(a)) {
+                while a < xe {
+                    let c = coverage(at(a));
+                    if c >= 1.0 {
+                        break;
+                    }
+                    if c > 0.0 {
+                        let mut px = bytes[0];
+                        px[3] = (px[3] as f32 * c + 0.5) as u8;
+                        blend(&mut self.pixels[(row + a) * 4..][..4], px);
+                    }
                     a += 1;
                 }
                 let mut b = xe;
-                while b > a && !inside(at(b - 1)) {
+                while b > a {
+                    let c = coverage(at(b - 1));
+                    if c >= 1.0 {
+                        break;
+                    }
+                    if c > 0.0 {
+                        let mut px = bytes[0];
+                        px[3] = (px[3] as f32 * c + 0.5) as u8;
+                        blend(&mut self.pixels[(row + b - 1) * 4..][..4], px);
+                    }
                     b -= 1;
                 }
-                let row = y * self.width;
-                for px in self.pixels[(row + a) * 4..(row + b) * 4].chunks_exact_mut(4) {
-                    px.copy_from_slice(&bytes[0]);
+                if bytes[0][3] == 255 {
+                    for px in self.pixels[(row + a) * 4..(row + b) * 4].chunks_exact_mut(4) {
+                        px.copy_from_slice(&bytes[0]);
+                    }
+                } else {
+                    for px in self.pixels[(row + a) * 4..(row + b) * 4].chunks_exact_mut(4) {
+                        blend(px, bytes[0]);
+                    }
                 }
                 continue;
             }
             for x in xs..xe {
-                if (0..3).all(|i| weights[i] > 0.0 || (weights[i] == 0.0 && top_left[i])) {
-                    let c = if solid {
-                        bytes[0]
-                    } else {
-                        std::array::from_fn(|ch| {
-                            ((bytes[0][ch] as f32 * weights[0]
-                                + bytes[1][ch] as f32 * weights[1]
-                                + bytes[2][ch] as f32 * weights[2])
-                                / area)
-                                .clamp(0.0, 255.0) as u8
-                        })
-                    };
-                    blend(&mut self.pixels[(y * self.width + x) * 4..][..4], c);
+                let c = if any_aa {
+                    coverage(weights)
+                } else if (0..3).all(|i| weights[i] > 0.0 || (weights[i] == 0.0 && top_left[i])) {
+                    1.0
+                } else {
+                    0.0
+                };
+                if c > 0.0 {
+                    // barycentric weights from the (clamped) edge functions
+                    let wsum = area;
+                    let mut px: [u8; 4] = std::array::from_fn(|ch| {
+                        ((bytes[0][ch] as f32 * weights[0]
+                            + bytes[1][ch] as f32 * weights[1]
+                            + bytes[2][ch] as f32 * weights[2])
+                            / wsum)
+                            .clamp(0.0, 255.0) as u8
+                    });
+                    if c < 1.0 {
+                        px[3] = (px[3] as f32 * c + 0.5) as u8;
+                    }
+                    blend(&mut self.pixels[(row + x) * 4..][..4], px);
                 }
                 for i in 0..3 {
                     weights[i] -= edges[i].y;
@@ -524,6 +766,7 @@ impl Surface {
         color: Color,
         t: Transform,
     ) {
+        self.settle();
         let scale = size / font.size;
         let mut cursor = origin.x;
         let bytes = color.bytes();
@@ -566,12 +809,12 @@ impl Surface {
                 let py = pos.y.round() as isize;
                 for y in 0..h {
                     let yy = py + y as isize;
-                    if yy < 0 || yy >= self.height as isize {
+                    if yy < self.clip.1 as isize || yy >= self.clip.3 as isize {
                         continue;
                     }
                     for x in 0..w {
                         let xx = px + x as isize;
-                        if xx < 0 || xx >= self.width as isize {
+                        if xx < self.clip.0 as isize || xx >= self.clip.2 as isize {
                             continue;
                         }
                         let mut c = bytes;
@@ -636,13 +879,16 @@ mod tests {
     fn sprite_blits_clip_and_transparent_cache_clear_removes_old_bounds() {
         let mut sprite = Surface::new(4, 4);
         sprite.clear(super::super::WHITE);
+        sprite.settle();
         let mut dst = Surface::new(4, 4);
         dst.blit_at(&sprite, vec2(-2.0, 2.0));
         assert_eq!(dst.pixels[(2 * 4) * 4 + 3], 255);
         assert_eq!(dst.pixels[(2 * 4 + 2) * 4 + 3], 0);
         sprite.clear(Color::new(0.0, 0.0, 0.0, 0.0));
+        sprite.settle();
         dst.clear(super::super::BLACK);
         dst.blit(&sprite);
+        dst.settle();
         assert!(dst.pixels.chunks_exact(4).all(|p| p == [0, 0, 0, 255]));
     }
     #[test]
@@ -689,6 +935,39 @@ mod tests {
         s.triangle([vec2(0.0, 0.0), vec2(4.0, 0.0), vec2(4.0, 4.0)], [c; 3]);
         s.triangle([vec2(0.0, 0.0), vec2(4.0, 4.0), vec2(0.0, 4.0)], [c; 3]);
         assert!(s.pixels.chunks_exact(4).all(|p| p[0] == 255 && p[3] == 128));
+    }
+    #[test]
+    fn anti_aliased_edges_blend_while_shared_edges_stay_seamless() {
+        // a diagonal edge gets partial coverage...
+        let mut s = Surface::new(8, 8);
+        s.clear(super::super::BLACK);
+        let white = [super::super::WHITE; 3];
+        s.triangle_aa(
+            [vec2(0.0, 0.0), vec2(8.0, 0.0), vec2(0.0, 8.0)],
+            white,
+            [true; 3],
+        );
+        let on_edge = s.pixels[(3 * 8 + 4) * 4]; // pixel (4, 3) straddles x + y = 8
+        assert!(on_edge > 40 && on_edge < 215, "edge pixel {on_edge}");
+        assert_eq!(s.pixels[(8 + 1) * 4], 255);
+        assert_eq!(s.pixels[(7 * 8 + 7) * 4], 0);
+        // ...while two halves of a square split along a hard diagonal leave
+        // no trace of the black background between them
+        let mut s = Surface::new(8, 8);
+        s.clear(super::super::BLACK);
+        s.triangle_aa(
+            [vec2(1.0, 1.0), vec2(7.0, 1.0), vec2(7.0, 7.0)],
+            white,
+            [true, false, true], // the diagonal (opposite vertex 1) stays hard
+        );
+        s.triangle_aa(
+            [vec2(1.0, 1.0), vec2(7.0, 7.0), vec2(1.0, 7.0)],
+            white,
+            [true, true, false],
+        );
+        for (x, y) in [(2, 2), (3, 3), (5, 5), (2, 5), (5, 2)] {
+            assert_eq!(s.pixels[(y * 8 + x) * 4], 255, "seam at {x},{y}");
+        }
     }
     #[test]
     fn primitives_clip_at_surface_bounds() {

@@ -6,6 +6,7 @@ Consistent interface and multiplayer reliability release.
 - **One visual language**: every choice is a segmented control filled with your color, one filled primary button per screen, small-caps labels, and the accent color only for hover and focus. The settings panel uses the same controls.
 - **Start screen**: the decorative burst is gone; saved maps get their own card, and the help card turns into your win record (per difficulty) after your first finished game.
 - **In game**: a MENU button at the top left opens a pause dialog (LEAVE / NEW MAP / KEEP PLAYING), so NEW MAP no longer sits next to END TURN. Battle results say who took what ("Mint takes your land"), END TURN is the filled action on your turn, and the game-over screen no longer shows stale messages or duplicate buttons.
+- **Sharper and smoother**: the game always renders at the window's full resolution with anti-aliased edges (large and 4K windows used to be drawn smaller and scaled up), capture fades run at the full frame rate, and only the lands that change are repainted. Big windows now keep 60 fps.
 - **Replays**: pause, step, restart and 1x/2x/4x speed controls.
 - **Color assist**: a softer palette that also stays distinct for deuteranopia.
 - **Multiplayer fixes**: the host's game speed applies to everyone, leaving a game closes its connections (a later lobby works again), guests stop reconnecting to a host that left, rematches never strand a reconnecting player, and a guest that falls behind resyncs instead of being dropped.

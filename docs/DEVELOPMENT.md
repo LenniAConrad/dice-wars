@@ -89,6 +89,8 @@ All hooks are environment variables read at startup.
 | `DW_EXPORT_SVG=dir` | on exit, write `board.svg` and `logo.svg` |
 | `DW_PROFILE=1` | print frame-time statistics on exit |
 | `DW_PORT=n` | game port (LAN discovery uses n + 1) |
+| `DW_DICE_SEED=n` | pin the dice and bot choices (headless runs only) |
+| `DW_FULL_LAYERS=1` | repaint cached layers in full instead of by region |
 | `DW_TEST_HOST`, `DW_TEST_JOIN="addr code"` | open a host lobby or join one at startup (network tests) |
 
 See `scripts/audit-ui.py` for examples, and look at the PNGs you produce:
@@ -103,12 +105,21 @@ DW_HEADLESS=1 DW_FORBID_WINDOW=1 XDG_DATA_HOME="$(mktemp -d)" \
 - Input is polled at up to 60 Hz; animated frames are capped at 60 fps and
   unfocused windows drop to 15 Hz. Quiet menus and idle turns reuse the last
   frame.
-- Rendering is supersampled 2× per axis within a four-million-pixel budget,
-  then filtered to the window size. Only changed tiles are filtered; on Linux
-  only those tiles are uploaded to the X server, while Windows and macOS
-  present the whole frame.
-- The map, status panel, menu art, dice and shadows are cached; moving pieces
-  are drawn on top.
+- The raster is never below the window's resolution. Edges are anti-aliased
+  analytically: triangles get per-edge coverage (shapes built from several
+  triangles keep their inner edges hard, so they tile without seams), and
+  circles, rounded rectangles and glyphs use coverage masks. Windows up to
+  about a megapixel additionally render at 2× per axis and are averaged down.
+- Only changed 64×32 tiles are copied to the presented frame; on Linux only
+  those tiles are uploaded to the X server, and the server round trip
+  overlaps the next frame's rendering. Windows and macOS present the whole
+  frame.
+- The map, status panel, menu art, dice and shadows are cached. The map is
+  one cached layer made of per-land parts: a capture fade, a lifted stack,
+  hover or selection repaints only the affected lands' regions (clipped),
+  which `scripts/audit-ui.py` checks is pixel-identical to a full repaint.
+- At 3840×2160 a bot turn averages about 6 ms per frame and the menu about
+  7 ms (headless, one thread, before the upload to the display).
 - Triangles rasterize only their covered span per row and copy opaque runs
   directly. This cut a full board redraw from about 17 ms to about 6 ms and
   removed most frames over 16.7 ms while bots play.

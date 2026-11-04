@@ -31,9 +31,9 @@ pub(crate) fn fill_hex(p: Vec2, s: f32, col: Color) {
         let a = (60.0 * k as f32 + 30.0).to_radians();
         *pt = p + s * vec2(a.cos(), a.sin());
     }
-    for k in 1..5 {
-        draw_triangle(pts[0], pts[k], pts[k + 1], col);
-    }
+    // tiles meet same-colored neighbors: hard edges, so no seams between
+    // cells; coasts and borders get smooth outlines drawn on top
+    draw_convex(&pts, col, false);
 }
 
 fn board_hover(game: &Game) -> Option<usize> {
@@ -47,42 +47,106 @@ fn board_hover(game: &Game) -> Option<usize> {
 
 pub(crate) fn draw_board(game: &Game, ui: &Ui, chances: bool) {
     use std::hash::{Hash, Hasher};
+    // What changes the whole picture...
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     (
         game.seed,
-        game.current,
-        game.selected,
-        game.keyboard_hover,
-        game.my_seat,
-        game.over.is_some(),
-        chances,
         theme_index(),
         colorblind_mode(),
         REDUCED_MOTION.load(Ordering::Relaxed),
     )
         .hash(&mut hash);
-    board_hover(game).hash(&mut hash);
     for p in 0..MAX_PLAYERS {
         color_map(p).hash(&mut hash);
     }
-    for t in &game.terrs {
-        (t.owner, t.dice).hash(&mut hash);
-    }
-    for t in 0..game.terrs.len() {
-        stack_is_moving(game, t).hash(&mut hash);
-        capture_fade(game, t)
-            .map(|f| (f * 24.0) as u8)
-            .hash(&mut hash);
-    }
-    game.battle.as_ref().map(|b| (b.a, b.d)).hash(&mut hash);
-    engine::cached_layer(0, hash.finish(), || draw_board_live(game, ui, chances));
+    // ...and what changes one land: only its region is repainted, so
+    // captures, fades, hover and selection stay cheap at any window size.
+    let hover = board_hover(game);
+    let parts: Vec<(u64, Rect)> = (0..game.terrs.len())
+        .map(|t| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            let terr = &game.terrs[t];
+            (terr.owner, terr.dice).hash(&mut h);
+            land_fill(game, t, hover).bytes().hash(&mut h);
+            stack_is_moving(game, t).hash(&mut h);
+            (game.keyboard_hover == Some(t)).hash(&mut h);
+            game.battle
+                .as_ref()
+                .is_some_and(|b| b.a == t || b.d == t)
+                .hash(&mut h);
+            chance_hint(game, t, chances).map(f32::to_bits).hash(&mut h);
+            (h.finish(), land_region(game, t))
+        })
+        .collect();
+    engine::cached_layer_parts(0, hash.finish(), &parts, || {
+        draw_board_live(game, ui, chances)
+    });
     draw_board_effects(game, ui);
+}
+
+// A land's fill: owner color (cross-fading after a capture), lifted when
+// selected or hovered as an option, white when it is not a legal target.
+fn land_fill(game: &Game, t: usize, hover: Option<usize>) -> Color {
+    let terr = &game.terrs[t];
+    let mut col = map_fill(terr.owner);
+    if let Some(f) = capture_fade(game, t) {
+        // Captured land sweeps from the loser's color into the winner's.
+        col = mix(map_fill(game.fx[t].from), col, ease_out(1.0 - f));
+    }
+    let selectable = terr.owner == game.current && terr.dice > 1;
+    let attackable = game.selected.is_some_and(|s| {
+        game.can_target(game.current, terr.owner) && game.terrs[s].neighbors.contains(&t)
+    });
+    if game.selected == Some(t) {
+        lighten(col, 0.38)
+    } else if game.selected.is_some() && !attackable {
+        // Selection is a map treatment, independent of the interface
+        // theme. Dice and owner badges still identify these territories.
+        WHITE
+    } else if hover == Some(t) && (attackable || selectable) {
+        lighten(col, 0.2)
+    } else {
+        col
+    }
+}
+
+// The win chance shown on attack option `t` of the selected land, if any.
+fn chance_hint(game: &Game, t: usize, chances: bool) -> Option<f32> {
+    let sel = game.selected?;
+    (chances
+        && game.battle.is_none()
+        && game.over.is_none()
+        && game.current == game.my_seat
+        && game.terrs[sel].neighbors.contains(&t)
+        && game.can_target(game.current, game.terrs[t].owner))
+    .then(|| win_chance_cached(game.terrs[sel].dice, game.terrs[t].dice))
+}
+
+// Everything one land can paint on the board layer: its hexes and borders,
+// its dice stack (up to eight dice and a bounce) and its count badge.
+fn land_region(game: &Game, t: usize) -> Rect {
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for i in 0..COLS * ROWS {
+        if game.cell_terr[i] == t as i32 {
+            let p = cell_pos(i);
+            x0 = x0.min(p.x);
+            y0 = y0.min(p.y);
+            x1 = x1.max(p.x);
+            y1 = y1.max(p.y);
+        }
+    }
+    let a = game.terrs[t].anchor;
+    let pad = HEX + 4.0;
+    x0 = (x0 - pad).min(a.x - 34.0);
+    x1 = (x1 + pad).max(a.x + 34.0);
+    y0 = (y0 - pad).min(a.y - 100.0);
+    y1 = (y1 + pad).max(a.y + 50.0); // badge and win-chance hint
+    Rect::new(x0, y0, x1 - x0, y1 - y0)
 }
 
 fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
     // The whole window is the play surface, so letterbox bars never show a seam.
     clear_background(SRF());
-    draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
 
     let hover = board_hover(game);
 
@@ -103,26 +167,7 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
         if t < 0 {
             continue;
         }
-        let t = t as usize;
-        let terr = &game.terrs[t];
-        let mut col = map_fill(terr.owner);
-        if let Some(f) = capture_fade(game, t) {
-            // Captured land sweeps from the loser's color into the winner's.
-            col = mix(map_fill(game.fx[t].from), col, ease_out(1.0 - f));
-        }
-        let selectable = terr.owner == game.current && terr.dice > 1;
-        let attackable = game.selected.is_some_and(|s| {
-            game.can_target(game.current, terr.owner) && game.terrs[s].neighbors.contains(&t)
-        });
-        if game.selected == Some(t) {
-            col = lighten(col, 0.38);
-        } else if game.selected.is_some() && !attackable {
-            // Selection is a map treatment, independent of the interface
-            // theme. Dice and owner badges still identify these territories.
-            col = WHITE;
-        } else if hover == Some(t) && (attackable || selectable) {
-            col = lighten(col, 0.2);
-        }
+        let col = land_fill(game, t as usize, hover);
         fill_hex(cell_pos(i), HEX + 0.6, col);
     }
 
@@ -216,34 +261,29 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
     }
 
     // subtle win-chance hint on every attack option of the selected land
-    if chances && game.battle.is_none() && game.over.is_none() && game.current == game.my_seat {
-        if let Some(sel) = game.selected {
-            for &d in &game.terrs[sel].neighbors {
-                if !game.can_target(game.current, game.terrs[d].owner) {
-                    continue;
-                }
-                let c = win_chance_cached(game.terrs[sel].dice, game.terrs[d].dice);
-                let txt = format!("{:.0}%", c * 100.0);
-                let p = game.terrs[d].anchor + vec2(0.0, 32.0);
-                let tw = ui.width(&txt, 12.0);
-                let col = if c >= 0.6 {
-                    accent_ink(4) // blue: good odds (colorblind-safe pair)
-                } else if c >= 0.4 {
-                    INK()
-                } else {
-                    accent_ink(5) // orange: risky
-                };
-                draw_round_rect(
-                    p.x - tw * 0.5 - 6.0,
-                    p.y - 12.0,
-                    tw + 12.0,
-                    16.0,
-                    8.0,
-                    SRF(),
-                );
-                ui.text_centered(&txt, p.x, p.y + 0.5, 12.0, col);
-            }
-        }
+    for t in 0..game.terrs.len() {
+        let Some(c) = chance_hint(game, t, chances) else {
+            continue;
+        };
+        let txt = format!("{:.0}%", c * 100.0);
+        let p = game.terrs[t].anchor + vec2(0.0, 32.0);
+        let tw = ui.width(&txt, 12.0);
+        let col = if c >= 0.6 {
+            accent_ink(4) // blue: good odds (colorblind-safe pair)
+        } else if c >= 0.4 {
+            INK()
+        } else {
+            accent_ink(5) // orange: risky
+        };
+        draw_round_rect(
+            p.x - tw * 0.5 - 6.0,
+            p.y - 12.0,
+            tw + 12.0,
+            16.0,
+            8.0,
+            SRF(),
+        );
+        ui.text_centered(&txt, p.x, p.y + 0.5, 12.0, col);
     }
 }
 

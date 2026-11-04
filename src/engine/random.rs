@@ -22,6 +22,16 @@ pub fn srand(seed: u64) {
 /// Reseed from OS entropy. Called once a seeded map is dealt, so dice rolls
 /// and bot choices cannot be predicted from the public map seed.
 pub fn srand_from_entropy() {
+    // Headless test runs can pin the dice to compare frames across runs.
+    if std::env::var_os("DW_HEADLESS").is_some() {
+        if let Some(seed) = std::env::var("DW_DICE_SEED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            srand(seed);
+            return;
+        }
+    }
     let mut bytes = [0u8; 8];
     let seed = match fill_secure(&mut bytes) {
         Ok(()) => u64::from_le_bytes(bytes),

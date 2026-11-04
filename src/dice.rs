@@ -33,8 +33,7 @@ pub(crate) const PIPS: [&[(f32, f32)]; 6] = [
 ];
 
 fn quad(a: Vec2, b: Vec2, c: Vec2, d: Vec2, col: Color) {
-    draw_triangle(a, b, c, col);
-    draw_triangle(a, c, d, col);
+    draw_convex(&[a, b, c, d], col, true);
 }
 
 // a quad with per-corner colors: real gradients for the die faces
@@ -57,17 +56,12 @@ fn grad_quad(p: [Vec2; 4], c: [Color; 4]) {
 
 // a circle lying on a die face, projected: an ellipse spanned by the face basis
 fn draw_pip(c: Vec2, bu: Vec2, bv: Vec2, rho: f32, col: Color) {
-    const N: usize = 10;
-    for i in 0..N {
-        let t0 = i as f32 / N as f32 * std::f32::consts::TAU;
-        let t1 = (i + 1) as f32 / N as f32 * std::f32::consts::TAU;
-        draw_triangle(
-            c,
-            c + bu * (rho * t0.cos()) + bv * (rho * t0.sin()),
-            c + bu * (rho * t1.cos()) + bv * (rho * t1.sin()),
-            col,
-        );
-    }
+    const N: usize = 12;
+    let rim: [Vec2; N] = std::array::from_fn(|i| {
+        let t = i as f32 / N as f32 * std::f32::consts::TAU;
+        c + bu * (rho * t.cos()) + bv * (rho * t.sin())
+    });
+    draw_fan(c, &rim, col);
 }
 
 pub(crate) fn face_val(seed: u32, idx: u32, salt: u32) -> usize {
@@ -223,17 +217,12 @@ pub(crate) fn draw_die_live(x: f32, y: f32, w: f32, seed: u32, idx: u32, pal: &P
 }
 
 pub(crate) fn draw_ellipse_fan(x: f32, y: f32, rx: f32, ry: f32, col: Color) {
-    const N: usize = 24;
-    for i in 0..N {
-        let a0 = i as f32 / N as f32 * std::f32::consts::TAU;
-        let a1 = (i + 1) as f32 / N as f32 * std::f32::consts::TAU;
-        draw_triangle(
-            vec2(x, y),
-            vec2(x + rx * a0.cos(), y + ry * a0.sin()),
-            vec2(x + rx * a1.cos(), y + ry * a1.sin()),
-            col,
-        );
-    }
+    const N: usize = 32;
+    let rim: [Vec2; N] = std::array::from_fn(|i| {
+        let a = i as f32 / N as f32 * std::f32::consts::TAU;
+        vec2(x + rx * a.cos(), y + ry * a.sin())
+    });
+    draw_fan(vec2(x, y), &rim, col);
 }
 
 pub(crate) const DIE_W: f32 = 21.0;
@@ -343,7 +332,5 @@ pub(crate) fn draw_star(cx: f32, cy: f32, r: f32, col: Color) {
         let radius = if i % 2 == 0 { r } else { r * 0.47 };
         vec2(cx + radius * angle.cos(), cy + radius * angle.sin())
     });
-    for i in 0..10 {
-        draw_triangle(vec2(cx, cy), points[i], points[(i + 1) % 10], col);
-    }
+    draw_fan(vec2(cx, cy), &points, col);
 }

@@ -59,6 +59,16 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
             assert menu.crop(region).tobytes() != lobby.crop(region).tobytes(), "HOST GAME did not open the lobby"
     render("host-lobby-teams", DW_THEME="dark", DW_TEAMS="1", DW_PLAYERS="9", DW_PORT="17793",
            DW_FRAME_LIMIT="40", DW_INPUT="2:click:436:716")
+    # Repainting only the lands that changed must give exactly the picture a
+    # full repaint gives (dice pinned so both runs play the same game).
+    for frames in ("61", "157", "263", "389"):
+        for mode in ("partial", "full"):
+            extra = {"DW_FULL_LAYERS": "1"} if mode == "full" else {}
+            render(f"layers-{mode}-{frames}", DW_AUTOSTART="1", DW_TEST_AUTOEND="1",
+                   DW_DICE_SEED="7", DW_FRAME_LIMIT=frames, **extra)
+        with Image.open(out / f"layers-partial-{frames}.png") as partial, \
+                Image.open(out / f"layers-full-{frames}.png") as full:
+            assert partial.tobytes() == full.tobytes(), f"partial board repaint differs at frame {frames}"
     # After a finished game the info card shows the record instead of the rules.
     record_dir = Path(data) / "record" / "dice-wars"
     record_dir.mkdir(parents=True)
@@ -160,4 +170,4 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
                                                 before.getpixel((499, 143)))) <= 2, "uneven star fill"
         with Image.open(out / f"{scene}-3.png") as saved, Image.open(out / f"{scene}-4.png") as hovered:
             assert saved.getpixel((842, 170)) != hovered.getpixel((842, 170)), "delete hover invisible"
-    print(f"Verified 47 scenes, the host lobby, the record card, replay battle layout, menu cache refresh, white non-target territories and hover feedback in both themes, bookmark states, native output resolution, immediate theme switching, and GIF orientation. Screenshots: {out}")
+    print(f"Verified 55 scenes, partial board repaints, the host lobby, the record card, replay battle layout, menu cache refresh, white non-target territories and hover feedback in both themes, bookmark states, native output resolution, immediate theme switching, and GIF orientation. Screenshots: {out}")

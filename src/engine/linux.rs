@@ -141,6 +141,7 @@ extern "C" {
         height: c_uint,
     ) -> c_int;
     fn XSync(d: *mut Display, discard: c_int) -> c_int;
+    fn XFlush(d: *mut Display) -> c_int;
     fn XSetWindowBackgroundPixmap(d: *mut Display, w: c_ulong, pixmap: c_ulong) -> c_int;
     fn XSetWMNormalHints(d: *mut Display, w: c_ulong, hints: *mut SizeHints);
     fn XCreateFontCursor(d: *mut Display, shape: c_uint) -> c_ulong;
@@ -428,6 +429,12 @@ impl Window {
             // keep the old picture until the next frame matches the window.
             return;
         }
+        // Bound queued X requests: wait until the server has taken the last
+        // frame, so a slow display server cannot fall frames behind.
+        // SAFETY: the display connection is open for the window's lifetime.
+        unsafe {
+            XSync(self.display, 0);
+        }
         self.pixels.resize(w * h, 0);
         let full = [(0, 0, w, h)];
         let damage = if std::mem::take(&mut self.stale) {
@@ -479,8 +486,9 @@ impl Window {
                 }
                 (*image).data = ptr::null_mut();
                 XDestroyImage(image);
-                // Bound queued X requests: a slow display server cannot accumulate frames indefinitely.
-                XSync(self.display, 0);
+                // Send now; the round trip that waits for the server happens
+                // before the next frame's upload, overlapping our rendering.
+                XFlush(self.display);
             }
         }
     }

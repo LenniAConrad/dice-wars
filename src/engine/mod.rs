@@ -28,12 +28,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub mod prelude {
     pub use super::{
-        clear_background, draw_circle, draw_line, draw_mesh, draw_poly, draw_rectangle,
-        draw_text_ex, draw_triangle, get_char_pressed, get_frame_time, is_key_down, is_key_pressed,
-        is_mouse_button_down, is_mouse_button_pressed, measure_text, modifier_down, mouse_position,
-        mouse_wheel, render_target, screen_height, screen_width, set_camera, set_default_camera,
-        vec2, vec3, Camera2D, Color, Font, Image, KeyCode, Mesh, MouseButton, Rect, RenderTarget,
-        TextParams, Vec2, Vertex, BLACK, WHITE,
+        clear_background, draw_circle, draw_convex, draw_fan, draw_line, draw_mesh, draw_poly,
+        draw_rectangle, draw_text_ex, draw_triangle, get_char_pressed, get_frame_time, is_key_down,
+        is_key_pressed, is_mouse_button_down, is_mouse_button_pressed, measure_text, modifier_down,
+        mouse_position, mouse_wheel, render_target, screen_height, screen_width, set_camera,
+        set_default_camera, vec2, vec3, Camera2D, Color, Font, Image, KeyCode, Mesh, MouseButton,
+        Rect, RenderTarget, TextParams, Vec2, Vertex, BLACK, WHITE,
     };
 }
 
@@ -129,7 +129,8 @@ pub struct Texture {
 }
 impl Texture {
     pub fn get_texture_data(&self) -> Image {
-        let s = self.surface.borrow();
+        let mut s = self.surface.borrow_mut();
+        s.settle();
         // Images use top-down rows on both native platforms and offscreen targets.
         let bytes = s.pixels.clone();
         Image {
@@ -203,6 +204,7 @@ struct Runtime {
     headless: bool,
     capture_frames: Vec<usize>,
     layers: std::collections::HashMap<u8, (u64, RenderTarget)>,
+    layer_parts: std::collections::HashMap<u8, Vec<(u64, Rect)>>,
     sprites: std::collections::HashMap<u64, RenderTarget>,
     sprite_bytes: usize,
     actions: Vec<(usize, Vec<String>)>,
@@ -219,17 +221,17 @@ pub fn now() -> f64 {
         .unwrap_or_default()
         .as_secs_f64()
 }
-// Four subpixels per display pixel at normal window sizes. Larger windows
-// retain their native output resolution while raster work stays bounded.
+// The raster is never below the window's own pixel grid: edges are
+// anti-aliased analytically (triangles, circles, rounded rectangles, glyphs).
+// Small windows (up to about a megapixel) also render at twice the size and
+// average down, which keeps tiny details such as dice pips crisp.
 fn raster_size(w: usize, h: usize) -> (usize, usize) {
-    let scale = 2.0f64
-        .min((4_000_000.0 / (w as f64 * h as f64)).sqrt())
-        .min(4096.0 / w as f64)
-        .min(4096.0 / h as f64);
-    (
-        (w as f64 * scale).floor().max(1.0) as usize,
-        (h as f64 * scale).floor().max(1.0) as usize,
-    )
+    let (w, h) = (w.clamp(1, 4096), h.clamp(1, 4096));
+    if w * h <= 1_100_000 && w * 2 <= 4096 && h * 2 <= 4096 {
+        (w * 2, h * 2)
+    } else {
+        (w, h)
+    }
 }
 pub fn init(title: &str, width: usize, height: usize) -> Result<(), String> {
     let headless = std::env::var_os("DW_HEADLESS").is_some();
@@ -285,6 +287,7 @@ pub fn init(title: &str, width: usize, height: usize) -> Result<(), String> {
         headless,
         capture_frames,
         layers: std::collections::HashMap::new(),
+        layer_parts: std::collections::HashMap::new(),
         sprites: std::collections::HashMap::new(),
         sprite_bytes: 0,
         input_dirty: true,
@@ -441,9 +444,53 @@ pub fn rounded_frame(
         )
     });
 }
+/// An anti-aliased triangle. Shapes built from several triangles should use
+/// `draw_convex`, `draw_poly` or `draw_line`, which keep their inner edges
+/// seamless.
 pub fn draw_triangle(a: Vec2, b: Vec2, c: Vec2, color: Color) {
-    paint(|s, t| s.triangle([t.point(a), t.point(b), t.point(c)], [color; 3]));
+    paint(|s, t| s.triangle_aa([t.point(a), t.point(b), t.point(c)], [color; 3], [true; 3]));
 }
+
+/// Triangles from `center` to each pair of neighboring `rim` points (a
+/// closed loop): stars, ellipses, pips. Only the rim is anti-aliased, so the
+/// spokes never show.
+pub fn draw_fan(center: Vec2, rim: &[Vec2], color: Color) {
+    let n = rim.len();
+    paint(|s, t| {
+        for i in 0..n {
+            s.triangle_aa(
+                [t.point(center), t.point(rim[i]), t.point(rim[(i + 1) % n])],
+                [color; 3],
+                [true, false, false],
+            );
+        }
+    });
+}
+
+/// A convex polygon; `aa` smooths its outline. Pass false for tiles that
+/// meet neighbors of the same color (their shared edges must not blend).
+pub fn draw_convex(points: &[Vec2], color: Color, aa: bool) {
+    let n = points.len();
+    if n < 3 {
+        return;
+    }
+    paint(|s, t| {
+        for k in 1..n - 1 {
+            // fan from point 0: only the polygon's own sides are outer edges
+            let mask = [aa, aa && k + 1 == n - 1, aa && k == 1];
+            s.triangle_aa(
+                [
+                    t.point(points[0]),
+                    t.point(points[k]),
+                    t.point(points[k + 1]),
+                ],
+                [color; 3],
+                mask,
+            );
+        }
+    });
+}
+/// Meshes are tessellations: no anti-aliasing, so faces tile seamlessly.
 pub fn draw_mesh(mesh: &Mesh) {
     paint(|s, t| {
         for face in mesh.indices.chunks_exact(3) {
@@ -484,9 +531,19 @@ pub fn draw_line(x: f32, y: f32, x2: f32, y2: f32, width: f32, color: Color) {
     let b = vec2(x2, y2);
     let d = (b - a).normalize_or_zero();
     let p = vec2(-d.y, d.x) * (width * 0.5);
+    // the two long sides are smooth; the shared diagonal and the butt ends
+    // stay hard so the halves meet seamlessly and segments join cleanly
     paint(|s, t| {
-        s.triangle([t.point(a + p), t.point(a - p), t.point(b - p)], [color; 3]);
-        s.triangle([t.point(a + p), t.point(b - p), t.point(b + p)], [color; 3]);
+        s.triangle_aa(
+            [t.point(a + p), t.point(a - p), t.point(b - p)],
+            [color; 3],
+            [true, false, false],
+        );
+        s.triangle_aa(
+            [t.point(a + p), t.point(b - p), t.point(b + p)],
+            [color; 3],
+            [false, true, false],
+        );
     });
 }
 pub fn draw_poly(x: f32, y: f32, sides: u8, radius: f32, rotation: f32, color: Color) {
@@ -500,7 +557,11 @@ pub fn draw_poly(x: f32, y: f32, sides: u8, radius: f32, rotation: f32, color: C
             t.point(vec2(x + radius * angle.cos(), y + radius * angle.sin()))
         };
         for i in 0..sides {
-            s.triangle([center, point(i), point(i + 1)], [color; 3]);
+            s.triangle_aa(
+                [center, point(i), point(i + 1)],
+                [color; 3],
+                [true, false, false],
+            );
         }
     });
 }
@@ -527,8 +588,16 @@ pub fn draw_text_ex(text: &str, x: f32, y: f32, params: TextParams<'_>) {
 
 /// Cache a static layer at the current render resolution. Animation callers change the key.
 pub fn cached_layer(id: u8, key: u64, draw: impl FnOnce()) {
+    cached_layer_parts(id, key, &[], draw);
+}
+
+/// A cached layer made of independently changing parts. `key` covers what
+/// affects the whole picture; each part has its own key and the region it
+/// can touch (in drawing coordinates). When only some part keys change, just
+/// their regions (old and new) are repainted: `draw` runs clipped to them.
+pub fn cached_layer_parts(id: u8, key: u64, parts: &[(u64, Rect)], draw: impl FnOnce()) {
     use std::hash::{Hash, Hasher};
-    let (camera, target, hit, full_key) = RUNTIME.with(|r| {
+    let (camera, target, redraw, full_key) = RUNTIME.with(|r| {
         let mut guard = r.borrow_mut();
         let r = guard.as_mut().unwrap();
         let camera = r.camera.clone();
@@ -541,7 +610,7 @@ pub fn cached_layer(id: u8, key: u64, draw: impl FnOnce()) {
             })
             .unwrap_or((r.surface.width, r.surface.height));
         let mut hash = std::collections::hash_map::DefaultHasher::new();
-        (key, w, h).hash(&mut hash);
+        (key, w, h, parts.len()).hash(&mut hash);
         if let Some(c) = &camera {
             (
                 c.target.x.to_bits(),
@@ -557,8 +626,59 @@ pub fn cached_layer(id: u8, key: u64, draw: impl FnOnce()) {
             .get(&id)
             .filter(|(k, _)| *k == full_key)
             .map(|(_, target)| target.clone());
-        let hit = cached.is_some();
+        let mut layer_camera = camera.clone().unwrap_or(Camera2D {
+            target: vec2(r.input.size.0 as f32 * 0.5, r.input.size.1 as f32 * 0.5),
+            zoom: vec2(2.0 / r.input.size.0 as f32, 2.0 / r.input.size.1 as f32),
+            render_target: None,
+        });
+        // None: reuse as is; Some(None): repaint all; Some(Some(rect)): repaint a region
+        let redraw = match &cached {
+            None => Some(None),
+            Some(_) => {
+                let old = r.layer_parts.get(&id);
+                let t = raster::Transform::camera(Some(&layer_camera), w, h, w, h);
+                let mut region: Option<(f32, f32, f32, f32)> = None;
+                let mut grow = |rect: Rect| {
+                    let a = t.point(vec2(rect.x, rect.y));
+                    let b = t.point(vec2(rect.x + rect.w, rect.y + rect.h));
+                    let (x0, y0, x1, y1) = (a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y));
+                    region = Some(match region {
+                        Some((u0, v0, u1, v1)) => (u0.min(x0), v0.min(y0), u1.max(x1), v1.max(y1)),
+                        None => (x0, y0, x1, y1),
+                    });
+                };
+                for (i, &(k, rect)) in parts.iter().enumerate() {
+                    match old.and_then(|o| o.get(i)) {
+                        Some(&(ok, _)) if ok == k => {}
+                        Some(&(_, orect)) => {
+                            grow(orect);
+                            grow(rect);
+                        }
+                        None => grow(rect),
+                    }
+                }
+                match region {
+                    None => None,
+                    Some((x0, y0, x1, y1)) => {
+                        let rx0 = (x0.floor() - 2.0).max(0.0) as usize;
+                        let ry0 = (y0.floor() - 2.0).max(0.0) as usize;
+                        let rx1 = ((x1.ceil() + 2.0).max(0.0) as usize).min(w);
+                        let ry1 = ((y1.ceil() + 2.0).max(0.0) as usize).min(h);
+                        if rx0 >= rx1 || ry0 >= ry1 {
+                            None
+                        } else if (rx1 - rx0) * (ry1 - ry0) * 2 > w * h
+                            || std::env::var_os("DW_FULL_LAYERS").is_some()
+                        {
+                            Some(None) // most of it: a full repaint is as cheap
+                        } else {
+                            Some(Some((rx0, ry0, rx1, ry1)))
+                        }
+                    }
+                }
+            }
+        };
         let target = cached
+            .clone()
             .or_else(|| {
                 r.layers
                     .get(&id)
@@ -569,31 +689,31 @@ pub fn cached_layer(id: u8, key: u64, draw: impl FnOnce()) {
                     })
             })
             .unwrap_or_else(|| render_target(w as u32, h as u32));
-        if !hit {
-            target
-                .texture
-                .surface
-                .borrow_mut()
-                .clear(Color::new(0.0, 0.0, 0.0, 0.0));
-        }
-        let mut layer_camera = camera.clone().unwrap_or(Camera2D {
-            target: vec2(r.input.size.0 as f32 * 0.5, r.input.size.1 as f32 * 0.5),
-            zoom: vec2(2.0 / r.input.size.0 as f32, 2.0 / r.input.size.1 as f32),
-            render_target: None,
-        });
-        layer_camera.render_target = Some(target.clone());
-        if !hit {
+        if let Some(region) = redraw {
+            let mut surface = target.texture.surface.borrow_mut();
+            surface.set_clip(region);
+            if region.is_none() {
+                surface.clear(Color::new(0.0, 0.0, 0.0, 0.0));
+            }
+            drop(surface);
+            layer_camera.render_target = Some(target.clone());
             r.camera = Some(layer_camera);
         }
-        (camera, target, hit, full_key)
+        (camera, target, redraw.is_some(), full_key)
     });
-    if !hit {
+    if redraw {
         draw();
+        {
+            let mut surface = target.texture.surface.borrow_mut();
+            surface.set_clip(None);
+            surface.settle();
+        }
         RUNTIME.with(|r| {
             let mut guard = r.borrow_mut();
             let r = guard.as_mut().unwrap();
             r.camera = camera;
             r.layers.insert(id, (full_key, target.clone()));
+            r.layer_parts.insert(id, parts.to_vec());
         });
     }
     let profiling = RUNTIME.with(|r| r.borrow().as_ref().unwrap().profile.is_some());
@@ -608,7 +728,7 @@ pub fn cached_layer(id: u8, key: u64, draw: impl FnOnce()) {
 }
 
 /// Cache a small repeated illustration at the current raster scale. Movement
-/// changes its destination, not its geometry. The cache has a 16 MiB ceiling.
+/// changes its destination, not its geometry. The cache has a 64 MiB ceiling.
 pub fn cached_sprite(key: u64, bounds: Rect, draw: impl FnOnce()) {
     use std::hash::{Hash, Hasher};
     let (camera, scale, full_key, cached) = RUNTIME.with(|r| {
@@ -644,7 +764,7 @@ pub fn cached_sprite(key: u64, bounds: Rect, draw: impl FnOnce()) {
     let (sx, sy) = scale;
     let w = (bounds.w * sx).ceil() as u32;
     let h = (bounds.h * sy).ceil() as u32;
-    if sx <= 0.0 || sy <= 0.0 || w == 0 || h == 0 || w > 512 || h > 512 {
+    if sx <= 0.0 || sy <= 0.0 || w == 0 || h == 0 || w > 2048 || h > 2048 {
         draw();
         return;
     }
@@ -659,12 +779,13 @@ pub fn cached_sprite(key: u64, bounds: Rect, draw: impl FnOnce()) {
             render_target: Some(target.clone()),
         });
         draw();
+        target.texture.surface.borrow_mut().settle();
         RUNTIME.with(|r| {
             let mut guard = r.borrow_mut();
             let r = guard.as_mut().unwrap();
             r.camera = camera;
             let bytes = w as usize * h as usize * 4;
-            if r.sprite_bytes + bytes > 16 * 1024 * 1024 || r.sprites.len() >= 1024 {
+            if r.sprite_bytes + bytes > 64 * 1024 * 1024 || r.sprites.len() >= 1024 {
                 r.sprites.clear();
                 r.sprite_bytes = 0;
             }
@@ -863,14 +984,12 @@ pub fn clipboard_get() -> Option<String> {
 mod tests {
     use super::*;
     #[test]
-    fn antialiasing_budget_scales_with_window_size() {
+    fn the_raster_is_never_below_the_window_resolution() {
         assert_eq!(raster_size(930, 820), (1860, 1640));
-        for (w, h) in [(1920, 1080), (3840, 2160), (4096, 4096), (1201, 821)] {
-            let (rw, rh) = raster_size(w, h);
-            assert!(rw * rh <= 4_000_000);
-            assert!(rw <= 4096 && rh <= 4096);
-            assert!(rw > 1600);
+        for (w, h) in [(1920, 1080), (3840, 2160), (4096, 4096), (1601, 821)] {
+            assert_eq!(raster_size(w, h), (w, h));
         }
+        assert_eq!(raster_size(5120, 2880), (4096, 2880));
     }
     #[test]
     fn readback_keeps_top_down_rows_for_exports() {
