@@ -4,7 +4,7 @@
 //! function pointer with the exact argument and return types of the method, so the
 //! arm64 and x86_64 calling conventions are both honoured. Frames are shown by
 //! handing a CGImage to the content view's hosted CALayer; AppKit never draws it.
-use super::{raster::Surface, Input, KeyCode};
+use super::{gamepad, raster::Surface, Input, KeyCode};
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +43,9 @@ extern "C" {
     fn class_addMethod(class: Id, name: Sel, imp: *const c_void, types: *const c_char) -> i8;
     fn objc_autoreleasePoolPush() -> *mut c_void;
     fn objc_autoreleasePoolPop(pool: *mut c_void);
+}
+extern "C" {
+    fn dlopen(path: *const c_char, mode: i32) -> *mut c_void;
 }
 #[link(name = "Foundation", kind = "framework")]
 extern "C" {
@@ -278,6 +281,7 @@ unsafe fn install_icon(app: Id, space: *mut c_void) {
 const COMMAND: usize = 1 << 20;
 const CONTROL: usize = 1 << 18;
 const OPTION: usize = 1 << 19;
+const SHIFT: usize = 1 << 17;
 
 pub(super) struct Window {
     app: Id,
@@ -293,6 +297,8 @@ pub(super) struct Window {
     scroll: f64,
     // the last frame in Core Graphics' pixel format; only damage is converted
     converted: Vec<u32>,
+    // GCController, once GameController.framework is loaded (null: unavailable)
+    controllers: Option<Id>,
 }
 /// Brings `out` (0x00RRGGBB words) up to date with `surface` in the damaged
 /// rectangles, or everywhere after a size change.
@@ -394,6 +400,7 @@ impl Window {
                 focused: true,
                 scroll: 0.0,
                 converted: Vec::new(),
+                controllers: None,
             })
         }
     }
@@ -485,6 +492,10 @@ impl Window {
                         input.key(KeyCode::LeftControl, left);
                         input.key(KeyCode::RightControl, right);
                         input.key(KeyCode::Alt, flags & OPTION != 0);
+                        let shift = flags & SHIFT != 0;
+                        let right_shift = shift && flags & 0x0004 != 0;
+                        input.key(KeyCode::LeftShift, shift && !right_shift);
+                        input.key(KeyCode::RightShift, right_shift);
                         continue;
                     }
                     1 => {
@@ -548,6 +559,81 @@ impl Window {
             if CLOSE_REQUESTED.swap(false, Ordering::Relaxed) {
                 input.closed = true;
             }
+        }
+    }
+    /// Buttons held on any connected controller (`gamepad` bits), read
+    /// through GameController.framework's extended gamepad profile.
+    pub fn gamepad(&mut self) -> u16 {
+        // SAFETY: GameController objects are only messaged with selectors of
+        // their documented classes, on the main thread, inside a pool.
+        unsafe {
+            let cls = *self.controllers.get_or_insert_with(|| {
+                // Loaded at run time: the game still starts where it is missing.
+                dlopen(
+                    c"/System/Library/Frameworks/GameController.framework/GameController".as_ptr(),
+                    1, // RTLD_LAZY
+                );
+                class(c"GCController")
+            });
+            if cls.is_null() {
+                return 0;
+            }
+            let _pool = Pool::new();
+            let list: Id = send!(cls, c"controllers"; Id);
+            if list.is_null() {
+                return 0;
+            }
+            let count: usize = send!(list, c"count"; usize);
+            let pressed = |button: Id| !button.is_null() && send!(button, c"isPressed"; i8) != 0;
+            let mut held = 0;
+            for i in 0..count.min(4) {
+                let controller: Id = send!(list, c"objectAtIndex:", i => usize; Id);
+                let pad: Id = send!(controller, c"extendedGamepad"; Id);
+                if pad.is_null() {
+                    continue;
+                }
+                for (name, bit) in [
+                    (c"buttonA", gamepad::SOUTH),
+                    (c"buttonB", gamepad::EAST),
+                    (c"buttonX", gamepad::WEST),
+                    (c"buttonY", gamepad::NORTH),
+                    (c"leftShoulder", gamepad::LB),
+                    (c"rightShoulder", gamepad::RB),
+                    (c"buttonMenu", gamepad::START), // macOS 10.15+
+                ] {
+                    let responds: i8 = send!(pad, c"respondsToSelector:", sel(name) => Sel; i8);
+                    if responds != 0 && pressed(send!(pad, name; Id)) {
+                        held |= bit;
+                    }
+                }
+                let dpad: Id = send!(pad, c"dpad"; Id);
+                if !dpad.is_null() {
+                    for (name, bit) in [
+                        (c"up", gamepad::UP),
+                        (c"down", gamepad::DOWN),
+                        (c"left", gamepad::LEFT),
+                        (c"right", gamepad::RIGHT),
+                    ] {
+                        if pressed(send!(dpad, name; Id)) {
+                            held |= bit;
+                        }
+                    }
+                }
+                let stick: Id = send!(pad, c"leftThumbstick"; Id);
+                if !stick.is_null() {
+                    let value = |axis: Id| {
+                        if axis.is_null() {
+                            0.0
+                        } else {
+                            send!(axis, c"value"; f32)
+                        }
+                    };
+                    let x = value(send!(stick, c"xAxis"; Id));
+                    let y = value(send!(stick, c"yAxis"; Id));
+                    held |= gamepad::stick(x, -y); // yAxis points up
+                }
+            }
+            held
         }
     }
     pub fn present(&mut self, surface: &Surface, damage: &[(usize, usize, usize, usize)]) {

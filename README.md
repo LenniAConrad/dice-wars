@@ -63,6 +63,7 @@ largest connected region. Conquer the whole map to win.
 | `R` | new map |
 | `M` | sound: full, half, off |
 | `F8` / `F9` / `F10` | less motion / colour assist / next theme |
+| Controller | D-pad or left stick: arrow keys; A / Cross: `Enter`; B / Circle, Start: `Esc`; X / Square: `Space`; Y / Triangle, RB: `Tab`; LB: `Shift`+`Tab` |
 
 Everything else — seven themes, game speed, win chances and accessibility
 options — is in **Settings** at the top right of every screen. Hold `Space`
