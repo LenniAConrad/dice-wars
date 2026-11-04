@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use dicegame::engine::prelude::*;
 use dicegame::engine::random::gen_range;
 
-use crate::board::shuffle;
+use crate::board::{shuffle, MapOpts};
 use crate::draw_game::battle_settle_time;
 use crate::sound::Snd;
 use crate::theme::{color_map, palette, COLOR_NAMES};
@@ -163,6 +163,7 @@ pub(crate) struct FloatText {
 pub(crate) struct Game {
     pub(crate) players: usize,
     pub(crate) humans: usize, // players 0..humans are people (host, then guests), the rest are AI
+    pub(crate) map: MapOpts,  // size and shape the map was generated with
     pub(crate) teams: TeamCfg,
     pub(crate) team: Vec<usize>, // per-player team id, from assign_teams
     pub(crate) names: Vec<String>, // lobby names for human seats; empty = P1/P2 labels
@@ -183,6 +184,7 @@ pub(crate) struct Game {
     pub(crate) terrs: Vec<Territory>,
     pub(crate) fx: Vec<TerrFx>,
     pub(crate) current: usize,
+    pub(crate) turns_done: u32, // turns ended so far; the first `players` form the opening round
     pub(crate) selected: Option<usize>,
     pub(crate) keyboard_hover: Option<usize>,
     pub(crate) log: Vec<String>, // recent events, newest last
@@ -524,11 +526,20 @@ impl Game {
         }
     }
 
+    // Dice a player receives at the end of the current turn: their largest
+    // region plus stored dice, with the opening-round handicap applied.
+    // Identical for humans and bots; network guests mirror it to validate.
+    pub(crate) fn reinforcements(&self, p: usize) -> u32 {
+        let base = self.largest_region(p) + self.reserve[p];
+        let pct = opening_share(self.players, self.turns_done as usize);
+        (base * pct + 50) / 100
+    }
+
     pub(crate) fn end_turn(&mut self) {
         self.mark_start();
         let p = self.current;
         // stored dice from earlier turns join this turn's reinforcements
-        let n = self.largest_region(p) + self.reserve[p];
+        let n = self.reinforcements(p);
         let mut reinforced: Vec<usize> = Vec::new();
         for _ in 0..n {
             // Every seat uses the same random placement rule, including Hard
@@ -584,6 +595,7 @@ impl Game {
     }
 
     pub(crate) fn advance_turn(&mut self) {
+        self.turns_done = self.turns_done.saturating_add(1);
         for step in 1..=self.players {
             let q = (self.current + step) % self.players;
             if self.count(q) > 0 {
@@ -720,7 +732,7 @@ impl Game {
             return false;
         }
         // mirror the host's stock arithmetic so displays stay in sync
-        let n = self.largest_region(player) + self.reserve[player];
+        let n = self.reinforcements(player);
         if lands.len() > n as usize {
             return false;
         }
@@ -849,6 +861,28 @@ impl Game {
     }
 }
 
+/// Opening-round handicap: moving first is a real edge in Dice Wars (in a
+/// two-player game the first mover won 94% of equal bot games). So in the
+/// first round only, the earliest movers keep a reduced share (percent) of
+/// the reinforcements they earn at the end of their first turn. Measured
+/// with the headless simulator (`DW_SIM`) to bring every turn position
+/// within about two points of a fair share; from seven players on the edge
+/// is already below that, and nothing changes.
+pub(crate) fn opening_share(players: usize, turn: usize) -> u32 {
+    let table: &[u32] = match players {
+        2 => &[35],
+        3 => &[60, 90],
+        4 => &[80],
+        5 => &[85],
+        6 => &[95],
+        _ => &[],
+    };
+    if turn >= players {
+        return 100; // after the opening round
+    }
+    table.get(turn).copied().unwrap_or(100)
+}
+
 pub(crate) fn diff_idx(d: Difficulty) -> usize {
     match d {
         Difficulty::Easy => 0,
@@ -934,6 +968,34 @@ mod tests {
             );
             assert_eq!(human.reserve, bot.reserve);
         }
+    }
+
+    #[test]
+    fn opening_handicap_only_touches_the_first_round() {
+        assert_eq!(opening_share(2, 0), 35);
+        assert_eq!(opening_share(2, 1), 100);
+        assert_eq!(opening_share(3, 1), 90);
+        assert_eq!(opening_share(4, 4), 100);
+        assert_eq!(opening_share(9, 0), 100);
+        // first mover of a 2-player game: 35% of a 10-land region, rounded
+        let mut g = mk_game(&[0; 10], &[], 2, TeamCfg::default());
+        for t in 1..10 {
+            g.terrs[t - 1].neighbors.push(t);
+            g.terrs[t].neighbors.push(t - 1);
+        }
+        g.terrs.push(Territory {
+            owner: 1,
+            dice: 1,
+            neighbors: Vec::new(),
+            anchor: Vec2::ZERO,
+            seed: 0,
+        });
+        g.turns_done = 0;
+        assert_eq!(g.reinforcements(0), 4);
+        g.turns_done = 1;
+        assert_eq!(g.reinforcements(0), 10);
+        g.turns_done = 2;
+        assert_eq!(g.reinforcements(0), 10);
     }
 
     #[test]

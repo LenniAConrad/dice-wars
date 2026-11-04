@@ -2,6 +2,7 @@
 
 use dicegame::engine::prelude::*;
 
+use crate::board::MapOpts;
 use crate::game::{assign_teams, Difficulty, Game, Persona, TeamCfg, TerrFx, Territory, TURN_SECS};
 
 // a tiny hand-built map: territory i owned by owners[i], linked by edges
@@ -28,6 +29,7 @@ pub(crate) fn mk_game(
     Game {
         players,
         humans: 1,
+        map: MapOpts::default(),
         teams,
         team: assign_teams(players, 1, teams),
         names: Vec::new(),
@@ -46,6 +48,7 @@ pub(crate) fn mk_game(
         fx: vec![TerrFx::default(); owners.len()],
         terrs,
         current: 0,
+        turns_done: players as u32, // hand-built boards are past the opening round
         selected: None,
         keyboard_hover: None,
         log: Vec::new(),
