@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+mod svg;
+
 // ---------------------------------------------------------------- constants
 
 const COLS: usize = 30;
@@ -9138,6 +9140,20 @@ fn main() {
             break;
         }
     }
+    // Documentation art: `DW_EXPORT_SVG=dir` writes the final board and the
+    // logo as SVG (headless runs only need DW_AUTOSTART and a frame limit).
+    if let Some(dir) = std::env::var_os("DW_EXPORT_SVG") {
+        let dir = std::path::PathBuf::from(dir);
+        let _ = std::fs::create_dir_all(&dir);
+        if let Some(g) = &game {
+            if let Err(e) = std::fs::write(dir.join("board.svg"), svg::board(g)) {
+                eprintln!("SVG export failed: {e}");
+            }
+        }
+        if let Err(e) = std::fs::write(dir.join("logo.svg"), svg::logo()) {
+            eprintln!("SVG export failed: {e}");
+        }
+    }
     engine::shutdown();
 }
 
@@ -9809,6 +9825,20 @@ mod tests {
         let _ = replay.shutdown(std::net::Shutdown::Both);
         drop(host);
         std::env::remove_var("DW_PORT");
+    }
+
+    #[test]
+    fn svg_exports_are_complete_documents() {
+        let _guard = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+        let logo = svg::logo();
+        assert!(logo.starts_with("<svg") && logo.trim_end().ends_with("</svg>"));
+        let g = gen_map_local(31337, 6, 1, Difficulty::Normal, TeamCfg::default());
+        let board = svg::board(&g);
+        assert!(board.starts_with("<svg") && board.trim_end().ends_with("</svg>"));
+        let dice: u32 = g.terrs.iter().map(|t| t.dice).sum();
+        // one body and three pip uses per die
+        assert_eq!(board.matches("<use ").count() as u32, dice * 4);
+        assert!(board.len() < 400_000, "board SVG grew to {} bytes", board.len());
     }
 
     #[test]

@@ -1,122 +1,78 @@
-<div align="center">
+<p align="center">
+  <img src="assets/logo.svg" width="98" height="114" alt="Dice Wars: a yellow game die">
+</p>
 
-# 🎲 Dice Wars
+<h1 align="center">Dice Wars</h1>
 
-**A pastel Dice Wars–style territory conquest game in Rust.**
+<p align="center">
+  A pastel territory-conquest dice game in dependency-free Rust.<br>
+  <strong><a href="docs/GUIDE.md">Read the player guide »</a></strong>
+</p>
 
-Hex maps · isometric dice · hidden AI personalities · seeded & bookmarkable maps · replays with GIF export · procedural sound
+<p align="center">
+  <a href="docs/DEVELOPMENT.md"><img src="https://img.shields.io/badge/Rust%20build-1.82%2B-C08472?logo=rust" alt="Rust build: 1.82 or newer"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/platforms-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-6a5acd" alt="Platforms: Linux, macOS, Windows">
+</p>
 
-![Rust](https://img.shields.io/badge/rust-1.82+-b7410e) ![License](https://img.shields.io/badge/license-MIT-3c5a99) ![Native](https://img.shields.io/badge/engine-native%20software-6a5acd)
+Conquer a hex map by rolling stacks of dice against your neighbours. Play
+against up to eight bots with hidden personalities, or with friends on your
+local network. Maps come from an 8-digit seed, so any good map can be
+bookmarked and replayed, and every finished game can be watched again or
+saved as a GIF.
 
-<img src="assets/screenshot-game.png" alt="Dice Wars gameplay" width="720">
+## Install and run
 
-<img src="assets/screenshot-menu.png" alt="Light start screen with map preview and controls" width="720">
+Download Dice Wars from GitHub (Code, then Download ZIP), unzip it, and run
+the installer for your system from inside the folder. Each installer first
+gets what it needs to build the game, so nothing has to be installed
+beforehand.
 
-<img src="assets/screenshot-game-dark.png" alt="Dark gameplay with compact battle rolls in the status area" width="720">
+| System | Run |
+| --- | --- |
+| Linux | `bash install-linux.sh` — [installer](install-linux.sh); gets the C build tools and audio/X11 libraries (asks for your sudo password) and Rust. |
+| macOS, Apple silicon / Intel | `bash install-macos.sh` — [installer](install-macos.sh); gets Apple's command line tools (click Install in Apple's window) and Rust. |
+| Windows | double-click `install-windows.cmd` — [installer](install-windows.cmd); gets Rust with its own linker, no Visual Studio needed. |
 
-<img src="assets/screenshot-menu-dark.png" alt="Dark start screen with team setup" width="720">
+Each installer prints what it is doing and ends with SUCCESS or FAILED. Then
+start **Dice Wars** from your app menu, Launchpad or Start Menu, or run
+`dice-wars` in a terminal. Options and uninstalling are covered in the
+[install guide](docs/INSTALL.md).
 
-</div>
-
-## Run / install
-
-```sh
-./run.sh              # build & play (or: cargo run --release)
-scripts/build.sh      # build only — installs the Rust toolchain if missing
-scripts/install.sh    # Linux: install to ~/.local/bin + desktop entry
-scripts\install.bat   # Windows: install + Start Menu shortcut
-scripts\build.bat     # Windows: build only
-```
-
-The game has **no Cargo dependencies**. Its native software renderer uses X11/XWayland and PulseAudio on Linux, Win32/GDI plus Windows audio on Windows, and Cocoa/Core Animation plus AudioToolbox on macOS (Apple Silicon and Intel). A GPU context is not needed. On Debian/Ubuntu/Mint, the runtime libraries are `libx11-6` and `libpulse0` (normally installed with the desktop).
-
-Build scripts install the Rust toolchain if missing and default to **one build worker** to keep the desktop responsive. Settings, bookmarks, and exported replay GIFs live in your platform's user-data directory (`~/.local/share/dice-wars` on Linux, `%APPDATA%\dice-wars` on Windows, `~/Library/Application Support/dice-wars` on macOS).
-
-## Start screen
-
-- **Your color** — click a swatch in the band under the title to pick the color you play as; your current pick is highlighted.
-- **Players / Humans** — choose 2–9 total players. Pick any color for yourself with the swatch band; every player has a unique color and symbol. For multiplayer, host a lobby — joined players get the first seats and AI fills the rest.
-- **Difficulty** — EASY bots hesitate, need a big advantage, and pick sloppy targets; NORMAL plays by personality; HARD bots gamble on even odds, consolidate territory, and prefer attacks with friendly backup. Every difficulty uses the same dice rolls, random reinforcement placement, and reserve limits as humans. Bots assess opponents by board strength, without a bonus for targeting humans.
-- **Mode** — FREE-FOR-ALL is the classic last-player-standing game. TEAMS ends the game when only one team is left alive: pick 2–4 teams and which one you play on (bots spread evenly across the rest), or choose HUMANS VS BOTS to put every human on one side. Everyone still plays for themselves — no shared dice or reinforcements. Two extra rules are toggleable: **Friendly fire** (teammates may attack each other, on by default) and **Islands link via allies** (your separated islands count as one connected region when teammate land bridges them, which boosts END TURN reinforcements — off by default). Bots never attack their own team. Everything persists in `settings.txt` and applies to hosted online games too.
-- **Map preview** — the generated map is shown live. Deals are fairness-balanced: every player starts with a comparable largest cluster, equal territory counts, and the first player is decided by the seed.
-- **Seed** — maps are deterministic: the same 8-digit seed and player count always produce the same map. Click the seed to type one in, use `<` / `>` to step through neighboring seeds, or `NEW` (or `N`) to skip to a random map.
-- **Bookmark map** — the fixed-size, five-point star saves the current seed + player count to `bookmarks.txt`; click a bookmark to load it, or its `x` to delete it.
-- **Toolbar** — sound, win chances, color assist, 1x/2x speed, light/dark theme, and reduced motion. Hover for the current state and keyboard shortcut. Settings persist in `settings.txt`.
-- **Hover feedback** — buttons, toolbar icons, selected options, color swatches, checkboxes, and bookmark deletion visibly react on hover in both themes. Neutral controls gain an accent tint; colored controls preserve label contrast.
-- **Themes** — the surrounding surfaces, labels, controls, dialogs, and outer background switch on the input frame. Territory pastels, map outlines, and dice retain their original colors in dark mode; colored buttons keep readable labels in both themes.
-- **Accessibility** — protan color assist uses separated hues and owner-symbol badges. Dice pips and colored control labels choose contrasting ink. Reduced motion removes shaking, bouncing, floating text movement, and selection pulsing. [Nine-player accessibility screenshot](assets/screenshot-accessible.png).
-- **START GAME** (or `ENTER`) plays the previewed map.
-
-## Online play
-
-**HOST GAME** opens a lobby on TCP port 7777 with a random 6-digit room code and shows your LAN address (with a copy button). Guests join with **JOIN GAME** (address + code); the host presses START whenever ready — connected players get the first seats (host is P1) and AI fills every remaining slot. Works on a LAN or VPN out of the box; across the internet the host needs port 7777 forwarded.
-
-The same toolbar is available in the start screen, game, lobbies, join screen, and replay. Local appearance preferences do not change the host's game rules.
-
-The host is authoritative: guests send intents, the host validates them, rolls the dice, and broadcasts results. Basic hardening is built in — five wrong codes temporarily block that address, connections are rate-limited and capped, and messages are strictly length-limited.
-
-Network traffic is not encrypted, so use a trusted LAN or a private VPN such as Tailscale. Directly forwarding port 7777 exposes room codes and reconnect tokens to anyone able to observe that connection.
-
-**Can't connect on the same network?** The host's firewall is usually the culprit — on Ubuntu/Mint run `sudo ufw allow 7777/tcp` once. Guest-WiFi networks with "client isolation" also block device-to-device connections. For playing across the internet, either forward TCP 7777 on the host's router or use a VPN like Tailscale (easiest).
+<p align="center">
+  <img src="assets/board.svg" width="760" alt="A Dice Wars board after a few bot turns: pastel territories with stacks of dice">
+</p>
 
 ## How to play
 
-- **Click one of your territories** (it needs more than 1 die), then **click an adjacent enemy territory** to attack. Selecting a territory shows arrows to every legal target with its exact win probability.
-- Both sides roll all their dice in **two compact rows in the existing status area**. Attack/defend labels, player symbols, totals, and an explicit result explain the battle. The map, player cards, and action buttons stay visible. Higher total captures the territory (the stack moves in, leaving 1 die); ties and losses reduce the attacker to 1 die.
-- **Keyboard play** — arrow keys focus territories, `ENTER` selects or attacks, and `SPACE` ends the turn. Focused land gets an outlined border. `ESC` cancels the selection or opens the menu confirmation.
-- **END TURN** (or `SPACE`) ends your turn: you receive one die per territory in your largest connected region, distributed randomly. Dice that don't fit (all territories full) are stored off-board — up to 64, like the original — and return on later turns. The button shows your total incoming dice.
-- `R` opens the new-map confirmation. `M` toggles sound outside text fields, `F10` switches light/dark mode, `F9` toggles color assist, and `F8` toggles reduced motion. `ENTER` or `ESC` dismisses a destructive-action confirmation and keeps playing.
+Click one of your lands with two or more dice, then a neighbouring enemy land
+to attack. Both sides roll all their dice; the higher total wins, and ties go
+to the defender. **END TURN** gives you one new die for every land in your
+largest connected region. Conquer the whole map to win.
 
-All sound effects are synthesized procedurally at startup (no audio asset files). Linux output automatically re-buffers after silence so short clicks and later battle effects are audible. Audio device failures are reported to stderr.
+| Key | Action |
+| --- | --- |
+| Arrow keys, `Enter` | focus a land, select it or attack |
+| `Space` | end your turn |
+| `Esc` | cancel the selection, or open the menu |
+| `R` | new map |
+| `M` | sound: full, half, off |
+| `F8` / `F9` / `F10` | reduced motion / colour assist / light or dark theme |
 
-Each AI has a hidden personality, rolled from the map seed — some attack recklessly, some wait for a clear advantage, some scheme against whoever is winning. All bots share a survival instinct: when one player grows dominant, they stop wearing each other down and gang up on the leader.
+## Playing together
 
-Win by conquering the whole map — or, in team mode, by being on the last team standing. Player cards show each player's symbol and land count (plus a small +N when they have dice stored off-board). In team mode, cards are grouped inside shared `TEAM A` / `TEAM B` outlines. Non-target territories turn white while you choose an attack target, in both light and dark mode. Their dice and owner badges keep their player colors. [Dark-mode selection screenshot](assets/screenshot-selection-dark.png).
+Press **HOST GAME** and your lobby appears in every **JOIN GAME** screen on
+the same network, ready to join with one click, the way LAN worlds work in
+many games. Hosts can also share their address and 6-digit room code for VPN
+play. Details and firewall tips are in the [player guide](docs/GUIDE.md#playing-together).
 
-## Replays
+## Guides
 
-Battle rolls and result text stay above the player cards, using the same spacing as gameplay, including team labels. [Team replay screenshot](assets/screenshot-replay-teams.png).
+- [Player guide](docs/GUIDE.md): rules, teams, difficulty, multiplayer, replays and accessibility.
+- [Install guide](docs/INSTALL.md): installer options, manual builds and uninstalling.
+- [Development](docs/DEVELOPMENT.md): headless checks, test hooks, performance and project layout.
 
-The game-over screen offers **WATCH REPLAY** — an animated playback of every battle and reinforcement of the finished game — and **SAVE GIF**, which fast-forwards through the replay and writes a timelapse `replay-<seed>.gif` (up to 600 frames sampled across the entire match, including the ending; self-contained GIF encoder, no external tools).
+## License
 
-The UI font is DejaVu Sans Bold, embedded as coverage masks (Bitstream Vera license). The source font and a development-only asset packer are included.
-
-## Responsiveness and resource use
-
-- Input is polled at up to 60 Hz. Animated frames are capped at 60 fps; unfocused windows use 15 Hz.
-- Unchanged menus and idle single-player human turns reuse the previous frame. Boards, previews, static menu artwork, status panels, and dice illustrations use bounded caches; moving effects render separately. Moving the cursor inside the same territory keeps the map cache.
-- Normal windows use 2× rendering in each dimension for smooth dice, hex borders, and text. Raster work is capped at four million pixels; the filtered output retains the window resolution, including 2560 × 1600 and 4K. Larger windows use fewer subpixels within that budget. Offscreen exports have explicit size limits.
-- Unchanged raster rows skip tile comparisons. Changed chunks update the prior raster without a full-frame copy; adjacent dirty tiles share an upload rectangle. Opaque-canvas alpha blending uses a faster path with the same pixel output. Only changed tiles are filtered again. Linux uploads the changed rectangles and skips identical frames, avoiding full-window copies for a small dice animation. Exposed windows receive a complete repaint.
-- Dice illustrations have a 16 MiB cache limit. The previous raster used for change detection stays within the four-million-pixel budget.
-- Audio uses one worker, at most 16 simultaneous voices, and a bounded request queue. Missing audio devices leave the game silent.
-- Maps retain the seeded PCG stream used before the engine migration, preserving existing seeds and bookmarks.
-
-## Development checks
-
-```sh
-cargo test --release -j 1 -- --test-threads=1
-cargo check --target x86_64-pc-windows-gnu --all-targets -j 1  # optional cross-platform check
-python3 scripts/audit-ui.py                               # requires Pillow
-python3 scripts/audit-runtime.py                          # Linux: bounded, isolated frame-time checks
-python3 scripts/audit-runtime.py --native                 # opens three short test windows
-python3 scripts/audit-audio.py                            # Linux: requires pactl + parec
-python3 scripts/pack-assets.py                            # only after changing font/icon sources
-```
-
-Version 1.4.3 passed 43 automated tests and 36 screenshot scenarios on Linux. The Windows backend passed cross-compilation checks; Windows runtime testing is still outstanding.
-
-The UI audit uses temporary settings, bounded headless runs, and reproducible seeds. It captures light/dark menus and battles, team setup, accessibility, dialogs, join/replay screens, and small/wide/high-resolution layouts; it verifies native screenshot dimensions, mouse and keyboard theme changes on the input frame, unchanged pastel map art when switching themes, white non-target territories and visible button hover fills in both themes, bookmark states and uniform star fills, and upright GIFs. It also checks replay battle results against the team-card area and verifies cached menu refresh after seed and color-assist changes. Each scene uses separate temporary preferences.
-
-The runtime audit reports update/draw, layer copies, filtering, and presentation work separately from the 60/15 Hz cap, and measures CPU time. It covers idle screens, menu hover changes, selected-map animation, and battles at multiple resolutions. Its results depend on background load and power settings; the cap does not guarantee 60 fps on every device. The audio audit routes only its test game's output into a temporary sink and verifies two short effects separated by silence, then removes the sink. It does not record a microphone or change the default audio output. This regression check fails against 1.4.0 and passes against 1.4.1.
-
-In the Linux native battle check (120 frames with background CPU load), 1.4.1 used **2.31 seconds of CPU time**, compared with **6.65 seconds** for 1.4.0. Wall time fell from 6.85 to 2.82 seconds. These are measurements from one device, rather than a guaranteed frame rate.
-
-In the 1.4.3 optimization checks (60 headless frames on this device), mean menu hover work fell from about **84 to 12 ms**, selected-map animation from **14 to 4 ms**, and battle work from **20 to 6 ms**. The subsequent native-window audit (120 frames each) measured mean work of **14.3 ms for menu hover** and **10.8 ms for battle**, with CPU time of 1.76 s and 1.38 s respectively. These results include background load and should not be treated as a frame-rate guarantee.
-
-For a bounded desktop smoke test:
-
-```sh
-DW_FRAME_LIMIT=120 DW_CAPTURE=/tmp/dice-wars.png ./target/release/dicegame
-```
-
-The game closes automatically after the specified frame count. `DW_HEADLESS=1` captures using the same renderer without opening a window; `DW_SIZE=1200x820` selects a headless viewport.
+MIT, see [LICENSE](LICENSE). The interface font is DejaVu Sans Bold; see
+[assets/FONT-LICENSE.txt](assets/FONT-LICENSE.txt).

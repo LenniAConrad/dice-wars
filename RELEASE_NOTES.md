@@ -1,3 +1,17 @@
+# Dice Wars v1.5.0
+
+Interface, sound, LAN play and installer release.
+
+- **Installers**: `install-linux.sh`, `install-macos.sh` and `install-windows.cmd` set up everything a fresh machine needs to build and install the game.
+- **macOS**: a native Cocoa/AudioQueue backend; releases include a universal app.
+- **LAN games**: open host lobbies appear in every JOIN GAME screen on the same network and join with one click.
+- **Interface**: lighter outlines and soft shadows, battles outlined on the map with a clear arrow, captured land fading into the winner's color, turn toasts, screen fades, a game-over card with REPLAY / SAVE GIF / NEW MAP / MENU, and a confirm dialog whose highlighted choice keeps playing.
+- **Sound**: no more clicks at the end of effects, warmer tones, varied dice rolls that land with the dice on screen, results from your point of view (captured, lost, defended, repelled), quieter fights between bots, a half-volume setting, a soft limiter, and smooth Windows output.
+- **Performance**: full board redraws are about three times faster, removing most dropped frames while bots play.
+- **Testing**: every check runs headlessly through `scripts/check.sh`, also in CI.
+
+---
+
 # Dice Wars v1.4.0
 
 Native engine and interface refinement release.
