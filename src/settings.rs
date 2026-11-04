@@ -13,7 +13,7 @@ pub(crate) fn replay_file(name: &str) -> String {
     dir.join(name).to_string_lossy().into_owned()
 }
 
-fn data_file(name: &str) -> String {
+pub(crate) fn data_file(name: &str) -> String {
     let base = if cfg!(windows) {
         std::env::var("APPDATA").ok().map(std::path::PathBuf::from)
     } else if cfg!(target_os = "macos") {
@@ -64,7 +64,7 @@ pub(crate) fn save_bookmarks(b: &[(u64, usize)]) {
 // Write a sibling temp file and rename it over the target, so a crash or
 // power loss mid-write never leaves a truncated file. The rename replaces
 // the old file on every platform (MoveFileEx with REPLACE_EXISTING on Windows).
-fn write_atomic(path: &str, contents: &str) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &str, contents: &str) -> std::io::Result<()> {
     let tmp = format!("{path}.{}.tmp", std::process::id());
     let result = std::fs::write(&tmp, contents).and_then(|_| std::fs::rename(&tmp, path));
     if result.is_err() {
@@ -83,19 +83,20 @@ pub(crate) struct Settings {
     pub(crate) color: usize,     // which palette color the human plays as
     pub(crate) speed: f32,       // game speed multiplier (1x / 2x / 4x)
     pub(crate) reduced_motion: bool,
-    pub(crate) theme: usize,      // index into theme::THEMES
-    pub(crate) teams: bool,       // team mode on/off
-    pub(crate) team_count: usize, // number of teams (2..=MAX_TEAMS)
-    pub(crate) team_hvb: bool,    // humans vs bots
-    pub(crate) team_mine: usize,  // which team the local player picked
-    pub(crate) team_bridge: bool, // islands count as connected through teammate land
-    pub(crate) team_ff: bool,     // teammates may attack each other
-    pub(crate) name: String,      // display name in multiplayer lobbies
-    pub(crate) last_addr: String, // last host address joined, prefilled next time
-    pub(crate) players: usize,    // last chosen player count
-    pub(crate) difficulty: usize, // last chosen difficulty index
-    pub(crate) played: [u32; 3],  // finished solo games per difficulty
-    pub(crate) won: [u32; 3],     // of those, the ones you won
+    pub(crate) theme: usize,        // index into theme::THEMES
+    pub(crate) teams: bool,         // team mode on/off
+    pub(crate) team_count: usize,   // number of teams (2..=MAX_TEAMS)
+    pub(crate) team_hvb: bool,      // humans vs bots
+    pub(crate) team_mine: usize,    // which team the local player picked
+    pub(crate) team_bridge: bool,   // islands count as connected through teammate land
+    pub(crate) team_ff: bool,       // teammates may attack each other
+    pub(crate) name: String,        // display name in multiplayer lobbies
+    pub(crate) last_addr: String,   // last host address joined, prefilled next time
+    pub(crate) players: usize,      // last chosen player count
+    pub(crate) difficulty: usize,   // last chosen difficulty index
+    pub(crate) played: [u32; 3],    // finished solo games per difficulty
+    pub(crate) won: [u32; 3],       // of those, the ones you won
+    pub(crate) tutorial_done: bool, // the first-game tips were finished or skipped
 }
 
 // lobby names travel in space/comma-separated messages: keep them plain
@@ -153,6 +154,7 @@ fn parse_settings(txt: &str) -> Settings {
         difficulty: 1,
         played: [0; 3],
         won: [0; 3],
+        tutorial_done: false,
     };
     let has_theme = txt.lines().any(|l| l.starts_with("theme "));
     for l in txt.lines() {
@@ -190,6 +192,7 @@ fn parse_settings(txt: &str) -> Settings {
                 s.players = v.parse::<usize>().unwrap_or(6).clamp(2, MAX_PLAYERS)
             }
             (Some("difficulty"), Some(v)) => s.difficulty = v.parse::<usize>().unwrap_or(1).min(2),
+            (Some("tutorial"), Some(v)) => s.tutorial_done = v != "0",
             // record p_easy w_easy p_normal w_normal p_hard w_hard
             (Some("record"), Some(first)) => {
                 let n: Vec<u32> = std::iter::once(first)
@@ -204,6 +207,10 @@ fn parse_settings(txt: &str) -> Settings {
             _ => {}
         }
     }
+    // players from before the tips existed have finished games: no tips
+    if !txt.lines().any(|l| l.starts_with("tutorial ")) {
+        s.tutorial_done = s.games_played() > 0;
+    }
     s
 }
 
@@ -211,7 +218,7 @@ pub(crate) fn save_settings(s: &Settings) {
     let _ = write_atomic(
         &data_file(SETTINGS_FILE),
         &format!(
-            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\nplayers {}\ndifficulty {}\nreducedmotion {}\nquiet {}\ntheme {}\nrecord {} {} {} {} {} {}\n",
+            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\nplayers {}\ndifficulty {}\nreducedmotion {}\nquiet {}\ntheme {}\nrecord {} {} {} {} {} {}\ntutorial {}\n",
             s.chances as u8,
             s.muted as u8,
             s.colorblind as u8,
@@ -236,7 +243,8 @@ pub(crate) fn save_settings(s: &Settings) {
             s.played[1],
             s.won[1],
             s.played[2],
-            s.won[2]
+            s.won[2],
+            s.tutorial_done as u8
         ),
     );
 }

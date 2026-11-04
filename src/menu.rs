@@ -15,6 +15,7 @@ use crate::game::{
 };
 use crate::lobby::JoinUi;
 use crate::net::{lobby_layout, net_port, HostNet, LobbyPicks};
+use crate::savegame::SaveInfo;
 use crate::settings::{load_bookmarks, save_bookmarks, save_settings, Settings};
 use crate::setup::{
     draw_color_row, draw_preview, draw_rule_rows, draw_seed_row, draw_team_block, r_color, r_diff,
@@ -38,6 +39,7 @@ use crate::{App, Screen};
 enum MenuAction {
     None,
     Start,
+    Continue,
     Host,
     Join,
 }
@@ -56,6 +58,7 @@ pub(crate) struct Menu {
     pub(crate) bm_scroll: f32,               // bookmark list scroll offset, in rows
     pub(crate) host_err: f32,                // countdown showing the hosting-failed message
     pub(crate) show_rules: bool,             // info card shows the rules instead of your record
+    pub(crate) saved: Option<SaveInfo>,      // an unfinished solo game to continue
 }
 
 impl Menu {
@@ -78,6 +81,7 @@ impl Menu {
             bm_scroll: 0.0,
             host_err: 0.0,
             show_rules: false,
+            saved: crate::savegame::info(),
         }
     }
 
@@ -126,6 +130,11 @@ fn team_origin() -> Vec2 {
 fn r_info_toggle() -> Rect {
     let c = r_info_card();
     Rect::new(c.x + c.w - 86.0, c.y + 12.0, 72.0, 28.0)
+}
+
+// the continue bar between your color and the start button
+fn r_continue() -> Rect {
+    Rect::new(LEFT_X, 654.0, COL_END - LEFT_X, 36.0)
 }
 
 fn r_saved_card() -> Rect {
@@ -362,6 +371,9 @@ fn update_menu(
             return MenuAction::None;
         }
     }
+    if menu.saved.is_some() && r_continue().contains(m) {
+        return MenuAction::Continue;
+    }
     if r_primary().contains(m) {
         return MenuAction::Start;
     }
@@ -590,6 +602,9 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     };
     draw_star(rb.x + rb.w * 0.5, rb.y + rb.h * 0.5, 13.0, scol);
 
+    if let Some(info) = &menu.saved {
+        draw_continue(ui, info, m);
+    }
     primary_button(ui, r_primary(), "START GAME", 28.0, m, true);
     secondary_button(ui, r_secondary_half(0), "HOST GAME", 14.0, m);
     secondary_button(ui, r_secondary_half(1), "JOIN GAME", 14.0, m);
@@ -625,6 +640,33 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
 
     // the same toolbar as in-game: sound and settings
     draw_icon_bar(settings, ui, m);
+}
+
+fn draw_continue(ui: &Ui, info: &SaveInfo, m: Vec2) {
+    let r = r_continue();
+    menu_button(r, SRF(), ACCENT(), r.contains(m));
+    let dy = if r.contains(m) && is_mouse_button_down(MouseButton::Left) {
+        1.0
+    } else {
+        0.0
+    };
+    // a play triangle, then what you would come back to
+    let (cx, cy) = (r.x + 22.0, r.y + r.h * 0.5 + dy);
+    draw_triangle(
+        vec2(cx - 4.0, cy - 6.0),
+        vec2(cx - 4.0, cy + 6.0),
+        vec2(cx + 6.0, cy),
+        ACCENT(),
+    );
+    ui.text("CONTINUE", r.x + 38.0, r.y + 23.0 + dy, 14.0, INK());
+    let diff = ["Easy", "Normal", "Hard"][info.difficulty.min(2)];
+    ui.body(
+        &format!("Round {} · {} players · {}", info.round, info.players, diff),
+        r.x + 130.0,
+        r.y + 23.0 + dy,
+        13.0,
+        with_alpha(INK(), 0.72),
+    );
 }
 
 // card frames and text that only change with settings; drawn into the cached
@@ -836,6 +878,18 @@ impl App {
             self.leave_network(); // nothing from an earlier network game carries over
         }
         match action {
+            MenuAction::Continue => match crate::savegame::load() {
+                Some((g, _color)) => {
+                    self.game = Some(g);
+                    self.screen = Screen::Play;
+                    self.snd_queue.push(Snd::Click);
+                }
+                None => {
+                    // unreadable: forget it rather than offering it again
+                    crate::savegame::clear();
+                    self.menu.saved = None;
+                }
+            },
             MenuAction::Start => {
                 self.game = Some(gen_map_local(
                     self.menu.seed,

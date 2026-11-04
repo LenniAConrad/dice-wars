@@ -29,6 +29,7 @@ use crate::ui::{
 mod ai;
 mod board;
 mod clipboard;
+mod coach;
 mod dice;
 mod draw_game;
 mod game;
@@ -39,9 +40,11 @@ mod menu;
 mod net;
 mod play;
 mod replay;
+mod savegame;
 mod settings;
 mod setup;
 mod sound;
+mod summary;
 mod svg;
 #[cfg(test)]
 mod testutil;
@@ -80,6 +83,11 @@ pub(crate) struct App {
     pub(crate) awaiting: HashMap<usize, f32>, // game seat -> grace timer
     pub(crate) copied_t: f32,
     pub(crate) confirm: Option<Confirm>,
+    // the finished game's summary, keyed by (seed, events) so it is built once
+    pub(crate) summary: Option<((u64, usize), summary::Summary)>,
+    // what was last written to the save file: (seed, events, current player)
+    saved_mark: Option<(u64, usize, usize)>,
+    pub(crate) coach: coach::Coach,
     pub(crate) snd_queue: Vec<Snd>,
     pub(crate) autoend: bool,
     pub(crate) test_host_auto: usize,
@@ -275,7 +283,21 @@ impl App {
             }
             Ok("over") => {
                 if let Some(g) = &mut game {
-                    // the longest result text, so the audit shows it is never cut off
+                    // play some real turns first so the summary has a story
+                    // (the human seat passes), then end on the longest result
+                    // text, so the audit shows it is never cut off
+                    for _ in 0..60_000 {
+                        if g.current == 0 && g.battle.is_none() && g.over.is_none() {
+                            g.end_turn();
+                        }
+                        g.update(0.05);
+                        if g.over.is_some() || g.events.len() > 400 {
+                            break;
+                        }
+                    }
+                    g.snd.clear();
+                    g.floats.clear();
+                    g.battle = None;
                     g.over = Some("Buttercup conquered the whole map!".to_string());
                     g.over_t = 1.0;
                     g.banner_t = 0.0;
@@ -349,6 +371,9 @@ impl App {
             awaiting,
             copied_t,
             confirm,
+            summary: None,
+            saved_mark: None,
+            coach: coach::Coach::default(),
             snd_queue,
             autoend,
             test_host_auto,
@@ -379,6 +404,38 @@ impl App {
             self.settings.won[d] += 1;
         }
         save_settings(&self.settings);
+    }
+
+    /// Keeps the save file in step with an unfinished solo game (after every
+    /// move, between battles), and removes it once the game is decided.
+    fn autosave(&mut self) {
+        let Some(g) = self.game.as_ref() else { return };
+        if self.host.is_some() || self.guest.is_some() || self.autoend {
+            return;
+        }
+        if g.over.is_some() {
+            if g.humans == 1 && self.saved_mark.is_some() {
+                savegame::clear();
+                self.saved_mark = None;
+            }
+            return;
+        }
+        let mark = (g.seed, g.events.len(), g.current);
+        if g.battle.is_none() && savegame::saveable(g) && self.saved_mark != Some(mark) {
+            savegame::save(g, crate::theme::color_map(g.my_seat));
+            self.saved_mark = Some(mark);
+        }
+    }
+
+    /// Builds the end-of-game summary once per finished game.
+    fn refresh_summary(&mut self) {
+        let Some(g) = self.game.as_ref().filter(|g| g.over.is_some()) else {
+            return;
+        };
+        let key = (g.seed, g.events.len());
+        if self.summary.as_ref().is_none_or(|(k, _)| *k != key) {
+            self.summary = Some((key, summary::Summary::of(g)));
+        }
     }
 
     pub(crate) fn leave_network(&mut self) {
@@ -454,6 +511,9 @@ impl App {
             }
             return engine::next_frame();
         }
+        if matches!(self.screen, Screen::Menu) && self.previous_screen != Some(Screen::Menu) {
+            self.menu.saved = savegame::info();
+        }
         self.previous_screen = Some(self.screen);
 
         if matches!(self.screen, Screen::JoinLobby) && self.guest.is_none() {
@@ -488,10 +548,16 @@ impl App {
             Screen::Menu => self.run_menu(dt),
             Screen::Play => {
                 let was_over = self.game.as_ref().is_some_and(|g| g.over.is_some());
+                self.coach_input();
                 self.run_play(dt);
+                if matches!(self.screen, Screen::Play) {
+                    self.coach_draw();
+                }
                 if !was_over {
                     self.record_result();
                 }
+                self.refresh_summary();
+                self.autosave();
             }
             Screen::HostLobby => self.run_host_lobby(dt),
             Screen::JoinLobby => self.run_join_lobby(dt),

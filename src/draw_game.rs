@@ -15,6 +15,7 @@ use crate::play::{
     CONFIRM_W, CONFIRM_Y,
 };
 use crate::settings::Settings;
+use crate::summary::{draw_chart, draw_stats, Summary};
 use crate::theme::{
     accent_ink, color_map, colorblind_mode, dark_mode, darken, lighten, map_fill, mix, on_color,
     palette, theme, theme_index, with_alpha, ACCENT, BG, BORDER, CARD_EDGE, INK, INK_ON_FILL,
@@ -872,7 +873,7 @@ fn draw_banner(game: &Game, ui: &Ui) {
     );
 }
 
-fn draw_over(game: &Game, ui: &Ui) {
+fn draw_over(game: &Game, ui: &Ui, summary: Option<&Summary>) {
     let Some(msg) = &game.over else { return };
     let a = ease_out(game.over_t);
     // A light scrim keeps the final map readable behind the result card.
@@ -916,10 +917,21 @@ fn draw_over(game: &Game, ui: &Ui) {
     ui.body_centered(
         "R  new map    ·    ESC  menu",
         WIN_W * 0.5,
-        card.y + 104.0,
+        card.y + 100.0,
         13.0,
         with_alpha(INK(), 0.55 * a),
     );
+    if let Some(s) = summary {
+        let inner = Rect::new(card.x + 32.0, card.y + 120.0, card.w - 64.0, 170.0);
+        draw_chart(s, ui, inner, a);
+        draw_stats(
+            s,
+            game,
+            ui,
+            Rect::new(inner.x, inner.y + inner.h + 12.0, inner.w, 62.0),
+            a,
+        );
+    }
     let m = mouse_virtual();
     for (i, label) in ["REPLAY", "SAVE GIF", "NEW MAP", "MENU"]
         .into_iter()
@@ -961,7 +973,7 @@ fn draw_over(game: &Game, ui: &Ui) {
     }
 }
 
-pub(crate) fn draw_confirm(kind: Confirm, ui: &Ui, can_new: bool) {
+pub(crate) fn draw_confirm(kind: Confirm, ui: &Ui, can_new: bool, resumable: bool) {
     draw_rectangle(0.0, 0.0, WIN_W, WIN_H, with_alpha(SRF(), 0.6));
     let (w, h) = (CONFIRM_W, 214.0);
     let x = (WIN_W - w) * 0.5;
@@ -970,6 +982,10 @@ pub(crate) fn draw_confirm(kind: Confirm, ui: &Ui, can_new: bool) {
     draw_round_frame(x, y, w, h, 22.0, 2.0, SRF(), CARD_EDGE());
     let (title, body) = match kind {
         Confirm::NewMap => ("Start a new map?", "The current game will be lost."),
+        Confirm::Menu if resumable => (
+            "Paused",
+            "Leave and continue later from the menu, or start a new map.",
+        ),
         Confirm::Menu if can_new => ("Paused", "Leaving or starting a new map ends this game."),
         Confirm::Menu => ("Paused", "Leaving ends this game for you."),
     };
@@ -1012,7 +1028,7 @@ pub(crate) fn draw_confirm(kind: Confirm, ui: &Ui, can_new: bool) {
     );
 }
 
-pub(crate) fn draw_game(game: &Game, ui: &Ui, settings: &Settings) {
+pub(crate) fn draw_game(game: &Game, ui: &Ui, settings: &Settings, summary: Option<&Summary>) {
     draw_board(game, ui, settings.chances);
     draw_icon_bar(settings, ui, mouse_virtual());
     if game.over.is_none() {
@@ -1022,7 +1038,7 @@ pub(crate) fn draw_game(game: &Game, ui: &Ui, settings: &Settings) {
     // Rolls share the status lane; controls and player cards stay visible.
     draw_battle_overlay(game, ui);
     draw_banner(game, ui);
-    draw_over(game, ui);
+    draw_over(game, ui, summary);
 }
 
 // Both rolls live in the existing status lane, clear of the map and controls.

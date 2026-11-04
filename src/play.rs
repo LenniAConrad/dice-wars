@@ -37,14 +37,14 @@ pub(crate) fn r_btn_menu() -> Rect {
 
 // The game-over card and its buttons share one layout; `rise` is the entry
 // animation offset, so drawing and hit-testing can never drift apart.
-const OVER_W: f32 = 560.0;
+const OVER_W: f32 = 640.0;
 
-const OVER_H: f32 = 200.0;
+const OVER_H: f32 = 446.0;
 
 pub(crate) fn r_over_card(rise: f32) -> Rect {
     Rect::new(
         (WIN_W - OVER_W) * 0.5,
-        (WIN_H - OVER_H) * 0.5 - 40.0 + rise,
+        (WIN_H - OVER_H) * 0.5 - 30.0 + rise,
         OVER_W,
         OVER_H,
     )
@@ -54,7 +54,7 @@ pub(crate) fn r_over_button(i: usize, rise: f32) -> Rect {
     let card = r_over_card(rise);
     let (w, gap) = (120.0, 10.0);
     let x0 = card.x + (card.w - (w * 4.0 + gap * 3.0)) * 0.5;
-    Rect::new(x0 + i as f32 * (w + gap), card.y + 128.0, w, 46.0)
+    Rect::new(x0 + i as f32 * (w + gap), card.y + card.h - 70.0, w, 46.0)
 }
 
 fn r_over_replay() -> Rect {
@@ -455,7 +455,12 @@ impl App {
                 }
             }
         }
-        draw_game(g, &self.ui, &self.settings);
+        let summary = self
+            .summary
+            .as_ref()
+            .filter(|(k, _)| *k == (g.seed, g.events.len()))
+            .map(|(_, s)| s);
+        draw_game(g, &self.ui, &self.settings, summary);
         if let Some(gn) = &self.guest {
             if (gn.rec_rx.is_some() || gn.rec_failed) && g.over.is_none() {
                 let txt = if gn.rec_failed {
@@ -478,7 +483,8 @@ impl App {
             }
         }
         if let Some(kind) = self.confirm {
-            draw_confirm(kind, &self.ui, self.guest.is_none());
+            let solo = self.host.is_none() && self.guest.is_none();
+            draw_confirm(kind, &self.ui, self.guest.is_none(), solo);
         }
         self.snd_queue.append(&mut g.snd);
         if go_menu {
