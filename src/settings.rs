@@ -298,7 +298,12 @@ mod tests {
         save_settings(&s);
         save_settings(&s); // replacing an existing file works too
         let l = load_settings();
-        let leftovers: Vec<_> = std::fs::read_dir(dir.join("dice-wars"))
+        let data = if cfg!(target_os = "macos") {
+            dir.join("Library/Application Support/dice-wars")
+        } else {
+            dir.join("dice-wars")
+        };
+        let leftovers: Vec<_> = std::fs::read_dir(&data)
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())

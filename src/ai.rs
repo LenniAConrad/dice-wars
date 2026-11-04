@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn saturated_bot_never_stalls() {
-        let _g = GLOBALS.lock().unwrap();
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         let mut g = mk_game(&[1, 0], &[(0, 1)], 2, TeamCfg::default());
         g.current = 1;
         g.personas[1] = Persona::Defensive; // the most hesitant temperament
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn hard_attack_choices_do_not_depend_on_human_seats() {
-        let _g = GLOBALS.lock().unwrap();
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         let mut g = mk_game(&[2, 1, 0], &[(0, 1), (0, 2)], 3, TeamCfg::default());
         g.current = 2;
         g.difficulty = Difficulty::Hard;
@@ -240,7 +240,7 @@ mod tests {
     // still be ground down — bots may never deadlock a saturated board
     #[test]
     fn bots_always_finish_the_game() {
-        let _g = GLOBALS.lock().unwrap();
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         apply_local_colors(0);
         for difficulty in [Difficulty::Normal, Difficulty::Hard] {
             let mut g = gen_map(31337, 4, 1, difficulty, TeamCfg::default());

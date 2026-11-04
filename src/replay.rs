@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn replay_never_schedules_new_ai_actions() {
-        let _guard = GLOBALS.lock().unwrap();
+        let _guard = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         let src = gen_map(31337, 4, 1, Difficulty::Normal, TeamCfg::default());
         let mut replay = Replay::new(&src, false);
         replay.g.current = 1;

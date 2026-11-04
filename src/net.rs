@@ -1077,7 +1077,7 @@ mod tests {
 
     #[test]
     fn guest_rejects_invalid_host_events_without_panicking() {
-        let _g = GLOBALS.lock().unwrap();
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         let game = || mk_game(&[0, 1], &[(0, 1)], 2, TeamCfg::default());
 
         let mut g = game();
@@ -1146,7 +1146,7 @@ mod tests {
 
     #[test]
     fn host_and_guest_complete_secure_handshake() {
-        let _g = GLOBALS.lock().unwrap();
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         let port = test_port();
 
         let host = HostNet::start(1).unwrap();
@@ -1212,7 +1212,7 @@ mod tests {
 
     #[test]
     fn a_replaced_lobby_survives_and_a_leaving_host_says_bye() {
-        let _g = GLOBALS.lock().unwrap();
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         test_port();
         let old = HostNet::start(1).unwrap();
         let guest = guest_connect("127.0.0.1", &old.code, "Old").unwrap();
@@ -1293,7 +1293,7 @@ mod tests {
 
     #[test]
     fn stale_tokens_cannot_rejoin_removed_or_skipped_seats() {
-        let _g = GLOBALS.lock().unwrap();
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         let port = test_port();
         let mut host = HostNet::start(3).unwrap();
         let tok = |c: char| c.to_string().repeat(32);

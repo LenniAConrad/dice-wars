@@ -1437,7 +1437,7 @@ mod tests {
 
     #[test]
     fn hostile_guest_setup_values_are_normalized() {
-        let _g = GLOBALS.lock().unwrap();
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         let teams = TeamCfg {
             on: true,
             count: usize::MAX,

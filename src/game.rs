@@ -903,7 +903,7 @@ mod tests {
 
     #[test]
     fn hard_reinforcements_follow_the_same_rules_as_humans() {
-        let _g = GLOBALS.lock().unwrap();
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         let game = |humans| {
             let mut g = mk_game(
                 &[1, 1, 1, 0],

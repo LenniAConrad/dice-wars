@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn labels_and_roll_pips_have_contrast_in_every_theme() {
-        let _guard = GLOBALS.lock().unwrap();
+        let _guard = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         let original_theme = theme_index();
         let original_accessible = colorblind_mode();
         apply_local_colors(0);
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn colorblind_palette_keeps_labels_and_die_pips_contrasting() {
-        let _g = GLOBALS.lock().unwrap();
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         let previous = COLORBLIND.swap(true, Ordering::Relaxed);
         apply_colors(&(0..MAX_PLAYERS).collect::<Vec<_>>());
         let luma = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;

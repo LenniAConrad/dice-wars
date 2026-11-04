@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn color_pick_swaps_position_not_the_map() {
-        let _g = GLOBALS.lock().unwrap();
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         apply_local_colors(0);
         let base = gen_map_local(777, 6, 1, Difficulty::Normal, TeamCfg::default());
         apply_local_colors(4); // pick a middle slot (sky)
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn generated_maps_keep_core_invariants() {
-        let _g = GLOBALS.lock().unwrap();
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
         apply_local_colors(0);
         for players in 2..=MAX_PLAYERS {
             for seed in [0, 1, 777, SEED_MOD - 1] {
