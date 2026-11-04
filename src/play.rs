@@ -1,11 +1,24 @@
 //! The in-game screen: layout, input and the per-frame update.
 
+use std::collections::HashMap;
+
 use dicegame::engine::prelude::*;
 
-use crate::board::{cell_pos, COLS, HEX, ROWS};
-use crate::game::Game;
+use crate::board::{
+    apply_position_swap, cell_pos, gen_map, gen_map_local, random_seed, COLS, HEX, ROWS,
+};
+use crate::draw_game::{draw_confirm, draw_game};
+use crate::game::{Difficulty, Game, RepEvent, MAX_PLAYERS};
+use crate::lobby::{build_guest_game, parse_start_tail};
+use crate::net::{
+    parse_csv_usize, parse_reinforcement_lands, reject_invalid_host_data, send_net_line,
+    spawn_reconnect, HostMsg, NET_MAX_PENDING_EVENTS, NET_MESSAGES_PER_FRAME,
+};
+use crate::replay::Replay;
 use crate::sound::Snd;
-use crate::ui::{mouse_virtual, r_icon, WIN_H, WIN_W};
+use crate::theme::{apply_colors, apply_local_colors, BORDER, INK, SRF};
+use crate::ui::{draw_round_frame, mouse_virtual, r_icon, WIN_H, WIN_W};
+use crate::{App, GuestNet, HostNet, Screen};
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Confirm {
@@ -47,19 +60,19 @@ pub(crate) fn r_over_button(i: usize, rise: f32) -> Rect {
     Rect::new(x0 + i as f32 * (w + gap), card.y + 128.0, w, 46.0)
 }
 
-pub(crate) fn r_over_replay() -> Rect {
+fn r_over_replay() -> Rect {
     r_over_button(0, 0.0)
 }
 
-pub(crate) fn r_over_gif() -> Rect {
+fn r_over_gif() -> Rect {
     r_over_button(1, 0.0)
 }
 
-pub(crate) fn r_over_new() -> Rect {
+fn r_over_new() -> Rect {
     r_over_button(2, 0.0)
 }
 
-pub(crate) fn r_over_menu() -> Rect {
+fn r_over_menu() -> Rect {
     r_over_button(3, 0.0)
 }
 
@@ -102,7 +115,7 @@ fn keyboard_neighbor(game: &Game, from: usize, direction: Vec2) -> usize {
         .unwrap_or(from)
 }
 
-pub(crate) fn handle_input(game: &mut Game, mut net_out: Option<&mut Vec<String>>) {
+fn handle_input(game: &mut Game, mut net_out: Option<&mut Vec<String>>) {
     let initial = || {
         game.terrs
             .iter()
@@ -212,6 +225,522 @@ pub(crate) fn handle_input(game: &mut Game, mut net_out: Option<&mut Vec<String>
                 game.snd.push(Snd::Select);
             } else {
                 game.set_hint("That land has only 1 die — it cannot attack.");
+            }
+        }
+    }
+}
+
+impl App {
+    // One frame of a match: network traffic, input, drawing.
+    pub(crate) fn run_play(&mut self, dt: f32) {
+        let g = self.game.as_mut().unwrap();
+        g.update(dt * self.settings.speed);
+        g.tick_turn_timer(dt);
+        if let Some(gn) = self.guest.as_mut() {
+            if gn.rec_failed && is_mouse_button_pressed(MouseButton::Left) {
+                gn.rec_failed = false;
+                gn.rec_rx = Some(spawn_reconnect(
+                    gn.addr.clone(),
+                    gn.code.clone(),
+                    gn.token.clone(),
+                ));
+                g.push_log("Reconnecting...".to_string());
+            }
+        }
+        let mut go_menu = false;
+        let click = is_mouse_button_pressed(MouseButton::Left);
+
+        if self.autoend && g.current == 0 && g.battle.is_none() && g.over.is_none() {
+            g.end_turn(); // test hook: the host seat passes instantly
+        }
+        // ---- heartbeats: keep idle connections alive through NATs
+        self.net_ping_t += dt;
+        let do_ping = self.net_ping_t >= 2.0;
+        if do_ping {
+            self.net_ping_t = 0.0;
+        }
+        // ---- hosting: apply guest intents, broadcast new events
+        if let Some(h) = self.host.as_mut() {
+            host_tick(
+                h,
+                g,
+                &mut self.awaiting,
+                self.menu.seed,
+                self.menu.difficulty,
+                dt,
+                do_ping,
+            );
+        }
+
+        // ---- joined: apply the host's events, queue our own intents
+        if let Some(gn) = self.guest.as_mut() {
+            guest_tick(gn, g, do_ping);
+        }
+        if let Some(kind) = self.confirm {
+            // modal: destructive actions need explicit confirmation
+            if is_key_pressed(KeyCode::Escape) || is_key_pressed(KeyCode::Enter) {
+                self.confirm = None;
+            } else if click {
+                let m = mouse_virtual();
+                if r_confirm_yes().contains(m) {
+                    self.confirm = None;
+                    match kind {
+                        Confirm::NewMap => {
+                            self.menu.seed = random_seed();
+                            if let Some(h) = self.host.as_mut() {
+                                // rematch: everyone still connected moves
+                                // into the fresh round
+                                let cfg = self.settings.team_cfg();
+                                let (humans, tv, cv, nm) = h.start_game(
+                                    self.menu.seed,
+                                    self.menu.players,
+                                    self.menu.difficulty,
+                                    cfg,
+                                    &self.lobby_picks,
+                                    self.settings.color,
+                                    &self.settings.name,
+                                );
+                                let mut ng = gen_map(
+                                    self.menu.seed,
+                                    self.menu.players,
+                                    humans,
+                                    self.menu.difficulty,
+                                    cfg,
+                                );
+                                ng.team = tv;
+                                ng.names = nm;
+                                apply_colors(&cv);
+                                if ng.humans > 1 {
+                                    apply_position_swap(&mut ng, &cv);
+                                }
+                                h.sent = 0;
+                                self.awaiting.clear();
+                                *g = ng;
+                            } else {
+                                *g = gen_map_local(
+                                    self.menu.seed,
+                                    self.menu.players,
+                                    1,
+                                    self.menu.difficulty,
+                                    self.settings.team_cfg(),
+                                );
+                            }
+                        }
+                        Confirm::Menu => go_menu = true,
+                    }
+                } else if r_confirm_no().contains(m) {
+                    self.confirm = None;
+                }
+            }
+        } else if click && g.over.is_none() && r_btn_menu().contains(mouse_virtual()) {
+            self.confirm = Some(Confirm::Menu);
+        } else if click
+            && g.over.is_none()
+            && self.guest.is_none()
+            && r_btn_new().contains(mouse_virtual())
+        {
+            self.confirm = Some(Confirm::NewMap);
+        } else if is_key_pressed(KeyCode::Escape) {
+            if g.selected.is_some() {
+                g.selected = None; // ESC first cancels the selection
+            } else if g.over.is_some() {
+                go_menu = true;
+            } else {
+                self.confirm = Some(Confirm::Menu);
+            }
+        } else if is_key_pressed(KeyCode::R) && self.guest.is_none() {
+            if g.over.is_some() && self.host.is_none() {
+                self.menu.seed = random_seed();
+                *g = gen_map_local(
+                    self.menu.seed,
+                    self.menu.players,
+                    1,
+                    self.menu.difficulty,
+                    self.settings.team_cfg(),
+                );
+            } else {
+                self.confirm = Some(Confirm::NewMap);
+            }
+        } else if g.over.is_some() {
+            if g.over_t >= 0.6 && click {
+                let m = mouse_virtual();
+                if r_over_replay().contains(m) {
+                    self.replay = Some(Replay::new(g, false));
+                    self.screen = Screen::Replay;
+                } else if r_over_gif().contains(m) {
+                    self.replay = Some(Replay::new(g, true));
+                    self.screen = Screen::Replay;
+                } else if r_over_new().contains(m) && self.guest.is_none() {
+                    if self.host.is_none() {
+                        self.menu.seed = random_seed();
+                        *g = gen_map_local(
+                            self.menu.seed,
+                            self.menu.players,
+                            1,
+                            self.menu.difficulty,
+                            self.settings.team_cfg(),
+                        );
+                    } else {
+                        self.confirm = Some(Confirm::NewMap);
+                    }
+                } else if r_over_menu().contains(m) {
+                    go_menu = true;
+                }
+            }
+        } else if g.battle.is_none() && g.over.is_none() {
+            let my_turn = if let Some(gn) = &self.guest {
+                g.current == gn.seat && gn.rec_rx.is_none() && !gn.catching_up
+            } else if self.host.is_some() {
+                g.current == 0
+            } else {
+                g.current < g.humans
+            };
+            if my_turn {
+                if self.guest.is_some() {
+                    let mut outbox: Vec<String> = Vec::new();
+                    handle_input(g, Some(&mut outbox));
+                    if let Some(gn) = self.guest.as_mut() {
+                        for l in outbox {
+                            send_net_line(&mut gn.stream, &l);
+                        }
+                    }
+                } else {
+                    handle_input(g, None);
+                }
+            }
+        }
+        draw_game(g, &self.ui, &self.settings);
+        if let Some(gn) = &self.guest {
+            if (gn.rec_rx.is_some() || gn.rec_failed) && g.over.is_none() {
+                let txt = if gn.rec_failed {
+                    "Could not reconnect — click anywhere to retry"
+                } else {
+                    "Connection lost — reconnecting..."
+                };
+                let w = self.ui.width(txt, 22.0) + 56.0;
+                draw_round_frame(
+                    (WIN_W - w) * 0.5,
+                    270.0,
+                    w,
+                    56.0,
+                    16.0,
+                    2.5,
+                    SRF(),
+                    BORDER(),
+                );
+                self.ui.text_centered(txt, WIN_W * 0.5, 306.0, 22.0, INK());
+            }
+        }
+        if let Some(kind) = self.confirm {
+            draw_confirm(kind, &self.ui);
+        }
+        self.snd_queue.append(&mut g.snd);
+        if go_menu {
+            self.confirm = None;
+            self.host = None;
+            self.guest = None;
+            self.awaiting.clear();
+            apply_local_colors(self.settings.color);
+            self.screen = Screen::Menu;
+            self.menu.regen();
+        }
+    }
+}
+
+// Host side of a match: apply the guests' intents, hold seats of guests who
+// dropped out (a bot takes over when the grace timer runs out) and broadcast
+// the resulting events.
+fn host_tick(
+    h: &mut HostNet,
+    g: &mut Game,
+    awaiting: &mut HashMap<usize, f32>,
+    seed: u64,
+    difficulty: Difficulty,
+    dt: f32,
+    do_ping: bool,
+) {
+    if do_ping {
+        h.broadcast("PING");
+    }
+    for _ in 0..NET_MESSAGES_PER_FRAME {
+        let Ok(msg) = h.rx.try_recv() else { break };
+        match msg {
+            HostMsg::Intent(lobby_seat, line) => {
+                let Some(&seat) = h.remap.get(&lobby_seat) else {
+                    continue;
+                };
+                if g.battle.is_some() || g.over.is_some() || g.current != seat {
+                    continue;
+                }
+                let mut it = line.split_whitespace();
+                match it.next() {
+                    Some("ATTACK") => {
+                        let a: Option<usize> = it.next().and_then(|v| v.parse().ok());
+                        let d: Option<usize> = it.next().and_then(|v| v.parse().ok());
+                        if let (Some(a), Some(d)) = (a, d) {
+                            if a < g.terrs.len()
+                                && d < g.terrs.len()
+                                && g.terrs[a].owner == seat
+                                && g.terrs[a].dice > 1
+                                && g.can_target(seat, g.terrs[d].owner)
+                                && g.terrs[a].neighbors.contains(&d)
+                            {
+                                g.begin_attack(a, d);
+                            }
+                        }
+                    }
+                    Some("END") => g.end_turn(),
+                    _ => {}
+                }
+            }
+            HostMsg::Left(lobby_seat) => {
+                let Some(&seat) = h.remap.get(&lobby_seat) else {
+                    continue;
+                };
+                if g.over.is_none() {
+                    // hold the seat and give them time to come back
+                    awaiting.insert(seat, 45.0);
+                    let n = g.name_of(seat);
+                    g.push_log(format!(
+                        "{} lost connection — waiting for them to reconnect...",
+                        n
+                    ));
+                }
+            }
+            HostMsg::Rejoined(lobby_seat) => {
+                if let Some(&seat) = h.remap.get(&lobby_seat).copied().as_ref() {
+                    if seat < g.absent.len() {
+                        g.absent[seat] = false;
+                    }
+                    awaiting.remove(&seat);
+                    let n = g.name_of(seat);
+                    g.push_log(format!("{} reconnected!", n));
+                    h.broadcast(&format!("ABSENT {} 0", seat));
+                }
+                h.send_resume(lobby_seat, g, seed, difficulty);
+            }
+            HostMsg::Joined(..) => {}
+        }
+    }
+    h.flush_events(g);
+    // grace timers: give up on seats that never came back
+    let mut expired: Vec<usize> = Vec::new();
+    for (seat, t) in awaiting.iter_mut() {
+        *t -= dt;
+        if *t <= 0.0 {
+            expired.push(*seat);
+        }
+    }
+    for seat in expired {
+        awaiting.remove(&seat);
+        if g.over.is_none() && seat < g.absent.len() {
+            g.absent[seat] = true;
+            let n = g.name_of(seat);
+            g.push_log(format!("{} left — a bot takes over.", n));
+            h.broadcast(&format!("ABSENT {} 1", seat));
+        }
+    }
+}
+
+// Guest side of a match: reconnect handling and the host's events, applied
+// one at a time (animated) or all at once while catching up.
+fn guest_tick(gn: &mut GuestNet, g: &mut Game, do_ping: bool) {
+    if do_ping && gn.rec_rx.is_none() {
+        send_net_line(&mut gn.stream, "PING");
+    }
+    // reconnect attempt finished?
+    if let Some(rr) = &gn.rec_rx {
+        if let Ok(result) = rr.try_recv() {
+            match result {
+                Ok((w, rx)) => {
+                    gn.stream = w;
+                    gn.rx = rx;
+                    gn.rec_rx = None;
+                    gn.catching_up = true;
+                    gn.pending.clear();
+                }
+                Err(_) => {
+                    gn.rec_rx = None;
+                    gn.rec_failed = true;
+                }
+            }
+        }
+    }
+    for _ in 0..NET_MESSAGES_PER_FRAME {
+        let Ok(l) = gn.rx.try_recv() else { break };
+        let mut it = l.split_whitespace();
+        match it.next() {
+            Some("ATK") => {
+                let v: Result<Vec<u32>, _> = it.map(str::parse).collect();
+                if let Ok(v) = v {
+                    if v.len() != 5 || v[4] > 1 {
+                        reject_invalid_host_data(g, gn);
+                        break;
+                    }
+                    if gn.pending.len() >= NET_MAX_PENDING_EVENTS {
+                        reject_invalid_host_data(g, gn);
+                        break;
+                    }
+                    gn.pending.push_back(RepEvent::Attack {
+                        a: v[0] as usize,
+                        d: v[1] as usize,
+                        ra: v[2],
+                        rd: v[3],
+                        captured: v[4] == 1,
+                    });
+                } else {
+                    reject_invalid_host_data(g, gn);
+                    break;
+                }
+            }
+            Some("REINF") => {
+                let player = it.next().and_then(|v| v.parse::<usize>().ok());
+                let lands = match it.next() {
+                    Some(csv) => parse_reinforcement_lands(csv),
+                    None => Some(Vec::new()),
+                };
+                if let (Some(player), Some(lands), None) = (player, lands, it.next()) {
+                    if gn.pending.len() >= NET_MAX_PENDING_EVENTS {
+                        reject_invalid_host_data(g, gn);
+                        break;
+                    }
+                    gn.pending.push_back(RepEvent::Reinforce { player, lands });
+                } else {
+                    reject_invalid_host_data(g, gn);
+                    break;
+                }
+            }
+            Some("RECONNECTED") => {
+                let lobby_seat = it.next().and_then(|v| v.parse::<usize>().ok());
+                let token = it.next();
+                if let (Some(_), Some(token), None) = (
+                    lobby_seat.filter(|&seat| seat > 0 && seat < MAX_PLAYERS),
+                    token.filter(|token| {
+                        token.len() == 32 && token.bytes().all(|b| b.is_ascii_hexdigit())
+                    }),
+                    it.next(),
+                ) {
+                    gn.token = token.to_string();
+                } else {
+                    reject_invalid_host_data(g, gn);
+                    break;
+                }
+            }
+            Some("PING") => {}
+            Some("RESUME") => {
+                // rebuild the match and fast-forward the backlog
+                let seed: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                let players: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
+                let humans: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
+                let di: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+                let seat: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(gn.seat);
+                let (colors, teams, team_v, names) = parse_start_tail(&mut it);
+                let absent: Vec<usize> = it.next().map(parse_csv_usize).unwrap_or_default();
+                let mut ng = build_guest_game(
+                    seed, players, humans, di, seat, &colors, teams, team_v, names,
+                );
+                gn.seat = ng.my_seat;
+                if absent.len() == ng.players {
+                    ng.absent = absent.iter().map(|&a| a == 1).collect();
+                }
+                *g = ng;
+                gn.catching_up = true;
+            }
+            Some("SYNCED") => {
+                gn.catching_up = false;
+                g.push_log("Reconnected!".to_string());
+            }
+            Some("START") => {
+                // the host started a fresh round with everyone in it
+                let seed: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                let players: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
+                let humans: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
+                let di: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+                let seat: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(gn.seat);
+                let (colors, teams, team_v, names) = parse_start_tail(&mut it);
+                gn.pending.clear();
+                gn.catching_up = false;
+                let ng = build_guest_game(
+                    seed, players, humans, di, seat, &colors, teams, team_v, names,
+                );
+                gn.seat = ng.my_seat;
+                *g = ng;
+                g.push_log("The host started a new round!".to_string());
+                g.snd.push(Snd::Turn);
+            }
+            Some("ABSENT") => {
+                let ps: Option<usize> = it.next().and_then(|v| v.parse().ok());
+                let gone = it.next() == Some("1");
+                if let Some(ps) = ps {
+                    if ps < g.absent.len() {
+                        g.absent[ps] = gone;
+                        let n = g.name_of(ps);
+                        g.push_log(if gone {
+                            format!("{} left — a bot takes over.", n)
+                        } else {
+                            format!("{} is back!", n)
+                        });
+                    }
+                }
+            }
+            Some("LOST") => {
+                // connection dropped: hold the game and retry quietly
+                if g.over.is_none() && gn.rec_rx.is_none() {
+                    gn.rec_rx = Some(spawn_reconnect(
+                        gn.addr.clone(),
+                        gn.code.clone(),
+                        gn.token.clone(),
+                    ));
+                    g.push_log("Connection lost — reconnecting...".to_string());
+                }
+            }
+            Some("OVER") | Some("BYE") => {
+                if g.over.is_none() {
+                    let rest: Vec<&str> = it.collect();
+                    g.over = Some(if rest.is_empty() {
+                        "Connection lost".to_string()
+                    } else {
+                        rest.join(" ")
+                    });
+                    g.banner_t = 0.0;
+                }
+            }
+            _ => {}
+        }
+        // while catching up, apply events instantly
+        if gn.catching_up {
+            while let Some(ev) = gn.pending.pop_front() {
+                let valid = match ev {
+                    RepEvent::Attack {
+                        a,
+                        d,
+                        ra,
+                        rd,
+                        captured,
+                    } => g.net_apply_attack_fast(a, d, ra, rd, captured),
+                    RepEvent::Reinforce { player, lands } => g.net_apply_reinforce(player, lands),
+                };
+                if !valid {
+                    reject_invalid_host_data(g, gn);
+                    break;
+                }
+            }
+        }
+    }
+    if g.battle.is_none() && g.over.is_none() {
+        if let Some(ev) = gn.pending.pop_front() {
+            let valid = match ev {
+                RepEvent::Attack {
+                    a,
+                    d,
+                    ra,
+                    rd,
+                    captured,
+                } => g.net_apply_attack(a, d, ra, rd, captured),
+                RepEvent::Reinforce { player, lands } => g.net_apply_reinforce(player, lands),
+            };
+            if !valid {
+                reject_invalid_host_data(g, gn);
             }
         }
     }

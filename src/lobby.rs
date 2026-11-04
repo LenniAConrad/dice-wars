@@ -4,26 +4,31 @@ use std::sync::atomic::Ordering;
 
 use dicegame::engine::prelude::*;
 
-use crate::board::{apply_position_swap, gen_map};
+use crate::board::{apply_position_swap, gen_map, random_seed};
+use crate::clipboard::{copy_to_clipboard, paste_from_clipboard, spawn_clipboard_paste};
 use crate::dice::draw_symbol;
 use crate::game::{
-    idx_diff, team_letter, Difficulty, Game, TeamCfg, HUMAN, MAX_PLAYERS, MAX_TEAMS, SEED_MOD,
+    diff_idx, idx_diff, team_letter, Difficulty, Game, TeamCfg, HUMAN, MAX_PLAYERS, MAX_TEAMS,
+    SEED_MOD,
 };
 use crate::lan::{LanScan, LAN_MAX_GAMES};
 use crate::menu::{draw_map_mini, Menu, COL_L, COL_R};
 use crate::net::{
-    lobby_layout, local_ip, net_port, parse_csv_usize, GuestNet, HostNet, LobbyPicks,
+    lobby_layout, lobby_line, local_ip, net_port, parse_csv_usize, send_net_line,
+    spawn_guest_connect, GuestNet, HostMsg, HostNet, LobbyPicks, NET_MESSAGES_PER_FRAME,
     NET_ROOM_CODE_LEN,
 };
-use crate::settings::{clean_name, Settings};
+use crate::settings::{clean_name, save_settings, Settings};
+use crate::sound::Snd;
 use crate::theme::{
-    apply_colors, base_color, darken, mix, on_color, palette, with_alpha, ACCENT, BG, BORDER,
-    CARD_EDGE, INK, INK_ON_FILL, REDUCED_MOTION, SRF,
+    apply_colors, apply_local_colors, base_color, darken, mix, on_color, palette, with_alpha,
+    ACCENT, BG, BORDER, CARD_EDGE, INK, INK_ON_FILL, REDUCED_MOTION, SRF,
 };
 use crate::ui::{
     control_fill, draw_icon_bar, draw_round_frame, draw_round_rect, draw_toggle, menu_button,
     mouse_virtual, seg_row, Ui, WIN_H, WIN_W,
 };
+use crate::{App, Screen};
 
 // the host's lobby snapshot, as far as this guest has seen it
 pub(crate) struct LobbyView {
@@ -57,7 +62,7 @@ pub(crate) struct JoinUi {
     pub(crate) paste_focus: usize,
 }
 
-pub(crate) fn apply_join_paste(join: &mut JoinUi, focus: usize, text: &str) {
+fn apply_join_paste(join: &mut JoinUi, focus: usize, text: &str) {
     if focus == 1 {
         join.code = text
             .chars()
@@ -74,7 +79,7 @@ pub(crate) fn apply_join_paste(join: &mut JoinUi, focus: usize, text: &str) {
     }
 }
 
-pub(crate) fn parse_names_csv(s: &str) -> Vec<String> {
+fn parse_names_csv(s: &str) -> Vec<String> {
     s.split(',')
         .take(MAX_PLAYERS)
         .map(|n| {
@@ -139,7 +144,7 @@ pub(crate) fn build_guest_game(
     g
 }
 
-pub(crate) fn r_lobby_prev() -> Rect {
+fn r_lobby_prev() -> Rect {
     Rect::new(COL_L - 177.0, 286.0, 44.0, 40.0)
 }
 
@@ -147,27 +152,27 @@ fn r_lobby_seed() -> Rect {
     Rect::new(COL_L - 125.0, 286.0, 172.0, 40.0)
 }
 
-pub(crate) fn r_lobby_next() -> Rect {
+fn r_lobby_next() -> Rect {
     Rect::new(COL_L + 55.0, 286.0, 44.0, 40.0)
 }
 
-pub(crate) fn r_lobby_new() -> Rect {
+fn r_lobby_new() -> Rect {
     Rect::new(COL_L + 107.0, 286.0, 70.0, 40.0)
 }
 
-pub(crate) fn r_lobby_player(k: usize) -> Rect {
+fn r_lobby_player(k: usize) -> Rect {
     Rect::new(COL_L - 130.0 + k as f32 * 45.0, 356.0, 45.0, 38.0)
 }
 
-pub(crate) fn r_lobby_diff(k: usize) -> Rect {
+fn r_lobby_diff(k: usize) -> Rect {
     Rect::new(COL_L - 130.0 + k as f32 * 119.0, 404.0, 119.0, 38.0)
 }
 
-pub(crate) fn r_lobby_mode(k: usize) -> Rect {
+fn r_lobby_mode(k: usize) -> Rect {
     Rect::new(COL_L - 130.0 + k as f32 * 178.0, 452.0, 178.0, 38.0)
 }
 
-pub(crate) fn r_lobby_count(k: usize) -> Rect {
+fn r_lobby_count(k: usize) -> Rect {
     if k < 3 {
         Rect::new(COL_L - 130.0 + k as f32 * 60.0, 500.0, 60.0, 38.0)
     } else {
@@ -175,40 +180,40 @@ pub(crate) fn r_lobby_count(k: usize) -> Rect {
     }
 }
 
-pub(crate) fn r_lobby_team(k: usize, _count: usize) -> Rect {
+fn r_lobby_team(k: usize, _count: usize) -> Rect {
     Rect::new(COL_L - 130.0 + k as f32 * 64.0, 548.0, 64.0, 38.0)
 }
 
-pub(crate) fn r_lobby_ff() -> Rect {
+fn r_lobby_ff() -> Rect {
     Rect::new(COL_L - 130.0, 598.0, 170.0, 24.0)
 }
 
-pub(crate) fn r_lobby_bridge() -> Rect {
+fn r_lobby_bridge() -> Rect {
     Rect::new(COL_L + 40.0, 598.0, 200.0, 24.0)
 }
 
-pub(crate) fn r_lobby_copy() -> Rect {
+fn r_lobby_copy() -> Rect {
     Rect::new(COL_R + 104.0, 152.0, 72.0, 26.0)
 }
 
-pub(crate) fn r_lobby_name() -> Rect {
+fn r_lobby_name() -> Rect {
     Rect::new(COL_R - 160.0, 212.0, 320.0, 40.0)
 }
 
-pub(crate) fn r_lobby_swatch(i: usize) -> Rect {
+fn r_lobby_swatch(i: usize) -> Rect {
     Rect::new(COL_R - 150.0 + i as f32 * 34.0, 288.0, 28.0, 22.0)
 }
 
-pub(crate) fn r_guest_team(k: usize, count: usize) -> Rect {
+fn r_guest_team(k: usize, count: usize) -> Rect {
     let w = count as f32 * 48.0 - 8.0;
     Rect::new(COL_R - w * 0.5 + k as f32 * 48.0, 348.0, 40.0, 30.0)
 }
 
-pub(crate) fn r_lobby_start() -> Rect {
+fn r_lobby_start() -> Rect {
     Rect::new(WIN_W * 0.5 - 160.0, 700.0, 320.0, 62.0)
 }
 
-pub(crate) fn r_lobby_cancel() -> Rect {
+fn r_lobby_cancel() -> Rect {
     Rect::new(WIN_W * 0.5 - 70.0, 772.0, 140.0, 36.0)
 }
 
@@ -217,31 +222,31 @@ const JOIN_X: f32 = WIN_W * 0.5 - 250.0;
 
 const JOIN_W: f32 = 500.0;
 
-pub(crate) fn r_join_name() -> Rect {
+fn r_join_name() -> Rect {
     Rect::new(WIN_W * 0.5 - 150.0, 212.0, 300.0, 44.0)
 }
 
-pub(crate) fn r_join_lan_row(i: usize) -> Rect {
+fn r_join_lan_row(i: usize) -> Rect {
     Rect::new(JOIN_X, 312.0 + i as f32 * 52.0, JOIN_W, 46.0)
 }
 
-pub(crate) fn r_join_addr() -> Rect {
+fn r_join_addr() -> Rect {
     Rect::new(JOIN_X, 560.0, 250.0, 44.0)
 }
 
-pub(crate) fn r_join_paste() -> Rect {
+fn r_join_paste() -> Rect {
     Rect::new(JOIN_X + 258.0, 560.0, 74.0, 44.0)
 }
 
-pub(crate) fn r_join_code() -> Rect {
+fn r_join_code() -> Rect {
     Rect::new(JOIN_X + 340.0, 560.0, JOIN_W - 340.0, 44.0)
 }
 
-pub(crate) fn r_join_go() -> Rect {
+fn r_join_go() -> Rect {
     Rect::new(JOIN_X, 626.0, JOIN_W * 0.5 - 6.0, 48.0)
 }
 
-pub(crate) fn r_join_back() -> Rect {
+fn r_join_back() -> Rect {
     Rect::new(JOIN_X + JOIN_W * 0.5 + 6.0, 626.0, JOIN_W * 0.5 - 6.0, 48.0)
 }
 
@@ -314,7 +319,7 @@ fn draw_lobby_settings(
     }
 }
 
-pub(crate) fn draw_host_lobby(
+fn draw_host_lobby(
     h: &HostNet,
     menu: &Menu,
     settings: &Settings,
@@ -634,7 +639,7 @@ fn draw_lobby_shared(
     }
 }
 
-pub(crate) fn draw_guest_lobby(
+fn draw_guest_lobby(
     j: &JoinUi,
     my_seat: usize,
     settings: &Settings,
@@ -734,13 +739,7 @@ pub(crate) fn draw_guest_lobby(
     ui.text_centered("LEAVE", rc.x + rc.w * 0.5, rc.y + 24.0, 15.0, INK());
 }
 
-pub(crate) fn draw_join_lobby(
-    j: &JoinUi,
-    lan: Option<&LanScan>,
-    settings: &Settings,
-    ui: &Ui,
-    time: f32,
-) {
+fn draw_join_lobby(j: &JoinUi, lan: Option<&LanScan>, settings: &Settings, ui: &Ui, time: f32) {
     draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
     ui.text_centered("JOIN GAME", WIN_W * 0.5, 150.0, 40.0, INK());
     draw_icon_bar(settings, ui, mouse_virtual());
@@ -917,6 +916,660 @@ pub(crate) fn draw_join_lobby(
     ui.text_centered("BACK", rb.x + rb.w * 0.5, rb.y + 31.0, 17.0, INK());
     if !j.status.is_empty() {
         ui.text_centered(&j.status, WIN_W * 0.5, 712.0, 15.0, with_alpha(INK(), 0.75));
+    }
+}
+
+impl App {
+    // One frame of the host's lobby.
+    pub(crate) fn run_host_lobby(&mut self, dt: f32) {
+        self.menu_time += dt;
+        let click2 = is_mouse_button_pressed(MouseButton::Left);
+        let m2 = mouse_virtual();
+        let mut cancel = is_key_pressed(KeyCode::Escape) && !self.lobby_name_edit;
+        if click2 && r_lobby_cancel().contains(m2) {
+            cancel = true;
+        }
+        let h = self.host.as_mut().unwrap();
+        let mut dirty = false;
+        for _ in 0..NET_MESSAGES_PER_FRAME {
+            let Ok(msg) = h.rx.try_recv() else { break };
+            match msg {
+                HostMsg::Joined(seat, name) => {
+                    if !name.is_empty() {
+                        self.lobby_picks.name.insert(seat, name);
+                    }
+                    // hand the newcomer the first color still free
+                    let mut used = vec![self.settings.color];
+                    used.extend(self.lobby_picks.color.values().copied());
+                    if let Some(c) = (0..MAX_PLAYERS).find(|c| !used.contains(c)) {
+                        self.lobby_picks.color.entry(seat).or_insert(c);
+                    }
+                    dirty = true;
+                }
+                HostMsg::Left(seat) => {
+                    self.lobby_picks.team.remove(&seat);
+                    self.lobby_picks.color.remove(&seat);
+                    self.lobby_picks.name.remove(&seat);
+                    dirty = true;
+                }
+                HostMsg::Intent(seat, line) => {
+                    let mut it = line.split_whitespace();
+                    match it.next() {
+                        Some("TEAM") => {
+                            if let Some(t) = it.next().and_then(|v| v.parse::<usize>().ok()) {
+                                let n = self.settings.team_count.clamp(2, MAX_TEAMS);
+                                self.lobby_picks.team.insert(seat, t % n);
+                                dirty = true;
+                            }
+                        }
+                        Some("COLOR") => {
+                            if let Some(c) = it.next().and_then(|v| v.parse::<usize>().ok()) {
+                                let taken = c == self.settings.color
+                                    || self
+                                        .lobby_picks
+                                        .color
+                                        .iter()
+                                        .any(|(&s2, &c2)| s2 != seat && c2 == c);
+                                if c < MAX_PLAYERS && !taken {
+                                    self.lobby_picks.color.insert(seat, c);
+                                    dirty = true;
+                                }
+                            }
+                        }
+                        Some("NAME") => {
+                            let n = clean_name(it.next().unwrap_or(""));
+                            if n.is_empty() {
+                                self.lobby_picks.name.remove(&seat);
+                            } else {
+                                self.lobby_picks.name.insert(seat, n);
+                            }
+                            dirty = true;
+                        }
+                        _ => {}
+                    }
+                }
+                HostMsg::Rejoined(_) => {}
+            }
+        }
+        self.copied_t = (self.copied_t - dt).max(0.0);
+        if self.lobby_name_edit {
+            while let Some(c) = get_char_pressed() {
+                if (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    && self.settings.name.len() < 12
+                {
+                    self.settings.name.push(c);
+                    dirty = true;
+                }
+            }
+            if is_key_pressed(KeyCode::Backspace) {
+                self.settings.name.pop();
+                dirty = true;
+            }
+            if is_key_pressed(KeyCode::Enter)
+                || is_key_pressed(KeyCode::Escape)
+                || (click2 && !r_lobby_name().contains(m2))
+            {
+                self.lobby_name_edit = false;
+                save_settings(&self.settings);
+            }
+        } else {
+            while get_char_pressed().is_some() {}
+        }
+        if click2 {
+            // Global toolbar was processed before this frame was painted.
+            if r_lobby_copy().contains(m2) {
+                copy_to_clipboard(&format!("{}:{}", local_ip(), net_port()));
+                self.copied_t = 1.5;
+                self.snd_queue.push(Snd::Click);
+            }
+            if r_lobby_name().contains(m2) {
+                self.lobby_name_edit = true;
+            }
+            if r_lobby_prev().contains(m2) {
+                self.menu.seed = (self.menu.seed + SEED_MOD - 1) % SEED_MOD;
+                dirty = true;
+                self.snd_queue.push(Snd::Click);
+            }
+            if r_lobby_next().contains(m2) {
+                self.menu.seed = (self.menu.seed + 1) % SEED_MOD;
+                dirty = true;
+                self.snd_queue.push(Snd::Click);
+            }
+            if r_lobby_new().contains(m2) {
+                self.menu.seed = random_seed();
+                dirty = true;
+                self.snd_queue.push(Snd::Click);
+            }
+            for k in 0..MAX_PLAYERS - 1 {
+                if r_lobby_player(k).contains(m2) {
+                    let n = h.resize_guests(k + 1);
+                    self.menu.players = n + 1;
+                    self.settings.players = self.menu.players;
+                    save_settings(&self.settings);
+                    dirty = true;
+                    self.snd_queue.push(Snd::Click);
+                }
+            }
+            for (k, d) in [Difficulty::Easy, Difficulty::Normal, Difficulty::Hard]
+                .into_iter()
+                .enumerate()
+            {
+                if r_lobby_diff(k).contains(m2) {
+                    self.menu.difficulty = d;
+                    self.settings.difficulty = diff_idx(d);
+                    save_settings(&self.settings);
+                    dirty = true;
+                    self.snd_queue.push(Snd::Click);
+                }
+            }
+            for k in 0..2 {
+                if r_lobby_mode(k).contains(m2) {
+                    self.settings.teams = k == 1;
+                    save_settings(&self.settings);
+                    dirty = true;
+                    self.snd_queue.push(Snd::Click);
+                }
+            }
+            if self.settings.teams {
+                for k in 0..4 {
+                    if r_lobby_count(k).contains(m2) {
+                        if k < 3 {
+                            self.settings.team_hvb = false;
+                            self.settings.team_count = k + 2;
+                            self.settings.team_mine = self.settings.team_mine.min(k + 1);
+                        } else {
+                            self.settings.team_hvb = !self.settings.team_hvb;
+                        }
+                        save_settings(&self.settings);
+                        dirty = true;
+                        self.snd_queue.push(Snd::Click);
+                    }
+                }
+                if !self.settings.team_hvb {
+                    let count = self.settings.team_count.clamp(2, MAX_TEAMS);
+                    for k in 0..count {
+                        if r_lobby_team(k, count).contains(m2) {
+                            self.settings.team_mine = k;
+                            save_settings(&self.settings);
+                            dirty = true;
+                            self.snd_queue.push(Snd::Click);
+                        }
+                    }
+                }
+                if r_lobby_ff().contains(m2) {
+                    self.settings.team_ff = !self.settings.team_ff;
+                    save_settings(&self.settings);
+                    dirty = true;
+                    self.snd_queue.push(Snd::Click);
+                }
+                if r_lobby_bridge().contains(m2) {
+                    self.settings.team_bridge = !self.settings.team_bridge;
+                    save_settings(&self.settings);
+                    dirty = true;
+                    self.snd_queue.push(Snd::Click);
+                }
+            }
+            for i in 0..MAX_PLAYERS {
+                if r_lobby_swatch(i).contains(m2) {
+                    let taken = self.lobby_picks.color.values().any(|&c| c == i);
+                    if !taken {
+                        self.settings.color = i;
+                        apply_local_colors(i);
+                        save_settings(&self.settings);
+                        dirty = true;
+                        self.snd_queue.push(Snd::Click);
+                    }
+                }
+            }
+        }
+        // hold-to-repeat on the seed arrows
+        let held_dir: i64 = if is_mouse_button_down(MouseButton::Left) {
+            if r_lobby_prev().contains(m2) {
+                -1
+            } else if r_lobby_next().contains(m2) {
+                1
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        if held_dir != 0 {
+            self.menu.hold_t += dt;
+            if self.menu.hold_t > 0.4 {
+                self.menu.hold_next -= dt;
+                if self.menu.hold_next <= 0.0 {
+                    self.menu.hold_next = 0.08;
+                    self.menu.seed =
+                        (self.menu.seed as i64 + held_dir).rem_euclid(SEED_MOD as i64) as u64;
+                    dirty = true;
+                }
+            }
+        } else {
+            self.menu.hold_t = 0.0;
+            self.menu.hold_next = 0.0;
+        }
+        // keep every guest's lobby view fresh
+        self.lobby_sync_t += dt;
+        if dirty {
+            // the preview shows who plays where under the current colors
+            let occ = h.occupied();
+            let (_tv, cv) = lobby_layout(
+                &occ,
+                self.menu.players,
+                self.settings.team_cfg(),
+                &self.lobby_picks,
+                self.settings.color,
+            );
+            let mut g = gen_map(
+                self.menu.seed,
+                self.menu.players,
+                1,
+                self.menu.difficulty,
+                TeamCfg::default(),
+            );
+            apply_position_swap(&mut g, &cv);
+            self.menu.preview = g;
+        }
+        if dirty || self.lobby_sync_t >= 1.5 {
+            self.lobby_sync_t = 0.0;
+            let line = lobby_line(h, &self.menu, &self.settings, &self.lobby_picks);
+            h.broadcast(&line);
+        }
+        let want_start = (click2 && r_lobby_start().contains(m2))
+            || (is_key_pressed(KeyCode::Enter) && !self.lobby_name_edit)
+            || (self.test_host_auto > 0 && h.joined() >= self.test_host_auto);
+        if want_start {
+            let cfg = self.settings.team_cfg();
+            let (humans, tv, cv, nm) = h.start_game(
+                self.menu.seed,
+                self.menu.players,
+                self.menu.difficulty,
+                cfg,
+                &self.lobby_picks,
+                self.settings.color,
+                &self.settings.name,
+            );
+            let mut ng = gen_map(
+                self.menu.seed,
+                self.menu.players,
+                humans,
+                self.menu.difficulty,
+                cfg,
+            );
+            ng.team = tv;
+            ng.names = nm;
+            apply_colors(&cv);
+            if ng.humans > 1 {
+                apply_position_swap(&mut ng, &cv);
+            }
+            h.sent = 0;
+            self.game = Some(ng);
+            self.screen = Screen::Play;
+            self.snd_queue.push(Snd::Turn);
+        }
+        draw_host_lobby(
+            h,
+            &self.menu,
+            &self.settings,
+            &self.lobby_picks,
+            &self.ui,
+            self.lobby_name_edit,
+            self.menu_time,
+            self.copied_t,
+        );
+        if cancel {
+            self.host = None;
+            self.lobby_name_edit = false;
+            self.menu.regen(); // back to the solo color layout
+            self.screen = Screen::Menu;
+        }
+    }
+
+    // One frame of the join screen and, once connected, the guest's lobby.
+    pub(crate) fn run_join_lobby(&mut self, dt: f32) {
+        self.menu_time += dt;
+        let mut back = is_key_pressed(KeyCode::Escape) && !self.lobby_name_edit;
+        let mut drop_guest = false;
+        let click = is_mouse_button_pressed(MouseButton::Left);
+        let m = mouse_virtual();
+        let paste_done = self
+            .join
+            .paste_rx
+            .as_ref()
+            .and_then(|rx| match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
+            });
+        if let Some(text) = paste_done {
+            self.join.paste_rx = None;
+            if let Some(text) = text {
+                let focus = self.join.paste_focus;
+                apply_join_paste(&mut self.join, focus, &text);
+            } else {
+                self.join.status = "Could not read the clipboard".to_string();
+            }
+        }
+        let connect_done = self
+            .join
+            .connect_rx
+            .as_ref()
+            .and_then(|rx| match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("Connection attempt failed".to_string()))
+                }
+            });
+        if let Some(result) = connect_done {
+            self.join.connect_rx = None;
+            match result {
+                Ok(mut g) => {
+                    send_net_line(&mut g.stream, &format!("COLOR {}", self.settings.color));
+                    send_net_line(&mut g.stream, &format!("TEAM {}", self.settings.team_mine));
+                    self.guest = Some(g);
+                    self.settings.last_addr = self.join.addr.clone();
+                    save_settings(&self.settings);
+                    self.join.status = "Connected — waiting for the host to start...".to_string();
+                }
+                Err(e) => self.join.status = e,
+            }
+        }
+        if let Some(gn) = self.guest.as_mut() {
+            for _ in 0..NET_MESSAGES_PER_FRAME {
+                let Ok(l) = gn.rx.try_recv() else { break };
+                let mut it = l.split_whitespace();
+                match it.next() {
+                    Some("START") => {
+                        let seed: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let players: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
+                        let humans: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(2);
+                        let di: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+                        let seat = it.next().and_then(|v| v.parse().ok()).unwrap_or(gn.seat);
+                        let (colors, teams, team_v, names) = parse_start_tail(&mut it);
+                        let g = build_guest_game(
+                            seed, players, humans, di, seat, &colors, teams, team_v, names,
+                        );
+                        gn.seat = g.my_seat;
+                        self.game = Some(g);
+                        self.screen = Screen::Play;
+                        self.snd_queue.push(Snd::Turn);
+                    }
+                    Some("LOBBY") => {
+                        let seed =
+                            it.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) % SEED_MOD;
+                        let players = it
+                            .next()
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .unwrap_or(2)
+                            .clamp(2, MAX_PLAYERS);
+                        let diff = it
+                            .next()
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .unwrap_or(1)
+                            .min(2);
+                        let ton = it.next() == Some("1");
+                        let thvb = it.next() == Some("1");
+                        let tcount = it
+                            .next()
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .unwrap_or(2)
+                            .clamp(2, MAX_TEAMS);
+                        let tff = it.next() == Some("1");
+                        let tbridge = it.next() == Some("1");
+                        let mut occupied = it
+                            .next()
+                            .map(|x| {
+                                if x == "-" {
+                                    Vec::new()
+                                } else {
+                                    parse_csv_usize(x)
+                                }
+                            })
+                            .unwrap_or_default();
+                        occupied.retain(|&seat| seat > 0 && seat < players);
+                        occupied.sort_unstable();
+                        occupied.dedup();
+                        let teams: Vec<usize> = it
+                            .next()
+                            .map(parse_csv_usize)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .take(players)
+                            .map(|team| team % tcount)
+                            .collect();
+                        let colors: Vec<usize> = it
+                            .next()
+                            .map(parse_csv_usize)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .take(players)
+                            .map(|color| color % MAX_PLAYERS)
+                            .collect();
+                        let names = it.next().map(parse_names_csv).unwrap_or_default();
+                        if self.join.preview_key != (seed, players)
+                            || self.join.preview_colors != colors
+                        {
+                            let mut pg =
+                                gen_map(seed, players, 1, Difficulty::Normal, TeamCfg::default());
+                            apply_position_swap(&mut pg, &colors);
+                            self.join.preview = Some(pg);
+                            self.join.preview_key = (seed, players);
+                            self.join.preview_colors = colors.clone();
+                        }
+                        self.join.view = Some(LobbyView {
+                            players,
+                            diff,
+                            ton,
+                            thvb,
+                            tcount,
+                            tff,
+                            tbridge,
+                            occupied,
+                            teams,
+                            colors,
+                            names,
+                        });
+                    }
+                    Some("BYE") => {
+                        self.join.status = "Disconnected by host".to_string();
+                        drop_guest = true;
+                    }
+                    Some("LOST") => {
+                        self.join.status = "Connection lost".to_string();
+                        drop_guest = true;
+                    }
+                    _ => {}
+                }
+            }
+            if self.lobby_name_edit {
+                while let Some(c) = get_char_pressed() {
+                    if (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                        && self.settings.name.len() < 12
+                    {
+                        self.settings.name.push(c);
+                    }
+                }
+                if is_key_pressed(KeyCode::Backspace) {
+                    self.settings.name.pop();
+                }
+                if is_key_pressed(KeyCode::Enter)
+                    || is_key_pressed(KeyCode::Escape)
+                    || (click && !r_lobby_name().contains(m))
+                {
+                    self.lobby_name_edit = false;
+                    save_settings(&self.settings);
+                    let n = if self.settings.name.is_empty() {
+                        "-".to_string()
+                    } else {
+                        self.settings.name.clone()
+                    };
+                    send_net_line(&mut gn.stream, &format!("NAME {}", n));
+                }
+            } else {
+                while get_char_pressed().is_some() {}
+            }
+            if click {
+                if r_lobby_name().contains(m) {
+                    self.lobby_name_edit = true;
+                }
+                if let Some(v) = &self.join.view {
+                    let own_row = 1 + v.occupied.iter().position(|&x| x == gn.seat).unwrap_or(0);
+                    let humans = v.occupied.len() + 1;
+                    for i in 0..MAX_PLAYERS {
+                        if r_lobby_swatch(i).contains(m) {
+                            let taken =
+                                (0..humans).any(|r2| r2 != own_row && v.colors.get(r2) == Some(&i));
+                            if !taken {
+                                self.join.my_color = Some(i);
+                                self.settings.color = i;
+                                save_settings(&self.settings);
+                                send_net_line(&mut gn.stream, &format!("COLOR {}", i));
+                                self.snd_queue.push(Snd::Click);
+                            }
+                        }
+                    }
+                    if v.ton && !v.thvb {
+                        let count = v.tcount.clamp(2, MAX_TEAMS);
+                        for k in 0..count {
+                            if r_guest_team(k, count).contains(m) {
+                                self.join.my_team = Some(k);
+                                self.settings.team_mine = k;
+                                save_settings(&self.settings);
+                                send_net_line(&mut gn.stream, &format!("TEAM {}", k));
+                                self.snd_queue.push(Snd::Click);
+                            }
+                        }
+                    }
+                }
+                if r_lobby_cancel().contains(m) {
+                    back = true;
+                }
+            }
+        } else {
+            let ctrl = is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl);
+            let mut paste = ctrl && is_key_pressed(KeyCode::V);
+            if click && r_join_paste().contains(m) {
+                paste = true;
+            }
+            if paste {
+                if let Some(t) = paste_from_clipboard() {
+                    let focus = self.join.focus;
+                    apply_join_paste(&mut self.join, focus, &t);
+                } else if self.join.paste_rx.is_none() {
+                    self.join.paste_focus = self.join.focus;
+                    self.join.paste_rx = Some(spawn_clipboard_paste());
+                    if cfg!(target_os = "linux") {
+                        self.join.status = "Reading clipboard...".to_string();
+                    }
+                }
+            }
+            while let Some(c) = get_char_pressed() {
+                if ctrl {
+                    continue; // don't type the 'v' from ctrl+v
+                }
+                if self.join.focus == 1 {
+                    if c.is_ascii_digit() && self.join.code.len() < NET_ROOM_CODE_LEN {
+                        self.join.code.push(c);
+                    }
+                } else if self.join.focus == 2 {
+                    if (c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                        && self.settings.name.len() < 12
+                    {
+                        self.settings.name.push(c);
+                    }
+                } else if (c.is_ascii_alphanumeric() || c == '.' || c == ':' || c == '-')
+                    && self.join.addr.len() < 40
+                {
+                    self.join.addr.push(c);
+                }
+            }
+            if is_key_pressed(KeyCode::Backspace) {
+                match self.join.focus {
+                    1 => {
+                        self.join.code.pop();
+                    }
+                    2 => {
+                        self.settings.name.pop();
+                    }
+                    _ => {
+                        self.join.addr.pop();
+                    }
+                }
+            }
+            if is_key_pressed(KeyCode::Tab) {
+                self.join.focus = (self.join.focus + 1) % 3;
+            }
+            if click && r_join_addr().contains(m) {
+                self.join.focus = 0;
+            }
+            if click && r_join_code().contains(m) {
+                self.join.focus = 1;
+            }
+            if click && r_join_name().contains(m) {
+                self.join.focus = 2;
+            }
+            // One click on a LAN game fills in its address and code and connects.
+            let picked = self.lan_scan.as_ref().and_then(|l| {
+                l.games
+                    .iter()
+                    .enumerate()
+                    .find(|(i, _)| click && r_join_lan_row(*i).contains(m))
+                    .map(|(_, g)| g.clone())
+            });
+            if let Some(g) = picked.filter(|_| self.join.connect_rx.is_none()) {
+                self.join.addr = g.addr;
+                self.join.code = g.code;
+                self.join.status = format!("Joining {}'s game...", g.name);
+                self.join.connect_rx = Some(spawn_guest_connect(
+                    self.join.addr.clone(),
+                    self.join.code.clone(),
+                    self.settings.name.clone(),
+                ));
+            } else if self.join.connect_rx.is_none()
+                && ((click && r_join_go().contains(m)) || is_key_pressed(KeyCode::Enter))
+            {
+                self.join.status = "Connecting...".to_string();
+                self.join.connect_rx = Some(spawn_guest_connect(
+                    self.join.addr.clone(),
+                    self.join.code.clone(),
+                    self.settings.name.clone(),
+                ));
+            }
+            if click && r_join_back().contains(m) {
+                back = true;
+            }
+        }
+        if drop_guest {
+            self.guest = None;
+            self.join.view = None;
+        }
+        if let Some(gn) = &self.guest {
+            draw_guest_lobby(
+                &self.join,
+                gn.seat,
+                &self.settings,
+                &self.ui,
+                self.lobby_name_edit,
+                self.menu_time,
+            );
+        } else {
+            draw_join_lobby(
+                &self.join,
+                self.lan_scan.as_ref(),
+                &self.settings,
+                &self.ui,
+                self.menu_time,
+            );
+        }
+        if back {
+            self.guest = None;
+            self.join.view = None;
+            self.join.connect_rx = None;
+            self.lobby_name_edit = false;
+            self.screen = Screen::Menu;
+        }
     }
 }
 

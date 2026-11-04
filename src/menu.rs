@@ -3,13 +3,18 @@
 use dicegame::engine;
 use dicegame::engine::prelude::*;
 
-use crate::board::{cell_pos, gen_map_local, neighbor_of, random_seed, COLS, HEX, ROWS, SQRT3};
+use crate::board::{
+    apply_position_swap, cell_pos, gen_map, gen_map_local, neighbor_of, random_seed, COLS, HEX,
+    ROWS, SQRT3,
+};
 use crate::dice::{draw_die, draw_ellipse_fan, draw_star, DIE_W};
 use crate::draw_game::fill_hex;
 use crate::game::{
     diff_idx, idx_diff, team_letter, Difficulty, Game, TeamCfg, HUMAN, MAX_PLAYERS, MAX_TEAMS,
     SEED_MOD,
 };
+use crate::lobby::JoinUi;
+use crate::net::{lobby_layout, HostNet, LobbyPicks};
 use crate::settings::{load_bookmarks, save_bookmarks, save_settings, Settings};
 use crate::sound::Snd;
 use crate::theme::{
@@ -21,8 +26,9 @@ use crate::ui::{
     control_fill, draw_icon_bar, draw_round_frame, draw_round_rect, draw_toggle, menu_button,
     mouse_virtual, r_icon, seg_row, Ui, WIN_H, WIN_W,
 };
+use crate::{App, Screen};
 
-pub(crate) enum MenuAction {
+enum MenuAction {
     None,
     Start,
     Host,
@@ -198,7 +204,7 @@ fn r_bm_del(i: usize) -> Rect {
 const BM_SHOWN: usize = 4;
 
 // returns true when the game should start
-pub(crate) fn update_menu(
+fn update_menu(
     menu: &mut Menu,
     settings: &mut Settings,
     snd: &mut Vec<Snd>,
@@ -608,7 +614,7 @@ fn draw_menu_hero() {
     }
 }
 
-pub(crate) fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
+fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     let m = mouse_virtual();
 
     // Keep the large outlined title, decorative dice, and map out of hover
@@ -986,5 +992,62 @@ fn draw_team_card(settings: &Settings, ui: &Ui, m: Vec2) {
         ),
     ] {
         draw_toggle(r, label, on, ui, m);
+    }
+}
+
+impl App {
+    // One frame of the main menu.
+    pub(crate) fn run_menu(&mut self, dt: f32) {
+        self.menu_time += dt;
+        match update_menu(&mut self.menu, &mut self.settings, &mut self.snd_queue, dt) {
+            MenuAction::Start => {
+                self.game = Some(gen_map_local(
+                    self.menu.seed,
+                    self.menu.players,
+                    1,
+                    self.menu.difficulty,
+                    self.settings.team_cfg(),
+                ));
+                self.screen = Screen::Play;
+                self.snd_queue.push(Snd::Click);
+            }
+            MenuAction::Host => match HostNet::start(self.menu.players - 1) {
+                Ok(h) => {
+                    self.host = Some(h);
+                    self.lobby_picks = LobbyPicks::default();
+                    self.lobby_sync_t = 0.0;
+                    self.lobby_name_edit = false;
+                    // preview switches to the lobby's color layout
+                    let (_tv, cv) = lobby_layout(
+                        &[],
+                        self.menu.players,
+                        self.settings.team_cfg(),
+                        &self.lobby_picks,
+                        self.settings.color,
+                    );
+                    let mut g0 = gen_map(
+                        self.menu.seed,
+                        self.menu.players,
+                        1,
+                        self.menu.difficulty,
+                        TeamCfg::default(),
+                    );
+                    apply_position_swap(&mut g0, &cv);
+                    self.menu.preview = g0;
+                    self.screen = Screen::HostLobby;
+                }
+                Err(_) => self.menu.host_err = 4.0,
+            },
+            MenuAction::Join => {
+                self.join = JoinUi {
+                    addr: self.settings.last_addr.clone(),
+                    ..Default::default()
+                };
+                self.lobby_name_edit = false;
+                self.screen = Screen::JoinLobby;
+            }
+            MenuAction::None => {}
+        }
+        draw_menu(&self.menu, &self.settings, &self.ui, self.menu_time);
     }
 }
