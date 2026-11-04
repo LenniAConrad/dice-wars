@@ -920,7 +920,9 @@ impl App {
         self.menu_time += dt;
         let click2 = is_mouse_button_pressed(MouseButton::Left);
         let m2 = mouse_virtual();
-        let mut cancel = is_key_pressed(KeyCode::Escape) && !self.lobby_name_edit;
+        // Enter or Esc that closes the name field must not also start or cancel
+        let name_edit_at_start = self.lobby_name_edit;
+        let mut cancel = is_key_pressed(KeyCode::Escape) && !name_edit_at_start;
         if click2 && r_lobby_cancel().contains(m2) {
             cancel = true;
         }
@@ -1172,7 +1174,7 @@ impl App {
             h.broadcast(&line);
         }
         let want_start = (click2 && r_lobby_start().contains(m2))
-            || (is_key_pressed(KeyCode::Enter) && !self.lobby_name_edit)
+            || (is_key_pressed(KeyCode::Enter) && !name_edit_at_start)
             || (self.test_host_auto > 0 && h.joined() >= self.test_host_auto);
         if want_start {
             let cfg = self.settings.team_cfg();
@@ -1184,6 +1186,7 @@ impl App {
                 &self.lobby_picks,
                 self.settings.color,
                 &self.settings.name,
+                self.settings.speed,
             );
             let mut ng = gen_map(
                 self.menu.seed,
@@ -1282,6 +1285,7 @@ impl App {
                         let di: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
                         let seat = it.next().and_then(|v| v.parse().ok()).unwrap_or(gn.seat);
                         let (colors, teams, team_v, names) = parse_start_tail(&mut it);
+                        gn.speed = crate::net::parse_speed(it.next());
                         let g = build_guest_game(
                             seed, players, humans, di, seat, &colors, teams, team_v, names,
                         );
@@ -1289,6 +1293,9 @@ impl App {
                         self.game = Some(g);
                         self.screen = Screen::Play;
                         self.snd_queue.push(Snd::Turn);
+                        // lines after START (the first events) stay queued
+                        // for the game loop
+                        break;
                     }
                     Some("LOBBY") => {
                         let seed =

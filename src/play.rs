@@ -11,12 +11,13 @@ use crate::draw_game::{draw_confirm, draw_game};
 use crate::game::{Difficulty, Game, RepEvent, MAX_PLAYERS};
 use crate::lobby::{build_guest_game, parse_start_tail};
 use crate::net::{
-    parse_csv_usize, parse_reinforcement_lands, reject_invalid_host_data, send_net_line,
-    spawn_reconnect, HostMsg, NET_MAX_PENDING_EVENTS, NET_MESSAGES_PER_FRAME,
+    parse_csv_usize, parse_reinforcement_lands, parse_speed, reject_invalid_host_data,
+    send_net_line, spawn_reconnect, HostMsg, ReconnectError, NET_MAX_PENDING_EVENTS,
+    NET_MESSAGES_PER_FRAME,
 };
 use crate::replay::Replay;
 use crate::sound::Snd;
-use crate::theme::{apply_colors, apply_local_colors, BORDER, INK, SRF};
+use crate::theme::{apply_colors, BORDER, INK, SRF};
 use crate::ui::{draw_round_frame, mouse_virtual, toolbar_contains, WIN_H, WIN_W};
 use crate::{App, GuestNet, HostNet, Screen};
 
@@ -246,7 +247,12 @@ impl App {
         } else {
             1.0
         };
-        g.update(dt * self.settings.speed * pace);
+        // A network game runs at the host's speed on every machine.
+        let speed = self
+            .guest
+            .as_ref()
+            .map_or(self.settings.speed, |gn| gn.speed);
+        g.update(dt * speed * pace);
         g.tick_turn_timer(dt);
         if let Some(gn) = self.guest.as_mut() {
             if gn.rec_failed && is_mouse_button_pressed(MouseButton::Left) {
@@ -273,6 +279,11 @@ impl App {
         }
         // ---- hosting: apply guest intents, broadcast new events
         if let Some(h) = self.host.as_mut() {
+            if self.settings.speed != h.speed {
+                // the host changed the game speed mid-match: everyone follows
+                h.speed = self.settings.speed;
+                h.broadcast(&format!("SPEED {}", h.speed));
+            }
             host_tick(
                 h,
                 g,
@@ -311,6 +322,7 @@ impl App {
                                     &self.lobby_picks,
                                     self.settings.color,
                                     &self.settings.name,
+                                    self.settings.speed,
                                 );
                                 let mut ng = gen_map(
                                     self.menu.seed,
@@ -448,10 +460,7 @@ impl App {
         self.snd_queue.append(&mut g.snd);
         if go_menu {
             self.confirm = None;
-            self.host = None;
-            self.guest = None;
-            self.awaiting.clear();
-            apply_local_colors(self.settings.color);
+            self.leave_network();
             self.screen = Screen::Menu;
             self.menu.regen();
         }
@@ -553,6 +562,20 @@ fn host_tick(
     }
 }
 
+// The guest fell so far behind that its event queue is full: drop the
+// backlog and reconnect, so the host's RESUME brings the board up to date.
+fn resync_with_host(g: &mut Game, gn: &mut GuestNet) {
+    if gn.awaiting_resume {
+        return;
+    }
+    gn.pending.clear();
+    gn.awaiting_resume = true;
+    // the reader thread sees the closed socket and reports LOST, which
+    // starts the reconnect
+    let _ = gn.stream.shutdown(std::net::Shutdown::Both);
+    g.push_log("Fell behind the host — resyncing...".to_string());
+}
+
 // Guest side of a match: reconnect handling and the host's events, applied
 // one at a time (animated) or all at once while catching up.
 fn guest_tick(gn: &mut GuestNet, g: &mut Game, do_ping: bool) {
@@ -568,11 +591,24 @@ fn guest_tick(gn: &mut GuestNet, g: &mut Game, do_ping: bool) {
                     gn.rx = rx;
                     gn.rec_rx = None;
                     gn.catching_up = true;
+                    gn.awaiting_resume = true;
                     gn.pending.clear();
                 }
-                Err(_) => {
+                Err(ReconnectError::Unreachable) => {
                     gn.rec_rx = None;
                     gn.rec_failed = true;
+                }
+                Err(ReconnectError::Rejected(why)) => {
+                    // the host is gone or moved on: retrying cannot help
+                    gn.rec_rx = None;
+                    if g.over.is_none() {
+                        g.over = Some(if why.is_empty() || why == "wrong code" {
+                            "Could not rejoin — the host closed your seat".to_string()
+                        } else {
+                            why
+                        });
+                        g.banner_t = 0.0;
+                    }
                 }
             }
         }
@@ -588,9 +624,12 @@ fn guest_tick(gn: &mut GuestNet, g: &mut Game, do_ping: bool) {
                         reject_invalid_host_data(g, gn);
                         break;
                     }
+                    if gn.awaiting_resume {
+                        continue; // RESUME resends it
+                    }
                     if gn.pending.len() >= NET_MAX_PENDING_EVENTS {
-                        reject_invalid_host_data(g, gn);
-                        break;
+                        resync_with_host(g, gn);
+                        continue;
                     }
                     gn.pending.push_back(RepEvent::Attack {
                         a: v[0] as usize,
@@ -611,9 +650,12 @@ fn guest_tick(gn: &mut GuestNet, g: &mut Game, do_ping: bool) {
                     None => Some(Vec::new()),
                 };
                 if let (Some(player), Some(lands), None) = (player, lands, it.next()) {
+                    if gn.awaiting_resume {
+                        continue; // RESUME resends it
+                    }
                     if gn.pending.len() >= NET_MAX_PENDING_EVENTS {
-                        reject_invalid_host_data(g, gn);
-                        break;
+                        resync_with_host(g, gn);
+                        continue;
                     }
                     gn.pending.push_back(RepEvent::Reinforce { player, lands });
                 } else {
@@ -638,6 +680,7 @@ fn guest_tick(gn: &mut GuestNet, g: &mut Game, do_ping: bool) {
                 }
             }
             Some("PING") => {}
+            Some("SPEED") => gn.speed = parse_speed(it.next()),
             Some("RESUME") => {
                 // rebuild the match and fast-forward the backlog
                 let seed: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -647,6 +690,9 @@ fn guest_tick(gn: &mut GuestNet, g: &mut Game, do_ping: bool) {
                 let seat: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(gn.seat);
                 let (colors, teams, team_v, names) = parse_start_tail(&mut it);
                 let absent: Vec<usize> = it.next().map(parse_csv_usize).unwrap_or_default();
+                gn.speed = parse_speed(it.next());
+                gn.awaiting_resume = false;
+                gn.pending.clear();
                 let mut ng = build_guest_game(
                     seed, players, humans, di, seat, &colors, teams, team_v, names,
                 );
@@ -669,8 +715,10 @@ fn guest_tick(gn: &mut GuestNet, g: &mut Game, do_ping: bool) {
                 let di: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(1);
                 let seat: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(gn.seat);
                 let (colors, teams, team_v, names) = parse_start_tail(&mut it);
+                gn.speed = parse_speed(it.next());
                 gn.pending.clear();
                 gn.catching_up = false;
+                gn.awaiting_resume = false;
                 let ng = build_guest_game(
                     seed, players, humans, di, seat, &colors, teams, team_v, names,
                 );
@@ -761,6 +809,75 @@ mod tests {
     use crate::testutil::mk_game;
 
     use super::*;
+
+    // a guest session whose host lines come from the returned sender; the
+    // returned socket is the host's end of the connection
+    fn test_guest() -> (
+        GuestNet,
+        std::sync::mpsc::SyncSender<String>,
+        std::net::TcpStream,
+    ) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (host_end, _) = listener.accept().unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        let gn = GuestNet {
+            stream,
+            rx,
+            seat: 1,
+            pending: std::collections::VecDeque::new(),
+            addr: String::new(),
+            code: String::new(),
+            token: String::new(),
+            catching_up: false,
+            rec_failed: false,
+            rec_rx: None,
+            awaiting_resume: false,
+            speed: 1.0,
+        };
+        (gn, tx, host_end)
+    }
+
+    #[test]
+    fn guest_ignores_events_between_reconnect_and_resume() {
+        let mut g = mk_game(&[0, 1], &[(0, 1)], 2, TeamCfg::default());
+        g.net_guest = true;
+        let (mut gn, tx, _host) = test_guest();
+        gn.awaiting_resume = true;
+        tx.send("ATK 0 1 7 6 1".to_string()).unwrap();
+        tx.send("REINF 0 0".to_string()).unwrap();
+        tx.send("SPEED 4".to_string()).unwrap();
+        guest_tick(&mut gn, &mut g, false);
+        assert!(gn.pending.is_empty());
+        assert!(g.battle.is_none());
+        assert_eq!(g.terrs[1].owner, 1);
+        assert_eq!(gn.speed, 4.0);
+    }
+
+    #[test]
+    fn a_guest_far_behind_resyncs_instead_of_quitting() {
+        use std::io::Read;
+        let mut g = mk_game(&[0, 1], &[(0, 1)], 2, TeamCfg::default());
+        g.net_guest = true;
+        g.battle = None;
+        let (mut gn, tx, mut host) = test_guest();
+        for _ in 0..NET_MAX_PENDING_EVENTS {
+            gn.pending.push_back(RepEvent::Reinforce {
+                player: 0,
+                lands: vec![0],
+            });
+        }
+        g.over = Some("hold".to_string()); // keep the queue from draining
+        tx.send("ATK 0 1 7 6 1".to_string()).unwrap();
+        guest_tick(&mut gn, &mut g, false);
+        assert_eq!(g.over.as_deref(), Some("hold"));
+        assert!(gn.pending.is_empty());
+        assert!(gn.awaiting_resume);
+        // the connection is closed so the reconnect (and RESUME) follow
+        host.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(host.read(&mut [0u8; 8]).unwrap(), 0);
+    }
 
     #[test]
     fn keyboard_selection_follows_visible_directions() {
