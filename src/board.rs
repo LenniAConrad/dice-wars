@@ -119,10 +119,37 @@ pub(crate) fn gen_map(
     difficulty: Difficulty,
     teams: TeamCfg,
 ) -> Game {
-    engine::random::srand(seed.wrapping_add(0x9E37_79B9));
-    let mut g = Game::new(players, humans.clamp(1, players), difficulty, teams);
+    gen_map_with(seed, players, humans, difficulty, teams, MapOpts::default())
+}
+
+// gen_map on a map of the given size and shape; MapOpts::default() is
+// exactly gen_map
+pub(crate) fn gen_map_with(
+    seed: u64,
+    players: usize,
+    humans: usize,
+    difficulty: Difficulty,
+    teams: TeamCfg,
+    opts: MapOpts,
+) -> Game {
+    let g = gen_map_seeded_with(seed, players, humans, difficulty, teams, opts);
     // The seed only decides the map; play continues from fresh entropy.
     engine::random::srand_from_entropy();
+    g
+}
+
+// gen_map_with without reseeding from entropy afterwards: the RNG is left
+// where map generation stopped (the headless simulator seeds the dice itself)
+pub(crate) fn gen_map_seeded_with(
+    seed: u64,
+    players: usize,
+    humans: usize,
+    difficulty: Difficulty,
+    teams: TeamCfg,
+    opts: MapOpts,
+) -> Game {
+    engine::random::srand(seed.wrapping_add(0x9E37_79B9));
+    let mut g = Game::new_with(players, humans.clamp(1, players), difficulty, teams, opts);
     // solo: picking a color means playing that dealt position — the map keeps
     // its look and you take over the territories (and dice) of that color
     g.seed = seed;
@@ -137,30 +164,312 @@ pub(crate) fn gen_map_local(
     difficulty: Difficulty,
     teams: TeamCfg,
 ) -> Game {
-    let mut g = gen_map(seed, players, humans, difficulty, teams);
+    gen_map_local_with(seed, players, humans, difficulty, teams, MapOpts::default())
+}
+
+// gen_map_with plus the position swap for THIS machine's current colors
+pub(crate) fn gen_map_local_with(
+    seed: u64,
+    players: usize,
+    humans: usize,
+    difficulty: Difficulty,
+    teams: TeamCfg,
+    opts: MapOpts,
+) -> Game {
+    let mut g = gen_map_with(seed, players, humans, difficulty, teams, opts);
     let colors: Vec<usize> = (0..g.players).map(color_map).collect();
     apply_position_swap(&mut g, &colors);
     g
 }
 
+/// How much of the fixed grid is land, and how many territories it holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MapSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+/// One landmass, or several islands joined by one-hex-wide land bridges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MapShape {
+    #[default]
+    Continent,
+    Islands,
+}
+
+/// Map generation options. The default (Medium, Continent) is the classic
+/// map: for a given seed it is bit-identical to maps from before options
+/// existed. The grid (COLS x ROWS) and screen layout never change; only
+/// which cells are land and how many territories grow on them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MapOpts {
+    pub(crate) size: MapSize,
+    pub(crate) shape: MapShape,
+}
+
+impl MapOpts {
+    pub(crate) const ALL: [MapOpts; 6] = [
+        MapOpts::new(MapSize::Small, MapShape::Continent),
+        MapOpts::new(MapSize::Medium, MapShape::Continent),
+        MapOpts::new(MapSize::Large, MapShape::Continent),
+        MapOpts::new(MapSize::Small, MapShape::Islands),
+        MapOpts::new(MapSize::Medium, MapShape::Islands),
+        MapOpts::new(MapSize::Large, MapShape::Islands),
+    ];
+
+    pub(crate) const fn new(size: MapSize, shape: MapShape) -> Self {
+        MapOpts { size, shape }
+    }
+
+    /// Short stable code for settings files and network messages:
+    /// size s/m/l, a dash, shape c/i ("m-c" is the default).
+    pub(crate) fn code(self) -> &'static str {
+        match (self.size, self.shape) {
+            (MapSize::Small, MapShape::Continent) => "s-c",
+            (MapSize::Medium, MapShape::Continent) => "m-c",
+            (MapSize::Large, MapShape::Continent) => "l-c",
+            (MapSize::Small, MapShape::Islands) => "s-i",
+            (MapSize::Medium, MapShape::Islands) => "m-i",
+            (MapSize::Large, MapShape::Islands) => "l-i",
+        }
+    }
+
+    /// Inverse of `code`; None for anything `code` never produces.
+    pub(crate) fn from_code(s: &str) -> Option<Self> {
+        let s = s.trim();
+        Self::ALL.into_iter().find(|o| o.code() == s)
+    }
+
+    // (regions grown, minimum regions removed afterwards). Medium/Continent
+    // is the classic N_SEEDS/N_HOLES. Islands remove few regions: their
+    // coasts are already ragged, and every removal risks cutting a bridge.
+    fn regions(self) -> (usize, usize) {
+        match (self.size, self.shape) {
+            (MapSize::Small, MapShape::Continent) => (36, 5),
+            (MapSize::Medium, MapShape::Continent) => (N_SEEDS, N_HOLES),
+            (MapSize::Large, MapShape::Continent) => (72, 5),
+            (MapSize::Small, MapShape::Islands) => (34, 2),
+            (MapSize::Medium, MapShape::Islands) => (48, 2),
+            (MapSize::Large, MapShape::Islands) => (62, 2),
+        }
+    }
+}
+
+// Which cells may become land; None = the whole grid (and no RNG drawn,
+// which keeps the classic generator's random sequence untouched).
+fn land_mask(opts: MapOpts) -> Option<Vec<bool>> {
+    let mut mask = vec![false; COLS * ROWS];
+    match (opts.size, opts.shape) {
+        (MapSize::Medium | MapSize::Large, MapShape::Continent) => return None,
+        (MapSize::Small, MapShape::Continent) => {
+            // one compact landmass near the middle, about 60% of the grid
+            let c = cell_at(
+                COLS / 2 + gen_range(0, 5) - 2,
+                ROWS / 2 + gen_range(0, 3) - 1,
+            );
+            grow_blob(&mut mask, c, 400, 1.6, None);
+        }
+        (size, MapShape::Islands) => {
+            let (k, per) = match size {
+                MapSize::Small => (3, 120),
+                MapSize::Medium => (4, 118),
+                MapSize::Large => (6, 96),
+            };
+            let mut owner = vec![usize::MAX; COLS * ROWS];
+            let centers = island_centers(k);
+            for (i, &c) in centers.iter().enumerate() {
+                grow_blob(&mut mask, c, per, 1.25, Some((&mut owner, i)));
+            }
+            for (a, b) in spanning_tree(&centers) {
+                for c in hex_line(centers[a], centers[b]) {
+                    mask[c] = true;
+                }
+            }
+        }
+    }
+    Some(mask)
+}
+
+fn cell_at(c: usize, r: usize) -> usize {
+    r.min(ROWS - 1) * COLS + c.min(COLS - 1)
+}
+
+// the grid cell whose center is nearest to a point
+fn nearest_cell(p: Vec2) -> usize {
+    let r0 = ((p.y - OFF_Y) / (1.5 * HEX)).round() as i32;
+    let mut best = (f32::MAX, 0usize);
+    for r in (r0 - 1)..=(r0 + 1) {
+        if r < 0 || r >= ROWS as i32 {
+            continue;
+        }
+        let shift = if r % 2 == 1 { 0.5 } else { 0.0 };
+        let c0 = ((p.x - OFF_X) / (SQRT3 * HEX) - shift).round() as i32;
+        for c in (c0 - 1)..=(c0 + 1) {
+            if c < 0 || c >= COLS as i32 {
+                continue;
+            }
+            let i = r as usize * COLS + c as usize;
+            let d = cell_pos(i).distance(p);
+            if d < best.0 {
+                best = (d, i);
+            }
+        }
+    }
+    best.1
+}
+
+// Cells along the straight segment between two cell centers. Successive
+// samples land in the same or an adjacent hex (hexes meeting at a corner
+// all touch each other), so the result is a connected one-hex-wide path.
+fn hex_line(a: usize, b: usize) -> Vec<usize> {
+    let (pa, pb) = (cell_pos(a), cell_pos(b));
+    let steps = (pa.distance(pb) / (HEX * 0.25)).ceil().max(1.0) as usize;
+    let mut out: Vec<usize> = Vec::new();
+    for s in 0..=steps {
+        let c = nearest_cell(pa + (pb - pa) * (s as f32 / steps as f32));
+        if out.last() != Some(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+// Randomized compact growth from `center` up to `target` cells: each step
+// draws three frontier cells and takes the one nearest the center (`aspect`
+// stretches the blob horizontally). With an island id, the blob never
+// touches another island's cells, so islands stay separated by water.
+fn grow_blob(
+    mask: &mut [bool],
+    center: usize,
+    target: usize,
+    aspect: f32,
+    mut island: Option<(&mut Vec<usize>, usize)>,
+) {
+    let cp = cell_pos(center);
+    let dist = |i: usize| {
+        let d = cell_pos(i) - cp;
+        (d.x / aspect).powi(2) + d.y * d.y
+    };
+    let free = |c: usize, mask: &[bool], island: &Option<(&mut Vec<usize>, usize)>| {
+        !mask[c]
+            && island.as_ref().is_none_or(|(o, id)| {
+                std::iter::once(c)
+                    .chain(cell_neighbors(c))
+                    .all(|n| o[n] == usize::MAX || o[n] == *id)
+            })
+    };
+    let claim = |c: usize, mask: &mut [bool], island: &mut Option<(&mut Vec<usize>, usize)>| {
+        mask[c] = true;
+        if let Some((o, id)) = island {
+            o[c] = *id;
+        }
+    };
+    if !free(center, mask, &island) {
+        return;
+    }
+    claim(center, mask, &mut island);
+    let mut cand: Vec<usize> = cell_neighbors(center);
+    let mut grown = 1;
+    while grown < target && !cand.is_empty() {
+        let mut k = gen_range(0, cand.len());
+        for _ in 0..2 {
+            let j = gen_range(0, cand.len());
+            if dist(cand[j]) < dist(cand[k]) {
+                k = j;
+            }
+        }
+        let c = cand.swap_remove(k);
+        if !free(c, mask, &island) {
+            continue;
+        }
+        claim(c, mask, &mut island);
+        grown += 1;
+        cand.extend(cell_neighbors(c).into_iter().filter(|&n| !mask[n]));
+    }
+}
+
+// k island centers spread over the grid (two cells clear of the edges),
+// as far apart as a few random tries manage
+fn island_centers(k: usize) -> Vec<usize> {
+    let w = SQRT3 * HEX * COLS as f32;
+    let h = 1.5 * HEX * ROWS as f32;
+    let mut min_d = (w * h / k as f32).sqrt() * 0.95;
+    let mut centers: Vec<usize> = Vec::new();
+    let mut tries = 0;
+    while centers.len() < k {
+        let c = cell_at(gen_range(2, COLS - 2), gen_range(2, ROWS - 2));
+        if centers
+            .iter()
+            .all(|&o| cell_pos(o).distance(cell_pos(c)) >= min_d)
+        {
+            centers.push(c);
+        }
+        tries += 1;
+        if tries % 50 == 0 {
+            min_d *= 0.9; // crowded: accept closer islands
+        }
+    }
+    centers
+}
+
+// Prim's minimum spanning tree over the island centers: the bridges
+fn spanning_tree(centers: &[usize]) -> Vec<(usize, usize)> {
+    let mut in_tree = vec![false; centers.len()];
+    in_tree[0] = true;
+    let mut edges = Vec::new();
+    for _ in 1..centers.len() {
+        let mut best: Option<(f32, usize, usize)> = None;
+        for a in (0..centers.len()).filter(|&a| in_tree[a]) {
+            for b in (0..centers.len()).filter(|&b| !in_tree[b]) {
+                let d = cell_pos(centers[a]).distance(cell_pos(centers[b]));
+                if best.is_none_or(|x| d < x.0) {
+                    best = Some((d, a, b));
+                }
+            }
+        }
+        let (_, a, b) = best.unwrap();
+        in_tree[b] = true;
+        edges.push((a, b));
+    }
+    edges
+}
+
 impl Game {
-    pub(crate) fn new(
+    // The default options run exactly the original generator (same RNG
+    // draws, same results); other options restrict growth to a land mask
+    // and change how many regions are grown and removed.
+    pub(crate) fn new_with(
         players: usize,
         humans: usize,
         difficulty: Difficulty,
         teams: TeamCfg,
+        opts: MapOpts,
     ) -> Self {
+        let requested = opts;
+        let mut opts = opts;
+        let mut attempts = 0u32;
         'gen: loop {
             let total = COLS * ROWS;
+            // Termination guard for the optional shapes: if an island layout
+            // keeps failing the checks below, fall back to one landmass.
+            attempts += 1;
+            if attempts > 400 && opts.shape == MapShape::Islands {
+                opts.shape = MapShape::Continent;
+            }
+            let (n_seeds, base_holes) = opts.regions();
+            let land = land_mask(opts);
+            let is_land = |c: usize| land.as_ref().is_none_or(|m| m[c]);
 
-            // Grow N_SEEDS organic regions with a randomized multi-source flood fill.
+            // Grow n_seeds organic regions with a randomized multi-source flood fill.
             let mut cell_terr = vec![-1i32; total];
             let mut picked = HashSet::new();
             let mut frontier: Vec<usize> = Vec::new();
             let mut next_id = 0i32;
-            while picked.len() < N_SEEDS {
+            while picked.len() < n_seeds {
                 let c = gen_range(0, total);
-                if picked.insert(c) {
+                if is_land(c) && picked.insert(c) {
                     cell_terr[c] = next_id;
                     next_id += 1;
                     frontier.push(c);
@@ -171,7 +480,7 @@ impl Game {
                 let cell = frontier[k];
                 let free: Vec<usize> = cell_neighbors(cell)
                     .into_iter()
-                    .filter(|&n| cell_terr[n] == -1)
+                    .filter(|&n| cell_terr[n] == -1 && is_land(n))
                     .collect();
                 if free.is_empty() {
                     frontier.swap_remove(k);
@@ -184,18 +493,20 @@ impl Game {
 
             // Delete a few regions so the map gets an irregular outline and
             // holes — removing extras until every player gets the same count
-            let mut holes_n = N_HOLES;
-            while (N_SEEDS - holes_n) % players != 0 {
+            let mut holes_n = base_holes;
+            while (n_seeds - holes_n) % players != 0 {
                 holes_n += 1;
             }
-            let mut region_sizes = [0usize; N_SEEDS];
+            let mut region_sizes = vec![0usize; n_seeds];
             for &t in &cell_terr {
-                region_sizes[t as usize] += 1;
+                if t >= 0 {
+                    region_sizes[t as usize] += 1;
+                }
             }
             if region_sizes.iter().filter(|&&size| size < 3).count() > holes_n {
                 continue 'gen;
             }
-            let mut ids: Vec<i32> = (0..N_SEEDS as i32).collect();
+            let mut ids: Vec<i32> = (0..n_seeds as i32).collect();
             shuffle(&mut ids);
             // Tiny regions cannot hold a readable dice tower. Always spend
             // the available holes on those first instead of repeatedly
@@ -203,7 +514,7 @@ impl Game {
             // remove every one of them.
             ids.sort_by_key(|&id| region_sizes[id as usize] >= 3);
             let holes: HashSet<i32> = ids[..holes_n].iter().copied().collect();
-            let mut remap = vec![-1i32; N_SEEDS];
+            let mut remap = vec![-1i32; n_seeds];
             for (new_id, &old) in ids[holes_n..].iter().enumerate() {
                 remap[old as usize] = new_id as i32;
             }
@@ -214,7 +525,7 @@ impl Game {
                     -1
                 };
             }
-            let n_terr = N_SEEDS - holes_n;
+            let n_terr = n_seeds - holes_n;
 
             let mut cells: Vec<Vec<usize>> = vec![Vec::new(); n_terr];
             for (i, &t) in cell_terr.iter().enumerate() {
@@ -372,6 +683,7 @@ impl Game {
             return Game {
                 players,
                 humans,
+                map: requested,
                 teams,
                 team: assign_teams(players, humans, teams),
                 names: Vec::new(),
@@ -390,6 +702,7 @@ impl Game {
                 fx: vec![TerrFx::default(); terrs.len()],
                 terrs,
                 current: first,
+                turns_done: 0,
                 selected: None,
                 keyboard_hover: None,
                 log: vec!["A new war begins!".to_string()],
@@ -504,6 +817,73 @@ mod tests {
         }
         eat(g.current as u64);
         h
+    }
+
+    #[test]
+    fn map_option_codes_round_trip() {
+        assert_eq!(MapOpts::default().code(), "m-c");
+        assert_eq!(
+            MapOpts::from_code("s-i"),
+            Some(MapOpts::new(MapSize::Small, MapShape::Islands))
+        );
+        for o in MapOpts::ALL {
+            assert_eq!(MapOpts::from_code(o.code()), Some(o));
+        }
+        for bad in ["", "m", "x-c", "m-x", "M-C", "m-c-i"] {
+            assert_eq!(MapOpts::from_code(bad), None, "{bad:?}");
+        }
+    }
+
+    // every option and player count must terminate and keep the invariants:
+    // equal shares, readable territories, one connected map
+    #[test]
+    fn every_map_option_generates_valid_maps() {
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+        for opts in MapOpts::ALL {
+            let mut sizes = Vec::new();
+            for players in 2..=MAX_PLAYERS {
+                for seed in 0..12u64 {
+                    let g = gen_map_with(
+                        seed * 7919,
+                        players,
+                        1,
+                        Difficulty::Normal,
+                        TeamCfg::default(),
+                        opts,
+                    );
+                    let n = g.terrs.len();
+                    sizes.push(n);
+                    assert_eq!(g.map, opts);
+                    assert!(n >= players * 2, "{} {players}p: {n}", opts.code());
+                    for p in 0..players {
+                        assert_eq!(g.count(p) * players, n);
+                    }
+                    let mut cells = vec![0usize; n];
+                    for &t in g.cell_terr.iter().filter(|&&t| t >= 0) {
+                        cells[t as usize] += 1;
+                    }
+                    assert!(cells.iter().all(|&c| c >= 3));
+                    let mut seen = vec![false; n];
+                    let mut stack = vec![0usize];
+                    seen[0] = true;
+                    while let Some(t) = stack.pop() {
+                        for &nb in &g.terrs[t].neighbors {
+                            if !seen[nb] {
+                                seen[nb] = true;
+                                stack.push(nb);
+                            }
+                        }
+                    }
+                    assert!(seen.iter().all(|&s| s), "{} disconnected", opts.code());
+                }
+            }
+            let avg = sizes.iter().sum::<usize>() / sizes.len();
+            match opts.size {
+                MapSize::Small => assert!(avg < 36, "{} avg {avg}", opts.code()),
+                MapSize::Medium => assert!((40..=56).contains(&avg), "{} avg {avg}", opts.code()),
+                MapSize::Large => assert!(avg > 54, "{} avg {avg}", opts.code()),
+            }
+        }
     }
 
     // Seeds are shared, bookmarked and sent to network peers: the default

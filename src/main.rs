@@ -41,6 +41,7 @@ mod play;
 mod replay;
 mod settings;
 mod setup;
+mod sim;
 mod sound;
 mod svg;
 #[cfg(test)]
@@ -91,6 +92,11 @@ pub(crate) struct App {
 }
 
 fn main() {
+    // Headless bot-only balance simulator (see sim.rs); never opens a window.
+    if let Ok(games) = std::env::var("DW_SIM") {
+        sim::run(&games);
+        return;
+    }
     if let Err(error) = engine::init("Dice Wars", WIN_W as usize, WIN_H as usize) {
         engine::fatal_error(&error);
         std::process::exit(1);

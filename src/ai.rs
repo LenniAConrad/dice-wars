@@ -49,7 +49,12 @@ pub(crate) fn win_chance_cached(a: u32, d: u32) -> f32 {
 
 impl Game {
     // Pick the AI's next attack based on its personality and the difficulty.
+    // Easy and Normal score attacks by odds and temperament; Hard evaluates
+    // the board after each possible outcome (hard_attack below).
     pub(crate) fn best_ai_attack(&self) -> Option<(usize, usize)> {
+        if self.difficulty == Difficulty::Hard {
+            return self.hard_attack();
+        }
         let cur = self.current;
         let persona = self.personas[cur];
 
@@ -99,10 +104,10 @@ impl Game {
             }
         };
         // how strongly this bot coordinates against a runaway leader
-        let coord = match self.difficulty {
-            Difficulty::Easy => 0.15,
-            Difficulty::Normal => 1.0,
-            Difficulty::Hard => 1.6,
+        let coord = if self.difficulty == Difficulty::Easy {
+            0.15
+        } else {
+            1.0
         };
 
         let mut best: Option<(f32, usize, usize)> = None;
@@ -119,10 +124,10 @@ impl Game {
                 }
                 // decide on the exact win probability, not a crude dice gap
                 let p = win_chance_cached(ta.dice, td.dice);
-                let mut need: f32 = match self.difficulty {
-                    Difficulty::Easy => 0.65,
-                    Difficulty::Normal => 0.50,
-                    Difficulty::Hard => 0.42,
+                let mut need: f32 = if self.difficulty == Difficulty::Easy {
+                    0.65
+                } else {
+                    0.50
                 };
                 need += match persona {
                     Persona::Aggressive => -0.06,
@@ -165,15 +170,6 @@ impl Game {
                 if self.difficulty == Difficulty::Easy {
                     score += gen_range(0.0f32, 40.0); // sloppy target choice
                 }
-                if self.difficulty == Difficulty::Hard {
-                    // values conquests that consolidate territory
-                    let friends = td
-                        .neighbors
-                        .iter()
-                        .filter(|&&n| self.terrs[n].owner == cur)
-                        .count();
-                    score += friends as f32 * 4.0;
-                }
                 match persona {
                     Persona::Aggressive => score += 4.0,
                     Persona::Defensive => score += (p - 0.5) * 60.0,
@@ -194,6 +190,151 @@ impl Game {
                 }
                 if best.is_none_or(|b| score > b.0) {
                     best = Some((score, a, d));
+                }
+            }
+        }
+        best.map(|(_, a, d)| (a, d))
+    }
+}
+
+// Hard bots weigh each attack by what the board is worth to them after a
+// win and after a loss, against what it is worth now. Same dice, same
+// information and the same reinforcement rule as everyone else.
+struct HardW {
+    region: f32, // per territory in the largest region (= dice per turn)
+    terr: f32,   // per territory owned
+    dice: f32,   // per die on own land
+    risk: f32,   // expected losses to the strongest adjacent enemy stack
+    main: f32,   // extra worth of a territory inside the largest region
+    enemy: f32,  // per territory an enemy's largest region shrinks by
+    thresh: f32, // minimum expected gain to keep attacking
+}
+
+// tuned with the headless simulator (1 Hard vs 5 Normal, DW_SIM)
+const HARD: HardW = HardW {
+    region: 1.5,
+    terr: 0.5,
+    dice: 0.6,
+    risk: 1.0,
+    main: 1.0,
+    enemy: 0.3,
+    thresh: 0.0,
+};
+
+impl Game {
+    // largest connected group of p's land on a hypothetical board (team
+    // bridging as in largest_region); `main` marks its territories
+    fn region_on(&self, p: usize, owner: &[usize], main: Option<&mut Vec<bool>>) -> u32 {
+        let bridge = self.teams.on && self.teams.bridge;
+        let n = owner.len();
+        let mut comp = vec![usize::MAX; n];
+        let (mut best, mut best_id) = (0u32, usize::MAX);
+        for start in 0..n {
+            if comp[start] != usize::MAX || owner[start] != p {
+                continue;
+            }
+            let mut size = 0u32;
+            let mut stack = vec![start];
+            comp[start] = start;
+            while let Some(t) = stack.pop() {
+                if owner[t] == p {
+                    size += 1;
+                }
+                for &nb in &self.terrs[t].neighbors {
+                    let o = owner[nb];
+                    if comp[nb] == usize::MAX && (o == p || (bridge && self.same_team(p, o))) {
+                        comp[nb] = start;
+                        stack.push(nb);
+                    }
+                }
+            }
+            if size > best {
+                best = size;
+                best_id = start;
+            }
+        }
+        if let Some(m) = main {
+            for t in 0..n {
+                m[t] = comp[t] == best_id && owner[t] == p;
+            }
+        }
+        best
+    }
+
+    // what this board is worth to `me`
+    fn hard_value(&self, me: usize, owner: &[usize], dice: &[u32]) -> f32 {
+        let w = &HARD;
+        let mut main = vec![false; owner.len()];
+        let region = self.region_on(me, owner, Some(&mut main));
+        let (mut terr, mut dsum, mut risk) = (0.0f32, 0.0f32, 0.0f32);
+        for t in 0..owner.len() {
+            if owner[t] != me {
+                continue;
+            }
+            terr += 1.0;
+            dsum += dice[t] as f32;
+            let threat = self.terrs[t]
+                .neighbors
+                .iter()
+                .filter(|&&e| !self.is_ally(me, owner[e]) && dice[e] >= 2)
+                .map(|&e| win_chance_cached(dice[e], dice[t]))
+                .fold(0.0f32, f32::max);
+            let worth = 1.0 + if main[t] { w.main } else { 0.0 } + 0.1 * dice[t] as f32;
+            risk += threat * worth;
+        }
+        w.region * region as f32 + w.terr * terr + w.dice * dsum - w.risk * risk
+    }
+
+    fn hard_attack(&self) -> Option<(usize, usize)> {
+        let me = self.current;
+        let w = &HARD;
+        let mut owner: Vec<usize> = self.terrs.iter().map(|t| t.owner).collect();
+        let mut dice: Vec<u32> = self.terrs.iter().map(|t| t.dice).collect();
+        // a saturated board must never stall (see best_ai_attack)
+        let stuck = self.reserve[me] >= 8
+            || (0..owner.len()).all(|t| owner[t] != me || dice[t] == MAX_DICE);
+        let mut need = w.thresh;
+        need += match self.personas[me] {
+            Persona::Aggressive => -0.15,
+            Persona::Defensive => 0.15,
+            _ => 0.0,
+        };
+        let now = self.hard_value(me, &owner, &dice);
+        let total = owner.len() as f32;
+        let mut best: Option<(f32, usize, usize)> = None;
+        for a in 0..owner.len() {
+            if owner[a] != me || dice[a] < 2 {
+                continue;
+            }
+            for &d in &self.terrs[a].neighbors {
+                let def = owner[d];
+                if self.is_ally(me, def) {
+                    continue;
+                }
+                let p = win_chance_cached(dice[a], dice[d]);
+                if p < 0.25 {
+                    continue;
+                }
+                let (da, dd) = (dice[a], dice[d]);
+                let def_region = self.region_on(def, &owner, None) as f32;
+                // after a win
+                owner[d] = me;
+                dice[d] = da - 1;
+                dice[a] = 1;
+                let mut win = self.hard_value(me, &owner, &dice);
+                let shrink = def_region - self.region_on(def, &owner, None) as f32;
+                // hurting whoever is ahead matters most
+                let share = self.count(def) as f32 / total;
+                win += w.enemy * shrink * (0.5 + 2.0 * share);
+                // after a loss
+                owner[d] = def;
+                dice[d] = dd;
+                let lose = self.hard_value(me, &owner, &dice);
+                dice[a] = da;
+                let gain = p * win + (1.0 - p) * lose - now;
+                let ok = gain > need || (stuck && p >= 0.42);
+                if ok && best.is_none_or(|b| gain > b.0) {
+                    best = Some((gain, a, d));
                 }
             }
         }
