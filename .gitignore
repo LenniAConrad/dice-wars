@@ -14,8 +14,10 @@ replay-*.gif
 # release artifacts
 dist/
 
-# local agent state and worktrees
+# local agent state, worktrees and agent instructions
 /.claude/
+/AGENTS.md
+/CLAUDE.md
 
 # Python caches from scripts/
 __pycache__/
