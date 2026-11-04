@@ -54,7 +54,8 @@ macOS default prefix), `DICE_WARS_APPLE_TOOLS_WAIT_SECONDS` (macOS, default
 - Windows: Settings > Apps > Dice Wars, or `install-windows.cmd -Uninstall`
 
 Uninstalling keeps your settings, bookmarks and replays
-(`~/.local/share/dice-wars`, or `%APPDATA%\dice-wars` on Windows) and leaves
+(`~/.local/share/dice-wars` on Linux, `~/Library/Application Support/dice-wars`
+on macOS, `%APPDATA%\dice-wars` on Windows) and leaves
 Rust and the system packages in place.
 
 ## Without the installers

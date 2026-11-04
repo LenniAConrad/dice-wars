@@ -1,3 +1,6 @@
+// Release builds on Windows start as a GUI app without a console window.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use dicegame::engine::audio::{load_sound_from_bytes, play_sound, PlaySoundParams, Sound};
 use dicegame::engine::random::gen_range;
 use dicegame::engine::{self, prelude::*};

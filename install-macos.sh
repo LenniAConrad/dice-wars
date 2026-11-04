@@ -285,7 +285,7 @@ if ((UNINSTALL)); then
     INSTALLER_DONE=1
     printf '\nSUCCESS: Dice Wars was removed.\n'
     printf '  Your settings, bookmarks and replays in %s are kept;\n' \
-        "${XDG_DATA_HOME:-$HOME/.local/share}/dice-wars"
+        "$HOME/Library/Application Support/dice-wars"
     printf '  delete that folder too to remove them.\n'
     printf '  Apple'"'"'s Command Line Tools and the Rust that the installer added are left in place.\n'
     printf '  Finished in %s.\n' "$(installer_elapsed)"
