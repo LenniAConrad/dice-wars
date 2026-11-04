@@ -39,6 +39,11 @@ start **Dice Wars** from your app menu, Launchpad or Start Menu, or run
 `dice-wars` in a terminal. Options and uninstalling are covered in the
 [install guide](docs/INSTALL.md).
 
+Prefer not to build? Every [release](https://github.com/LenniAConrad/dice-wars/releases)
+has ready-to-run downloads for Linux (x86_64), Windows (x64) and macOS
+(universal). The Mac app is not notarized: if macOS refuses to open it, go to
+System Settings → Privacy & Security and click **Open Anyway**.
+
 <p align="center">
   <img src="assets/board.svg" width="760" alt="A Dice Wars board after a few bot turns: pastel territories with stacks of dice">
 </p>
@@ -74,7 +79,7 @@ play. Details and firewall tips are in the [player guide](docs/GUIDE.md#playing-
 
 - [Player guide](docs/GUIDE.md): rules, teams, difficulty, multiplayer, replays and accessibility.
 - [Install guide](docs/INSTALL.md): installer options, manual builds and uninstalling.
-- [Development](docs/DEVELOPMENT.md): headless checks, test hooks, performance and project layout.
+- [Development](docs/DEVELOPMENT.md): [project layout](docs/DEVELOPMENT.md#project-layout), headless checks, test hooks and performance.
 
 ## License
 

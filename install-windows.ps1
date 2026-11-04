@@ -324,15 +324,27 @@ try {
     }
     $architecture = $env:PROCESSOR_ARCHITEW6432
     if (-not $architecture) { $architecture = $env:PROCESSOR_ARCHITECTURE }
-    if ($architecture -ne 'AMD64') {
+    # Windows 11 on ARM runs x64 programs through its built-in emulation, so on
+    # ARM64 the installer builds the same x64 GNU program (Rust's GNU toolchain
+    # brings its own linker, and a native ARM64 build would need the Microsoft
+    # C++ ARM64 tools). Windows 10 on ARM can only emulate 32-bit x86 programs.
+    $emulatedX64 = $false
+    if ($architecture -eq 'ARM64') {
+        if ($windows.Build -lt 22000) {
+            Fail 2 "Windows 11 is needed on ARM processors; this PC runs Windows $windows." `
+                @('Windows 10 on ARM cannot run 64-bit x64 programs. Update to Windows 11, then run the same command again.')
+        }
+        $emulatedX64 = $true
+    } elseif ($architecture -ne 'AMD64') {
         Fail 2 "unsupported processor: $architecture." `
-            @('This installer builds Dice Wars for 64-bit Intel and AMD (x64) Windows.')
+            @('This installer builds Dice Wars for 64-bit Intel and AMD (x64) or ARM64 Windows 11.')
     }
     if ($PSVersionTable.PSVersion.Major -lt 5) {
         Fail 2 "Windows PowerShell 5 or newer is needed; this is version $($PSVersionTable.PSVersion)." `
             @('Update Windows PowerShell, then run the same command again.')
     }
     Write-Ok "Windows $windows, $architecture"
+    if ($emulatedX64) { Write-Note 'ARM64: Dice Wars is built as an x64 program and runs through Windows emulation' }
     if (-not $Prefix) { $Prefix = Join-Path $env:LOCALAPPDATA 'Programs\DiceWars' }
     $Prefix = [System.IO.Path]::GetFullPath($Prefix)
     $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) "$AppName.lnk"
@@ -352,7 +364,8 @@ try {
     # The GNU toolchain needs no separate build tools (see the header), so this
     # step only decides which toolchain to use.
     Write-Step 'Install build tools'
-    $buildTools = Find-BuildTools
+    $buildTools = $null
+    if (-not $emulatedX64) { $buildTools = Find-BuildTools }
     if ($buildTools -and (Test-WindowsSdk)) {
         $HostTriple = 'x86_64-pc-windows-msvc'
         Write-Ok "Microsoft C++ build tools are installed ($buildTools); building with them"

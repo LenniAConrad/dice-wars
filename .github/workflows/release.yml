@@ -20,6 +20,27 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+      - name: Check the tag and extract its release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)
+          if [ "$RELEASE_TAG" != "v$version" ]; then
+            echo "::error::tag $RELEASE_TAG does not match the Cargo.toml version $version (expected v$version)"
+            exit 1
+          fi
+          # The section runs from "# Dice Wars <tag>" to the next "---" or top-level heading.
+          awk -v head="# Dice Wars $RELEASE_TAG" '
+            $0 == head { found = 1; next }
+            found && ($0 == "---" || /^# /) { exit }
+            found { print }
+          ' RELEASE_NOTES.md > "$RUNNER_TEMP/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "::error::RELEASE_NOTES.md has no \"# Dice Wars $RELEASE_TAG\" section"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/notes.md"
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y libx11-6 libpulse0
       - name: Build
@@ -38,7 +59,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
-            gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file RELEASE_NOTES.md
+            gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/notes.md"
       - name: Upload asset
         env:
           GH_TOKEN: ${{ github.token }}

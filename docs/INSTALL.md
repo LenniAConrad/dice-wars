@@ -9,7 +9,7 @@ it is doing, ends with SUCCESS or FAILED, and is safe to run again.
 |---|---|---|
 | Linux | `bash install-linux.sh` | `~/.local/bin/dice-wars`, icon and app-menu entry |
 | macOS, Apple silicon / Intel | `bash install-macos.sh` | `~/Applications/Dice Wars.app`, plus `~/.local/bin/dice-wars` linked to it |
-| Windows 10/11 x64 | double-click `install-windows.cmd` | `%LOCALAPPDATA%\Programs\DiceWars\DiceWars.exe`, Start Menu shortcut, Settings > Apps entry |
+| Windows 10/11 x64, Windows 11 ARM64 (x64 emulation) | double-click `install-windows.cmd` | `%LOCALAPPDATA%\Programs\DiceWars\DiceWars.exe`, Start Menu shortcut, Settings > Apps entry |
 
 What each installer gets when it is missing:
 

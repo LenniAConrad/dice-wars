@@ -514,11 +514,12 @@ else
             ;;
         pacman)
             # No -y: syncing the package list without upgrading the system is
-            # a partial upgrade, which Arch does not support.
-            installer_doing "pacman -S ${PACKAGES[*]}"
+            # a partial upgrade, which Arch does not support. A full -Syu is
+            # the user's call, so a stale package list is reported instead.
+            installer_doing "pacman -S --needed ${PACKAGES[*]}"
             run_privileged pacman -S --noconfirm --needed "${PACKAGES[@]}" \
                 || installer_die 1 "pacman could not install ${PACKAGES[*]}; its messages are above." \
-                    "If it could not download them, update the system first (sudo pacman -Syu), then run the same command again."
+                    "If pacman reported \"failed retrieving file\" or \"404\", its package list is out of date: update the whole system with sudo pacman -Syu, then run the same command again."
             ;;
         zypper)
             installer_doing "zypper install ${PACKAGES[*]}"
