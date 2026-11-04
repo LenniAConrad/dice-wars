@@ -483,7 +483,7 @@ fn key_code(sym: c_ulong) -> Option<KeyCode> {
         _ => return None,
     })
 }
-// Linux clipboard helpers in main.rs run off the render thread.
+// Linux clipboard helpers in src/clipboard.rs run off the render thread.
 pub(super) fn clipboard_set(_: &str) {}
 pub(super) fn clipboard_get() -> Option<String> {
     None
