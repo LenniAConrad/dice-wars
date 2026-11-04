@@ -58,7 +58,19 @@ pub(crate) fn load_bookmarks() -> Vec<(u64, usize)> {
 
 pub(crate) fn save_bookmarks(b: &[(u64, usize)]) {
     let s: String = b.iter().map(|(s, p)| format!("{} {}\n", s, p)).collect();
-    let _ = std::fs::write(data_file(BOOKMARK_FILE), s);
+    let _ = write_atomic(&data_file(BOOKMARK_FILE), &s);
+}
+
+// Write a sibling temp file and rename it over the target, so a crash or
+// power loss mid-write never leaves a truncated file. The rename replaces
+// the old file on every platform (MoveFileEx with REPLACE_EXISTING on Windows).
+fn write_atomic(path: &str, contents: &str) -> std::io::Result<()> {
+    let tmp = format!("{path}.{}.tmp", std::process::id());
+    let result = std::fs::write(&tmp, contents).and_then(|_| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 const SETTINGS_FILE: &str = "settings.txt";
@@ -106,6 +118,10 @@ impl Settings {
 }
 
 pub(crate) fn load_settings() -> Settings {
+    parse_settings(&std::fs::read_to_string(data_file(SETTINGS_FILE)).unwrap_or_default())
+}
+
+fn parse_settings(txt: &str) -> Settings {
     let mut s = Settings {
         chances: true,
         muted: false,
@@ -126,58 +142,52 @@ pub(crate) fn load_settings() -> Settings {
         players: 6,
         difficulty: 1,
     };
-    if let Ok(txt) = std::fs::read_to_string(data_file(SETTINGS_FILE)) {
-        let has_theme = txt.lines().any(|l| l.starts_with("theme "));
-        for l in txt.lines() {
-            let mut it = l.split_whitespace();
-            match (it.next(), it.next()) {
-                (Some("chances"), Some(v)) => s.chances = v != "0",
-                (Some("muted"), Some(v)) => s.muted = v != "0",
-                (Some("quiet"), Some(v)) => s.quiet = v != "0",
-                (Some("colorblind"), Some(v)) => s.colorblind = v != "0",
-                (Some("color"), Some(v)) => s.color = v.parse::<usize>().unwrap_or(0) % MAX_PLAYERS,
-                (Some("speed"), Some(v)) => {
-                    s.speed = match v {
-                        "2" => 2.0,
-                        "4" => 4.0,
-                        _ => 1.0,
-                    }
+    let has_theme = txt.lines().any(|l| l.starts_with("theme "));
+    for l in txt.lines() {
+        let mut it = l.split_whitespace();
+        match (it.next(), it.next()) {
+            (Some("chances"), Some(v)) => s.chances = v != "0",
+            (Some("muted"), Some(v)) => s.muted = v != "0",
+            (Some("quiet"), Some(v)) => s.quiet = v != "0",
+            (Some("colorblind"), Some(v)) => s.colorblind = v != "0",
+            (Some("color"), Some(v)) => s.color = v.parse::<usize>().unwrap_or(0) % MAX_PLAYERS,
+            (Some("speed"), Some(v)) => {
+                s.speed = match v {
+                    "2" => 2.0,
+                    "4" => 4.0,
+                    _ => 1.0,
                 }
-                (Some("reducedmotion"), Some(v)) => s.reduced_motion = v == "1",
-                // older settings files only know light/dark
-                (Some("dark"), Some(v)) if !has_theme => s.theme = (v != "0") as usize,
-                (Some("theme"), Some(v)) => {
-                    s.theme = v.parse::<usize>().unwrap_or(0) % THEMES.len()
-                }
-                (Some("teams"), Some(v)) => s.teams = v != "0",
-                (Some("teamcount"), Some(v)) => {
-                    s.team_count = v.parse::<usize>().unwrap_or(2).clamp(2, MAX_TEAMS)
-                }
-                (Some("teamhvb"), Some(v)) => s.team_hvb = v != "0",
-                (Some("teammine"), Some(v)) => {
-                    s.team_mine = v.parse::<usize>().unwrap_or(0) % MAX_TEAMS
-                }
-                (Some("teambridge"), Some(v)) => s.team_bridge = v != "0",
-                (Some("teamff"), Some(v)) => s.team_ff = v != "0",
-                (Some("name"), Some(v)) => s.name = clean_name(v),
-                (Some("lastaddr"), Some(v)) => s.last_addr = v.chars().take(40).collect(),
-                (Some("players"), Some(v)) => {
-                    s.players = v.parse::<usize>().unwrap_or(6).clamp(2, MAX_PLAYERS)
-                }
-                (Some("difficulty"), Some(v)) => {
-                    s.difficulty = v.parse::<usize>().unwrap_or(1).min(2)
-                }
-                _ => {}
             }
+            (Some("reducedmotion"), Some(v)) => s.reduced_motion = v == "1",
+            // older settings files only know light/dark
+            (Some("dark"), Some(v)) if !has_theme => s.theme = (v != "0") as usize,
+            (Some("theme"), Some(v)) => s.theme = v.parse::<usize>().unwrap_or(0) % THEMES.len(),
+            (Some("teams"), Some(v)) => s.teams = v != "0",
+            (Some("teamcount"), Some(v)) => {
+                s.team_count = v.parse::<usize>().unwrap_or(2).clamp(2, MAX_TEAMS)
+            }
+            (Some("teamhvb"), Some(v)) => s.team_hvb = v != "0",
+            (Some("teammine"), Some(v)) => {
+                s.team_mine = v.parse::<usize>().unwrap_or(0) % MAX_TEAMS
+            }
+            (Some("teambridge"), Some(v)) => s.team_bridge = v != "0",
+            (Some("teamff"), Some(v)) => s.team_ff = v != "0",
+            (Some("name"), Some(v)) => s.name = clean_name(v),
+            (Some("lastaddr"), Some(v)) => s.last_addr = v.chars().take(40).collect(),
+            (Some("players"), Some(v)) => {
+                s.players = v.parse::<usize>().unwrap_or(6).clamp(2, MAX_PLAYERS)
+            }
+            (Some("difficulty"), Some(v)) => s.difficulty = v.parse::<usize>().unwrap_or(1).min(2),
+            _ => {}
         }
     }
     s
 }
 
 pub(crate) fn save_settings(s: &Settings) {
-    let _ = std::fs::write(
-        data_file(SETTINGS_FILE),
-        format!(
+    let _ = write_atomic(
+        &data_file(SETTINGS_FILE),
+        &format!(
             "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\nplayers {}\ndifficulty {}\nreducedmotion {}\nquiet {}\ntheme {}\n",
             s.chances as u8,
             s.muted as u8,
@@ -200,4 +210,108 @@ pub(crate) fn save_settings(s: &Settings) {
             s.theme
         ),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::GLOBALS;
+
+    #[test]
+    fn legacy_dark_flag_becomes_a_theme() {
+        assert_eq!(parse_settings("dark 0\n").theme, 0);
+        assert_eq!(parse_settings("dark 1\n").theme, 1);
+        // a newer file keeps `dark` for older versions; `theme` wins in any order
+        assert_eq!(parse_settings("dark 1\ntheme 3\n").theme, 3);
+        assert_eq!(parse_settings("theme 3\ndark 1\n").theme, 3);
+        assert_eq!(parse_settings("theme 999\n").theme, 999 % THEMES.len());
+        assert_eq!(parse_settings("").theme, 0);
+    }
+
+    #[test]
+    fn settings_survive_a_save_and_load() {
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+        // data_file reads APPDATA on Windows, HOME on macOS, XDG_DATA_HOME elsewhere
+        let var = if cfg!(windows) {
+            "APPDATA"
+        } else if cfg!(target_os = "macos") {
+            "HOME"
+        } else {
+            "XDG_DATA_HOME"
+        };
+        let dir = std::env::temp_dir().join(format!("dice-wars-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = std::env::var_os(var);
+        std::env::set_var(var, &dir);
+
+        let mut s = parse_settings("");
+        s.chances = false;
+        s.muted = true;
+        s.quiet = true;
+        s.colorblind = true;
+        s.color = 4;
+        s.speed = 4.0;
+        s.reduced_motion = true;
+        s.theme = 2 % THEMES.len();
+        s.teams = true;
+        s.team_count = 3.min(MAX_TEAMS);
+        s.team_hvb = true;
+        s.team_mine = 1;
+        s.team_bridge = true;
+        s.team_ff = false;
+        s.name = "Ada_9".into();
+        s.last_addr = "192.168.1.20:7777".into();
+        s.players = 5;
+        s.difficulty = 2;
+        save_settings(&s);
+        save_settings(&s); // replacing an existing file works too
+        let l = load_settings();
+        let leftovers: Vec<_> = std::fs::read_dir(dir.join("dice-wars"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        save_bookmarks(&[(12345678, 4)]);
+        let bookmarks = load_bookmarks();
+
+        match old {
+            Some(v) => std::env::set_var(var, v),
+            None => std::env::remove_var(var),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
+        assert_eq!(bookmarks, vec![(12345678, 4)]);
+        assert_eq!(
+            (
+                l.chances,
+                l.muted,
+                l.quiet,
+                l.colorblind,
+                l.color,
+                l.speed,
+                l.reduced_motion
+            ),
+            (false, true, true, true, 4, 4.0, true)
+        );
+        assert_eq!(l.theme, s.theme);
+        assert_eq!(
+            (
+                l.teams,
+                l.team_count,
+                l.team_hvb,
+                l.team_mine,
+                l.team_bridge,
+                l.team_ff
+            ),
+            (true, s.team_count, true, 1, true, false)
+        );
+        assert_eq!(
+            (l.name.as_str(), l.last_addr.as_str()),
+            ("Ada_9", "192.168.1.20:7777")
+        );
+        assert_eq!((l.players, l.difficulty), (5, 2));
+    }
 }
