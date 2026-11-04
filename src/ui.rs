@@ -38,6 +38,17 @@ pub(crate) fn view_camera() -> Camera2D {
     }
 }
 
+/// The window pixel showing virtual point `v` (inverse of `mouse_virtual`).
+pub(crate) fn virtual_to_window(v: Vec2) -> Vec2 {
+    let sw = screen_width().max(1.0);
+    let sh = screen_height().max(1.0);
+    let k = view_scale();
+    vec2(
+        (v.x - WIN_W * 0.5) * k + sw * 0.5,
+        (v.y - WIN_H * 0.5) * k + sh * 0.5,
+    )
+}
+
 pub(crate) fn mouse_virtual() -> Vec2 {
     let (mx, my) = mouse_position();
     let sw = screen_width().max(1.0);
@@ -473,6 +484,7 @@ fn draw_sliders(cx: f32, cy: f32) {
 
 // a small outlined toolbar button; `active` keeps it highlighted (open panel)
 fn tool_button(r: Rect, mp: Vec2, active: bool) {
+    crate::focus::focusable(r);
     let t = hover_t(r, r.contains(mp));
     let base = if active {
         mix(SRF(), ACCENT(), 0.14)
@@ -544,6 +556,7 @@ pub(crate) fn draw_settings_panel(settings: &Settings, ui: &Ui, m: Vec2) {
     if !settings_open() {
         return;
     }
+    crate::focus::begin_modal();
     let p = r_panel();
     soft_shadow(p.x, p.y, p.w, p.h, 18.0, 2.4);
     draw_round_frame(p.x, p.y, p.w, p.h, 18.0, 1.5, SRF(), CARD_EDGE());
@@ -555,6 +568,7 @@ pub(crate) fn draw_settings_panel(settings: &Settings, ui: &Ui, m: Vec2) {
     );
     for (i, t) in THEMES.iter().enumerate() {
         let r = r_theme(i);
+        crate::focus::focusable(r);
         let (cx, cy, rad) = (r.x + r.w * 0.5, r.y + r.h * 0.5, r.w * 0.5);
         let chosen = i == theme_index();
         if chosen || r.contains(m) {
@@ -590,6 +604,7 @@ pub(crate) fn draw_settings_panel(settings: &Settings, ui: &Ui, m: Vec2) {
         11.0,
         with_alpha(INK(), 0.55),
     );
+    crate::focus::end_modal();
 }
 
 pub(crate) fn control_fill(fill: Color, hovered: bool) -> Color {
@@ -666,6 +681,7 @@ pub(crate) fn ui_animating() -> bool {
 
 /// A flat button: hairline edge, eased hover tint, a 1 px press.
 pub(crate) fn menu_button(r: Rect, fill: Color, edge: Color, hovered: bool) {
+    crate::focus::focusable(r);
     let t = hover_t(r, hovered);
     let pressed = hovered && is_mouse_button_down(MouseButton::Left);
     let f = if pressed {
@@ -772,6 +788,9 @@ pub(crate) fn seg_group(ui: &Ui, m: Vec2, live: bool, items: &[(Rect, &str, bool
         if i > 0 && !sel && !items[i - 1].2 {
             draw_line(r.x, y + 8.0, r.x, y + h - 8.0, 1.5, CARD_EDGE());
         }
+        if live {
+            crate::focus::focusable(*r);
+        }
         let t = hover_t(*r, live && r.contains(m));
         if *sel {
             let fill = palette(HUMAN).fill;
@@ -826,6 +845,10 @@ pub(crate) fn seg_row(
 
 // checkbox row shared by the menu card and both lobbies
 pub(crate) fn draw_toggle(r: Rect, label: &str, on: bool, ui: &Ui, m: Vec2) {
+    // read-only toggles are drawn with an off-canvas mouse; those don't focus
+    if m.x >= 0.0 {
+        crate::focus::focusable(r);
+    }
     let hov = r.contains(m);
     let t = hover_t(r, hov);
     let (bx, by) = (r.x, r.y + 2.0);

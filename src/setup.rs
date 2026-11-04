@@ -214,6 +214,9 @@ pub(crate) fn draw_color_row(ui: &Ui, m: Vec2, selected: usize, taken: &[usize])
             );
         }
         let free = !taken.contains(&i);
+        if free {
+            crate::focus::focusable(r);
+        }
         draw_round_rect(
             r.x,
             r.y,

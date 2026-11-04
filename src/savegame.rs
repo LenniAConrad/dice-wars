@@ -301,8 +301,8 @@ mod tests {
         // the event list replays to the same board
         let s = crate::summary::Summary::of(&back);
         let last = s.series.last().unwrap();
-        for p in 0..back.players {
-            assert_eq!(last[p] as usize, back.count(p));
+        for (p, &lands) in last.iter().enumerate().take(back.players) {
+            assert_eq!(lands as usize, back.count(p));
         }
         let info = info_of(&text).unwrap();
         assert_eq!((info.players, info.difficulty), (5, 2));

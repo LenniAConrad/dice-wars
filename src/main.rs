@@ -32,6 +32,7 @@ mod clipboard;
 mod coach;
 mod dice;
 mod draw_game;
+mod focus;
 mod game;
 mod gif;
 mod lan;
@@ -457,6 +458,19 @@ impl App {
             || self.lobby_name_edit
             || (matches!(self.screen, Screen::JoinLobby) && self.guest.is_none());
         toolbar_shortcut(&mut self.settings, &mut self.snd_queue, text_editing);
+        // Keyboard and gamepad navigation: everywhere except while typing,
+        // and in play only for dialogs (the arrow keys move on the map there).
+        let nav =
+            if (matches!(self.screen, Screen::Menu) && self.menu.editing) || self.lobby_name_edit {
+                focus::Nav::Off
+            } else if matches!(self.screen, Screen::Play) {
+                focus::Nav::ModalOnly
+            } else if matches!(self.screen, Screen::JoinLobby) && self.guest.is_none() {
+                focus::Nav::AllButTab
+            } else {
+                focus::Nav::All
+            };
+        focus::begin_frame(nav);
         // The toolbar and its settings panel sit above every screen: clicks
         // and Esc they use never reach the screen underneath.
         if is_mouse_button_pressed(MouseButton::Left)
@@ -565,6 +579,7 @@ impl App {
         }
         set_camera(&view_camera());
         draw_settings_panel(&self.settings, &self.ui, mouse_virtual());
+        focus::draw_ring();
 
         if self.screen_fade > 0.0 {
             set_default_camera();

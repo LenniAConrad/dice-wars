@@ -205,9 +205,9 @@ mod tests {
             game.terrs.len()
         );
         let last = s.series.last().unwrap();
-        for p in 0..game.players {
+        for (p, &lands) in last.iter().enumerate().take(game.players) {
             assert_eq!(
-                last[p] as usize,
+                lands as usize,
                 game.count(p),
                 "replayed lands of player {p}"
             );

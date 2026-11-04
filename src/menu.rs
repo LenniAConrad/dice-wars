@@ -583,6 +583,7 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
 
     // the star on the preview saves the map
     let rb = r_bookmark();
+    crate::focus::focusable(rb);
     let marked = menu.is_bookmarked();
     let hovs = rb.contains(m);
     draw_round_frame(
@@ -732,6 +733,7 @@ fn draw_saved_rows(menu: &Menu, ui: &Ui, m: Vec2) {
         let active = seed == menu.seed && players == menu.players;
         let fill = if active { palette(HUMAN).fill } else { SRF() };
         let del = r_bm_del(i);
+        crate::focus::focusable(del);
         let dh = del.contains(m);
         menu_button(
             r,

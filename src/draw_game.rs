@@ -933,10 +933,14 @@ fn draw_over(game: &Game, ui: &Ui, summary: Option<&Summary>) {
         );
     }
     let m = mouse_virtual();
+    crate::focus::begin_modal();
     for (i, label) in ["REPLAY", "SAVE GIF", "NEW MAP", "MENU"]
         .into_iter()
         .enumerate()
     {
+        if i != 2 || !game.net_guest {
+            crate::focus::focusable(r_over_button(i, 0.0));
+        }
         let r = r_over_button(i, rise);
         let enabled = i != 2 || !game.net_guest;
         let hovered = enabled && r_over_button(i, 0.0).contains(m);
@@ -971,6 +975,7 @@ fn draw_over(game: &Game, ui: &Ui, summary: Option<&Summary>) {
             with_alpha(ink, if enabled { a } else { 0.35 * a }),
         );
     }
+    crate::focus::end_modal();
 }
 
 pub(crate) fn draw_confirm(kind: Confirm, ui: &Ui, can_new: bool, resumable: bool) {
@@ -991,8 +996,10 @@ pub(crate) fn draw_confirm(kind: Confirm, ui: &Ui, can_new: bool, resumable: boo
     };
     ui.text_centered(title, WIN_W * 0.5, y + 56.0, 28.0, INK());
     ui.body_centered(body, WIN_W * 0.5, y + 90.0, 16.0, with_alpha(INK(), 0.72));
+    crate::focus::begin_modal();
     let m = mouse_virtual();
     for (r, choice) in confirm_choices(kind, can_new) {
+        crate::focus::focusable(r);
         match choice {
             // ending the game is the quiet, rose-outlined choice; keeping
             // the game is the filled default, matching Enter and ESC
@@ -1026,6 +1033,7 @@ pub(crate) fn draw_confirm(kind: Confirm, ui: &Ui, can_new: bool, resumable: boo
         12.0,
         with_alpha(INK(), 0.6),
     );
+    crate::focus::end_modal();
 }
 
 pub(crate) fn draw_game(game: &Game, ui: &Ui, settings: &Settings, summary: Option<&Summary>) {

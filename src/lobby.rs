@@ -331,6 +331,7 @@ fn draw_players_card(ui: &Ui, m: Vec2, my_name: &str, name_edit: bool, time: f32
         }
         if k == r.you_row {
             let f = r_name_field(r.cfg.on, k);
+            crate::focus::focusable(f);
             let hov = f.contains(m);
             draw_round_frame(
                 f.x,
@@ -579,6 +580,7 @@ fn draw_join_lobby(j: &JoinUi, lan: Option<&LanScan>, settings: &Settings, ui: &
     };
     let label = |text: &str, x: f32, y: f32| label(ui, text, x, y);
     let field = |r: Rect, focused: bool, text: &str, size: f32| {
+        crate::focus::focusable(r);
         let hovered = r.contains(m);
         draw_round_frame(
             r.x,
@@ -674,6 +676,7 @@ fn draw_join_lobby(j: &JoinUi, lan: Option<&LanScan>, settings: &Settings, ui: &
     }
     for (i, g) in games.iter().enumerate() {
         let r = r_join_lan_row(i);
+        crate::focus::focusable(r);
         let hovered = r.contains(m) && j.connect_rx.is_none();
         draw_round_frame(
             r.x + 6.0,

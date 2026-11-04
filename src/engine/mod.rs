@@ -203,6 +203,7 @@ struct Crossfade {
 
 struct Runtime {
     fade: Option<Crossfade>,
+    restore_mouse: Option<(f32, f32)>,
     surface: raster::Surface,
     presentation: raster::Surface,
     previous_raster: Vec<u8>,
@@ -283,6 +284,7 @@ pub fn init(title: &str, width: usize, height: usize) -> Result<(), String> {
     let (rw, rh) = raster_size(width, height);
     let mut rt = Runtime {
         fade: None,
+        restore_mouse: None,
         surface: raster::Surface::new(rw, rh),
         presentation: raster::Surface::new(width, height),
         previous_raster: Vec::new(),
@@ -361,6 +363,21 @@ pub fn modifier_down() -> bool {
     read(false, |r| r.input.modifier_down())
 }
 /// Swallow this frame's click, e.g. when an overlay already handled it.
+/// Click at window pixel (x, y) this frame, as if the mouse were there: used
+/// to activate the keyboard-focused control. The real pointer position comes
+/// back next frame.
+pub fn click_at(x: f32, y: f32) {
+    RUNTIME.with(|r| {
+        if let Some(r) = r.borrow_mut().as_mut() {
+            if r.restore_mouse.is_none() {
+                r.restore_mouse = Some(r.input.mouse);
+            }
+            r.input.mouse = (x, y);
+            r.input.clicked = true;
+            r.input_dirty = true;
+        }
+    });
+}
 pub fn consume_click() {
     RUNTIME.with(|r| {
         if let Some(r) = r.borrow_mut().as_mut() {
@@ -988,6 +1005,9 @@ pub fn next_frame() -> bool {
         r.started = Instant::now();
         let previous = (r.input.mouse, r.input.size, r.input.focused, r.input.left);
         r.input.reset();
+        if let Some(m) = r.restore_mouse.take() {
+            r.input.mouse = m;
+        }
         if let Some(w) = &mut r.native {
             w.poll(&mut r.input);
             // Controllers press ordinary keys, so they also mark input as changed.

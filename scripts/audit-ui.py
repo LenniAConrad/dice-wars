@@ -69,6 +69,32 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
         with Image.open(out / f"layers-partial-{frames}.png") as partial, \
                 Image.open(out / f"layers-full-{frames}.png") as full:
             assert partial.tobytes() == full.tobytes(), f"partial board repaint differs at frame {frames}"
+    # Keyboard navigation: arrows show a focus ring, Enter activates.
+    render("keyboard-nav", DW_FRAME_LIMIT="6", DW_CAPTURE_FRAMES="1",
+           DW_INPUT="2:key:Down;3:key:Down;4:key:Right")
+    with Image.open(out / "keyboard-nav-1.png") as before, Image.open(out / "keyboard-nav.png") as after:
+        assert before.tobytes() != after.tobytes(), "keyboard focus ring missing"
+    # First-game tips point at a land on your first turn; a returning player
+    # (tutorial done) sees the same frame without the bubble.
+    tips_dir = Path(data) / "tips-off" / "dice-wars"
+    tips_dir.mkdir(parents=True)
+    (tips_dir / "settings.txt").write_text("tutorial 1\n")
+    render("tips-on", DW_AUTOSTART="1", DW_DICE_SEED="3", DW_FRAME_LIMIT="560")
+    render("tips-off", DW_AUTOSTART="1", DW_DICE_SEED="3", DW_FRAME_LIMIT="560")
+    with Image.open(out / "tips-on.png") as on, Image.open(out / "tips-off.png") as off:
+        assert on.tobytes() != off.tobytes(), "first-game tips not shown"
+    # An unfinished game is saved as you play and offered as CONTINUE.
+    resume = str(Path(data) / "resume")
+    subprocess.run([str(args.binary.resolve())], cwd=root, timeout=30, check=True,
+                   env=dict(base, XDG_DATA_HOME=resume, APPDATA=resume, DW_AUTOSTART="1",
+                            DW_FRAME_LIMIT="300"))
+    assert (Path(resume) / "dice-wars" / "savegame.txt").exists(), "game was not saved"
+    path = out / "continue.png"
+    subprocess.run([str(args.binary.resolve())], cwd=root, timeout=30, check=True,
+                   env=dict(base, XDG_DATA_HOME=resume, APPDATA=resume, DW_CAPTURE=str(path)))
+    with Image.open(path) as menu, Image.open(out / "menu-light.png") as plain:
+        bar = (70, 654, 530, 690)
+        assert menu.crop(bar).tobytes() != plain.crop(bar).tobytes(), "CONTINUE missing"
     # After a finished game the info card shows the record instead of the rules.
     record_dir = Path(data) / "record" / "dice-wars"
     record_dir.mkdir(parents=True)
@@ -176,4 +202,4 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
                                                 before.getpixel((499, 143)))) <= 2, "uneven star fill"
         with Image.open(out / f"{scene}-3.png") as saved, Image.open(out / f"{scene}-4.png") as hovered:
             assert saved.getpixel((842, 170)) != hovered.getpixel((842, 170)), "delete hover invisible"
-    print(f"Verified 55 scenes, partial board repaints, the host lobby, the record card, replay battle layout, menu cache refresh, white non-target territories and hover feedback in both themes, bookmark states, native output resolution, immediate theme switching, and GIF orientation. Screenshots: {out}")
+    print(f"Verified 60 scenes, keyboard navigation, first-game tips, saving and continuing, partial board repaints, the host lobby, the record card, replay battle layout, menu cache refresh, white non-target territories and hover feedback in both themes, bookmark states, native output resolution, immediate theme switching, and GIF orientation. Screenshots: {out}")
