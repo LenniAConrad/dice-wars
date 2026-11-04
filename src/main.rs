@@ -44,6 +44,10 @@ fn replay_file(name: &str) -> String {
 fn data_file(name: &str) -> String {
     let base = if cfg!(windows) {
         std::env::var("APPDATA").ok().map(std::path::PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var("HOME")
+            .ok()
+            .map(|h| std::path::PathBuf::from(h).join("Library/Application Support"))
     } else {
         std::env::var("XDG_DATA_HOME")
             .ok()
@@ -4684,7 +4688,7 @@ fn spawn_guest_connect(
     rx
 }
 
-// Use the native clipboard on Windows and desktop helpers on Linux.
+// Use the native clipboard on Windows and macOS, and desktop helpers on Linux.
 fn copy_to_clipboard(text: &str) {
     engine::clipboard_set(text);
     #[cfg(target_os = "linux")]

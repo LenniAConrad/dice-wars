@@ -28,9 +28,9 @@ scripts\install.bat   # Windows: install + Start Menu shortcut
 scripts\build.bat     # Windows: build only
 ```
 
-The game has **no Cargo dependencies**. Its native software renderer uses X11/XWayland and PulseAudio on Linux, and Win32/GDI plus Windows audio on Windows. A GPU context is not needed. On Debian/Ubuntu/Mint, the runtime libraries are `libx11-6` and `libpulse0` (normally installed with the desktop).
+The game has **no Cargo dependencies**. Its native software renderer uses X11/XWayland and PulseAudio on Linux, Win32/GDI plus Windows audio on Windows, and Cocoa/Core Animation plus AudioToolbox on macOS (Apple Silicon and Intel). A GPU context is not needed. On Debian/Ubuntu/Mint, the runtime libraries are `libx11-6` and `libpulse0` (normally installed with the desktop).
 
-Build scripts install the Rust toolchain if missing and default to **one build worker** to keep the desktop responsive. Settings, bookmarks, and exported replay GIFs live in your platform's user-data directory (`~/.local/share/dice-wars` on Linux, `%APPDATA%\dice-wars` on Windows).
+Build scripts install the Rust toolchain if missing and default to **one build worker** to keep the desktop responsive. Settings, bookmarks, and exported replay GIFs live in your platform's user-data directory (`~/.local/share/dice-wars` on Linux, `%APPDATA%\dice-wars` on Windows, `~/Library/Application Support/dice-wars` on macOS).
 
 ## Start screen
 

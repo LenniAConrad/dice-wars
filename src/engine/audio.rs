@@ -313,6 +313,187 @@ mod native {
         }
     }
 }
+#[cfg(target_os = "macos")]
+mod native {
+    //! AudioToolbox AudioQueue. The queue's own thread pulls from a small ring;
+    //! `write` blocks while the ring is full. Underruns play silence, so the
+    //! queue never stops and effects after a quiet spell start immediately.
+    use std::collections::VecDeque;
+    use std::ffi::c_void;
+    use std::sync::{Condvar, Mutex, MutexGuard};
+    use std::time::{Duration, Instant};
+    #[repr(C)]
+    struct Format {
+        rate: f64,
+        id: u32,
+        flags: u32,
+        bytes_per_packet: u32,
+        frames_per_packet: u32,
+        bytes_per_frame: u32,
+        channels: u32,
+        bits: u32,
+        reserved: u32,
+    }
+    #[repr(C)]
+    struct Buffer {
+        capacity: u32,
+        data: *mut c_void,
+        size: u32,
+        user: *mut c_void,
+        description_capacity: u32,
+        descriptions: *mut c_void,
+        description_count: u32,
+    }
+    type Queue = *mut c_void;
+    type Callback = unsafe extern "C" fn(*mut c_void, Queue, *mut Buffer);
+    #[link(name = "AudioToolbox", kind = "framework")]
+    extern "C" {
+        fn AudioQueueNewOutput(
+            format: *const Format,
+            callback: Callback,
+            user: *mut c_void,
+            run_loop: *mut c_void,
+            run_loop_mode: *const c_void,
+            flags: u32,
+            queue: *mut Queue,
+        ) -> i32;
+        fn AudioQueueAllocateBuffer(queue: Queue, bytes: u32, buffer: *mut *mut Buffer) -> i32;
+        fn AudioQueueEnqueueBuffer(
+            queue: Queue,
+            buffer: *mut Buffer,
+            descriptions: u32,
+            description: *const c_void,
+        ) -> i32;
+        fn AudioQueueStart(queue: Queue, time: *const c_void) -> i32;
+        fn AudioQueueStop(queue: Queue, immediate: u8) -> i32;
+        fn AudioQueueDispose(queue: Queue, immediate: u8) -> i32;
+    }
+    // Four 512-frame buffers (46 ms) plus a 1536-sample ring (35 ms).
+    const FRAMES: usize = 512;
+    const BUFFERS: usize = 4;
+    const RING: usize = 1536;
+    struct Shared {
+        ring: Mutex<VecDeque<i16>>,
+        space: Condvar,
+    }
+    impl Shared {
+        fn lock(&self) -> MutexGuard<'_, VecDeque<i16>> {
+            self.ring.lock().unwrap_or_else(|e| e.into_inner())
+        }
+    }
+    unsafe extern "C" fn refill(user: *mut c_void, queue: Queue, buffer: *mut Buffer) {
+        // SAFETY: `user` is the Shared owned by Device, freed only after AudioQueueDispose;
+        // every buffer was allocated with FRAMES samples of capacity.
+        unsafe {
+            let shared = &*user.cast::<Shared>();
+            let out = std::slice::from_raw_parts_mut((*buffer).data.cast::<i16>(), FRAMES);
+            let mut ring = shared.lock();
+            let n = ring.len().min(FRAMES);
+            for (dst, src) in out.iter_mut().zip(ring.drain(..n)) {
+                *dst = src;
+            }
+            drop(ring);
+            out[n..].fill(0);
+            shared.space.notify_one();
+            (*buffer).size = (FRAMES * 2) as u32;
+            AudioQueueEnqueueBuffer(queue, buffer, 0, std::ptr::null());
+        }
+    }
+    pub struct Device {
+        queue: Queue,
+        shared: *mut Shared,
+    }
+    impl Device {
+        pub fn new() -> Option<Self> {
+            let format = Format {
+                rate: 44100.0,
+                id: u32::from_be_bytes(*b"lpcm"),
+                // Signed integer | packed, native (little) endian.
+                flags: 4 | 8,
+                bytes_per_packet: 2,
+                frames_per_packet: 1,
+                bytes_per_frame: 2,
+                channels: 1,
+                bits: 16,
+                reserved: 0,
+            };
+            let shared = Box::into_raw(Box::new(Shared {
+                ring: Mutex::new(VecDeque::with_capacity(RING)),
+                space: Condvar::new(),
+            }));
+            let mut queue = std::ptr::null_mut();
+            // SAFETY: the format matches AudioStreamBasicDescription; a null run loop
+            // runs callbacks on the queue's internal thread. On failure, nothing else
+            // references `shared` once the queue is disposed.
+            unsafe {
+                if AudioQueueNewOutput(
+                    &format,
+                    refill,
+                    shared.cast(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    0,
+                    &mut queue,
+                ) != 0
+                    || queue.is_null()
+                {
+                    drop(Box::from_raw(shared));
+                    return None;
+                }
+                let device = Self { queue, shared };
+                for _ in 0..BUFFERS {
+                    let mut buffer = std::ptr::null_mut();
+                    if AudioQueueAllocateBuffer(queue, (FRAMES * 2) as u32, &mut buffer) != 0
+                        || buffer.is_null()
+                    {
+                        return None;
+                    }
+                    std::ptr::write_bytes((*buffer).data.cast::<u8>(), 0, FRAMES * 2);
+                    (*buffer).size = (FRAMES * 2) as u32;
+                    if AudioQueueEnqueueBuffer(queue, buffer, 0, std::ptr::null()) != 0 {
+                        return None;
+                    }
+                }
+                if AudioQueueStart(queue, std::ptr::null()) != 0 {
+                    return None;
+                }
+                Some(device)
+            }
+        }
+        pub fn write(&mut self, samples: &[i16]) -> bool {
+            // SAFETY: `shared` lives until Drop.
+            let shared = unsafe { &*self.shared };
+            for chunk in samples.chunks(RING / 2) {
+                let mut ring = shared.lock();
+                // The queue pulls every ~12 ms; two silent seconds means it is gone.
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while ring.len() + chunk.len() > RING {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return false;
+                    }
+                    ring = shared
+                        .space
+                        .wait_timeout(ring, deadline - now)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0;
+                }
+                ring.extend(chunk);
+            }
+            true
+        }
+    }
+    impl Drop for Device {
+        fn drop(&mut self) {
+            // SAFETY: immediate dispose is synchronous; no callback runs after it returns.
+            unsafe {
+                AudioQueueStop(self.queue, 1);
+                AudioQueueDispose(self.queue, 1);
+                drop(Box::from_raw(self.shared));
+            }
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
