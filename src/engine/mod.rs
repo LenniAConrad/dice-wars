@@ -2,6 +2,7 @@
 //! The render and input state belong to the main thread; audio uses one bounded worker.
 pub mod audio;
 mod font;
+mod gamepad;
 mod image;
 mod math;
 #[cfg(target_os = "linux")]
@@ -50,6 +51,8 @@ pub enum KeyCode {
     V,
     LeftControl,
     RightControl,
+    LeftShift,
+    RightShift,
     /// Either Alt (Option on macOS).
     Alt,
     /// Either Windows/Super key. Command on macOS reports as Control.
@@ -206,6 +209,7 @@ struct Runtime {
     camera: Option<Camera2D>,
     input: Input,
     native: Option<platform::Window>,
+    gamepad: gamepad::Gamepad,
     started: Instant,
     dt: f32,
     frames: usize,
@@ -290,6 +294,7 @@ pub fn init(title: &str, width: usize, height: usize) -> Result<(), String> {
             ..Default::default()
         },
         native,
+        gamepad: gamepad::Gamepad::default(),
         started: Instant::now(),
         dt: 1.0 / 60.0,
         frames: 0,
@@ -834,6 +839,7 @@ fn apply_actions(r: &mut Runtime) {
                     "Enter" => Some(KeyCode::Enter),
                     "Space" => Some(KeyCode::Space),
                     "Escape" => Some(KeyCode::Escape),
+                    "Tab" => Some(KeyCode::Tab),
                     "Right" => Some(KeyCode::Right),
                     "Left" => Some(KeyCode::Left),
                     "Up" => Some(KeyCode::Up),
@@ -984,6 +990,9 @@ pub fn next_frame() -> bool {
         r.input.reset();
         if let Some(w) = &mut r.native {
             w.poll(&mut r.input);
+            // Controllers press ordinary keys, so they also mark input as changed.
+            let held = w.gamepad();
+            r.gamepad.update(held, r.input.focused, &mut r.input);
         }
         apply_actions(r);
         r.input_dirty = previous != (r.input.mouse, r.input.size, r.input.focused, r.input.left)

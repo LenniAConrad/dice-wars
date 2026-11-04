@@ -1,5 +1,5 @@
 //! X11 transport for the software framebuffer. All Xlib calls stay on the UI thread.
-use super::{raster::Surface, Input, KeyCode};
+use super::{gamepad, raster::Surface, Input, KeyCode};
 use std::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void, CString};
 use std::ptr;
 type Display = c_void;
@@ -171,6 +171,7 @@ extern "C" {
 }
 extern "C" {
     fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char;
+    fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
 }
 // XSizeHints, for the minimum window size.
 #[repr(C)]
@@ -210,6 +211,7 @@ pub(super) struct Window {
     stale: bool, // the window was resized since the last full upload
     im: *mut c_void,
     ic: *mut c_void,
+    joysticks: Joysticks,
 }
 impl Window {
     pub fn new(title: &str, width: usize, height: usize) -> Result<Self, String> {
@@ -307,6 +309,7 @@ impl Window {
                 stale: true,
                 im,
                 ic,
+                joysticks: Joysticks::default(),
             })
         }
     }
@@ -422,6 +425,10 @@ impl Window {
             }
         }
     }
+    /// Buttons held on any connected controller (`gamepad` bits).
+    pub fn gamepad(&mut self) -> u16 {
+        self.joysticks.poll()
+    }
     pub fn present(&mut self, surface: &Surface, damage: &[(usize, usize, usize, usize)]) {
         let (w, h) = (self.size.0.min(4096), self.size.1.min(4096));
         if (w, h) != (surface.width, surface.height) {
@@ -518,11 +525,13 @@ fn key_code(sym: c_ulong) -> Option<KeyCode> {
         0xff1b => KeyCode::Escape,
         0xff0d | 0xff8d => KeyCode::Enter,
         0xff08 => KeyCode::Backspace,
-        0xff09 => KeyCode::Tab,
+        0xff09 | 0xfe20 => KeyCode::Tab, // Tab, ISO_Left_Tab (Shift+Tab)
         77 | 109 => KeyCode::M,
         78 | 110 => KeyCode::N,
         82 | 114 => KeyCode::R,
         86 | 118 => KeyCode::V,
+        0xffe1 => KeyCode::LeftShift,
+        0xffe2 => KeyCode::RightShift,
         0xffe3 => KeyCode::LeftControl,
         0xffe4 => KeyCode::RightControl,
         0xffe7..=0xffea => KeyCode::Alt, // Meta_L/R, Alt_L/R (AltGr is separate)
@@ -541,4 +550,264 @@ fn key_code(sym: c_ulong) -> Option<KeyCode> {
 pub(super) fn clipboard_set(_: &str) {}
 pub(super) fn clipboard_get() -> Option<String> {
     None
+}
+
+/// Controllers through the kernel joystick API (/dev/input/js0..3).
+#[derive(Default)]
+struct Joysticks {
+    devices: [Option<Joystick>; 4],
+    scanned: Option<std::time::Instant>,
+}
+impl Joysticks {
+    fn poll(&mut self) -> u16 {
+        let due = match self.scanned {
+            Some(t) => t.elapsed() >= std::time::Duration::from_secs(2),
+            None => true,
+        };
+        if due {
+            self.scanned = Some(std::time::Instant::now());
+            for (i, slot) in self.devices.iter_mut().enumerate() {
+                if slot.is_none() {
+                    *slot = Joystick::open(&format!("/dev/input/js{i}"));
+                }
+            }
+        }
+        let mut held = 0;
+        for slot in &mut self.devices {
+            if let Some(js) = slot {
+                if js.read() {
+                    held |= js.state.buttons();
+                } else {
+                    *slot = None; // unplugged
+                }
+            }
+        }
+        held
+    }
+}
+/// What one controller's buttons and axes mean.
+struct Layout {
+    /// `gamepad` bit for each joystick button number.
+    buttons: Vec<u16>,
+    /// Left stick x, y and d-pad hat x, y axis numbers.
+    axes: [usize; 4],
+}
+impl Layout {
+    /// The xpad (Xbox) numbering, for when the driver gives no button map.
+    fn xpad() -> Self {
+        use gamepad::*;
+        Self {
+            buttons: vec![SOUTH, EAST, WEST, NORTH, LB, RB, BACK, START],
+            axes: [0, 1, 6, 7],
+        }
+    }
+    /// From the driver's button (input key code) and axis (ABS code) maps.
+    /// Label-based drivers such as xpad report X as BTN_X (= BTN_NORTH) and
+    /// Y as BTN_Y (= BTN_WEST); position-based ones such as Sony's report
+    /// Triangle as BTN_NORTH and Square as BTN_WEST.
+    fn from_maps(keys: &[u16], abs: &[u8], positional: bool) -> Option<Self> {
+        use gamepad::*;
+        if !keys.contains(&0x130) {
+            return None; // not a gamepad-style button set
+        }
+        let (x, y) = if positional {
+            (0x134, 0x133)
+        } else {
+            (0x133, 0x134)
+        };
+        let buttons = keys
+            .iter()
+            .map(|&k| match k {
+                0x130 => SOUTH,
+                0x131 => EAST,
+                _ if k == x => WEST,
+                _ if k == y => NORTH,
+                0x136 => LB,
+                0x137 => RB,
+                0x13a => BACK,
+                0x13b => START,
+                0x220 => UP,
+                0x221 => DOWN,
+                0x222 => LEFT,
+                0x223 => RIGHT,
+                _ => 0,
+            })
+            .collect();
+        let axis =
+            |code: u8, fallback: usize| abs.iter().position(|&a| a == code).unwrap_or(fallback);
+        Some(Self {
+            buttons,
+            axes: [
+                axis(0, 0),
+                axis(1, 1),
+                axis(0x10, usize::MAX),
+                axis(0x11, usize::MAX),
+            ],
+        })
+    }
+}
+struct PadState {
+    layout: Layout,
+    pressed: Vec<bool>,
+    axes: Vec<i16>,
+}
+impl PadState {
+    fn new(layout: Layout) -> Self {
+        Self {
+            layout,
+            pressed: vec![false; 64],
+            axes: vec![0; 64],
+        }
+    }
+    /// Applies one 8-byte js_event: u32 time, i16 value, u8 type, u8 number.
+    fn event(&mut self, e: &[u8]) {
+        let value = i16::from_ne_bytes([e[4], e[5]]);
+        let (kind, n) = (e[6] & !0x80, e[7] as usize); // without JS_EVENT_INIT
+        match kind {
+            1 if n < self.pressed.len() => self.pressed[n] = value != 0,
+            2 if n < self.axes.len() => self.axes[n] = value,
+            _ => {}
+        }
+    }
+    fn buttons(&self) -> u16 {
+        let mut held = 0;
+        for (n, &bit) in self.layout.buttons.iter().enumerate() {
+            if self.pressed.get(n) == Some(&true) {
+                held |= bit;
+            }
+        }
+        let axis = |i: usize| {
+            self.axes
+                .get(self.layout.axes[i])
+                .map_or(0.0, |&v| v as f32 / 32767.0)
+        };
+        held | gamepad::stick(axis(0), axis(1)) | gamepad::stick(axis(2), axis(3))
+    }
+}
+struct Joystick {
+    file: std::fs::File,
+    state: PadState,
+}
+impl Joystick {
+    fn open(path: &str) -> Option<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(0o4000) // O_NONBLOCK
+            .open(path)
+            .ok()?;
+        let fd = file.as_raw_fd();
+        // _IOC(_IOC_READ, 'j', nr, size)
+        let request =
+            |nr: c_ulong, size: usize| (2 << 30) | (size as c_ulong) << 16 | 0x6a << 8 | nr;
+        let mut name = [0u8; 128];
+        let mut keys = [0u16; 0x200];
+        let mut abs = [0u8; 0x40];
+        let (mut buttons, mut axes) = (0u8, 0u8);
+        // SAFETY: each ioctl writes at most the size encoded in its request
+        // into the buffer passed with it.
+        let maps = unsafe {
+            ioctl(fd, request(0x13, name.len() - 1), name.as_mut_ptr());
+            ioctl(fd, request(0x12, 1), &mut buttons as *mut u8) >= 0
+                && ioctl(fd, request(0x11, 1), &mut axes as *mut u8) >= 0
+                && ioctl(
+                    fd,
+                    request(0x34, std::mem::size_of_val(&keys)),
+                    keys.as_mut_ptr(),
+                ) >= 0
+                && ioctl(fd, request(0x32, abs.len()), abs.as_mut_ptr()) >= 0
+        };
+        let name = String::from_utf8_lossy(&name).to_lowercase();
+        let positional = ["sony", "playstation", "dualsense", "dualshock"]
+            .iter()
+            .any(|v| name.contains(v));
+        let layout = maps
+            .then(|| {
+                Layout::from_maps(
+                    &keys[..(buttons as usize).min(keys.len())],
+                    &abs[..(axes as usize).min(abs.len())],
+                    positional,
+                )
+            })
+            .flatten()
+            .unwrap_or_else(Layout::xpad);
+        Some(Self {
+            file,
+            state: PadState::new(layout),
+        })
+    }
+    /// Drains pending events; false once the device is gone.
+    fn read(&mut self) -> bool {
+        use std::io::Read;
+        let mut buffer = [0u8; 8 * 64];
+        loop {
+            match self.file.read(&mut buffer) {
+                Ok(0) => return false,
+                Ok(n) => {
+                    for e in buffer[..n - n % 8].chunks_exact(8) {
+                        self.state.event(e);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return true,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return false,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::gamepad::*;
+    fn event(kind: u8, number: u8, value: i16) -> [u8; 8] {
+        let mut e = [0u8; 8];
+        e[4..6].copy_from_slice(&value.to_ne_bytes());
+        e[6] = kind;
+        e[7] = number;
+        e
+    }
+    #[test]
+    fn joystick_events_become_pad_buttons() {
+        let mut pad = PadState::new(Layout::xpad());
+        pad.event(&event(0x81, 0, 0)); // initial state
+        pad.event(&event(0x82, 1, 0));
+        assert_eq!(pad.buttons(), 0);
+        pad.event(&event(1, 0, 1));
+        pad.event(&event(1, 7, 1));
+        assert_eq!(pad.buttons(), SOUTH | START);
+        pad.event(&event(1, 0, 0));
+        pad.event(&event(1, 7, 0));
+        pad.event(&event(2, 1, -30000)); // stick up
+        assert_eq!(pad.buttons(), UP);
+        pad.event(&event(2, 1, 0));
+        pad.event(&event(2, 6, 32767)); // d-pad right
+        assert_eq!(pad.buttons(), RIGHT);
+        pad.event(&event(1, 200, 1)); // out of range: ignored
+        assert_eq!(pad.buttons(), RIGHT);
+    }
+    #[test]
+    fn button_maps_follow_the_driver() {
+        let abs = [0, 1, 2, 3, 4, 5, 0x10, 0x11];
+        // xpad: A B X Y LB RB Back Start Guide LS RS
+        let xpad = [
+            0x130, 0x131, 0x133, 0x134, 0x136, 0x137, 0x13a, 0x13b, 0x13c, 0x13d, 0x13e,
+        ];
+        let l = Layout::from_maps(&xpad, &abs, false).unwrap();
+        assert_eq!(&l.buttons[..8], &Layout::xpad().buttons[..]);
+        assert_eq!(l.axes, [0, 1, 6, 7]);
+        // hid-playstation: Cross Circle Triangle Square L1 R1 L2 R2 Share Options PS L3 R3
+        let sony = [
+            0x130, 0x131, 0x133, 0x134, 0x136, 0x137, 0x138, 0x139, 0x13a, 0x13b, 0x13c, 0x13d,
+            0x13e,
+        ];
+        let l = Layout::from_maps(&sony, &abs, true).unwrap();
+        assert_eq!(
+            &l.buttons[..10],
+            &[SOUTH, EAST, NORTH, WEST, LB, RB, 0, 0, BACK, START]
+        );
+        // a plain joystick (BTN_TRIGGER, ...) falls back to the xpad numbering
+        assert!(Layout::from_maps(&[0x120, 0x121], &abs, false).is_none());
+    }
 }

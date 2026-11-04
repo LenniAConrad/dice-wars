@@ -1,8 +1,10 @@
 //! Win32/GDI transport for the same software renderer used on Linux.
-use super::{raster::Surface, Input, KeyCode};
+use super::{gamepad, raster::Surface, Input, KeyCode};
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 type Handle = *mut c_void;
 #[repr(C)]
 struct Point {
@@ -39,6 +41,28 @@ struct Class {
     menu: *const u16,
     name: *const u16,
 }
+#[repr(C)]
+struct PaintStruct {
+    dc: Handle,
+    erase: i32,
+    paint: Rect,
+    restore: i32,
+    inc_update: i32,
+    reserved: [u8; 32],
+}
+#[repr(C)]
+#[derive(Default)]
+struct XInputState {
+    packet: u32,
+    buttons: u16,
+    left_trigger: u8,
+    right_trigger: u8,
+    thumb_lx: i16,
+    thumb_ly: i16,
+    thumb_rx: i16,
+    thumb_ry: i16,
+}
+type XInputGetState = unsafe extern "system" fn(u32, *mut XInputState) -> u32;
 #[repr(C)]
 struct BitmapInfo {
     size: u32,
@@ -104,6 +128,11 @@ extern "system" {
     fn SetClipboardData(format: u32, data: Handle) -> Handle;
     fn GetClipboardData(format: u32) -> Handle;
     fn MessageBoxW(window: Handle, text: *const u16, caption: *const u16, kind: u32) -> i32;
+    fn BeginPaint(window: Handle, paint: *mut PaintStruct) -> Handle;
+    fn EndPaint(window: Handle, paint: *const PaintStruct) -> i32;
+    fn InvalidateRect(window: Handle, rect: *const Rect, erase: i32) -> i32;
+    fn SetTimer(window: Handle, id: usize, ms: u32, proc: *const c_void) -> usize;
+    fn KillTimer(window: Handle, id: usize) -> i32;
 }
 #[link(name = "gdi32")]
 extern "system" {
@@ -122,6 +151,8 @@ extern "system" {
         usage: u32,
         operation: u32,
     ) -> i32;
+    fn SetStretchBltMode(dc: Handle, mode: i32) -> i32;
+    fn PatBlt(dc: Handle, x: i32, y: i32, w: i32, h: i32, operation: u32) -> i32;
 }
 #[link(name = "kernel32")]
 extern "system" {
@@ -131,6 +162,8 @@ extern "system" {
     fn GlobalUnlock(memory: Handle) -> i32;
     fn GlobalFree(memory: Handle) -> Handle;
     fn GlobalSize(memory: Handle) -> usize;
+    fn LoadLibraryW(name: *const u16) -> Handle;
+    fn GetProcAddress(module: Handle, name: *const u8) -> *const c_void;
 }
 thread_local! {static HWND:std::cell::Cell<Handle>=const{std::cell::Cell::new(ptr::null_mut())};}
 fn wide(s: &str) -> Vec<u16> {
@@ -141,8 +174,136 @@ fn wide(s: &str) -> Vec<u16> {
 static CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static FOCUSED: AtomicBool = AtomicBool::new(false);
 static FOCUS_LOST: AtomicBool = AtomicBool::new(false);
+
+/// The last presented frame as 0x00RRGGBB words. Besides `present`, the
+/// window procedure paints it (stretched to the client area) whenever the
+/// game loop cannot: WM_PAINT, and while Windows runs its modal move/size
+/// loop inside DispatchMessage, where `next_frame` is blocked.
+#[derive(Default)]
+struct Frame {
+    pixels: Vec<u32>,
+    width: usize,
+    height: usize,
+}
+thread_local! {
+    static FRAME: RefCell<Frame> = RefCell::new(Frame::default());
+    // the client size the frame was last painted at
+    static PAINTED: Cell<(i32, i32)> = const { Cell::new((0, 0)) };
+}
+const SIZE_MOVE_TIMER: usize = 0x4457;
+fn client_size(window: Handle) -> (i32, i32) {
+    let mut rect = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: GetClientRect writes exactly one RECT.
+    unsafe { GetClientRect(window, &mut rect) };
+    (rect.right, rect.bottom)
+}
+/// Shows the last frame on `dc`, stretched to the client area; black before
+/// the first frame. Never re-enters the game or the engine runtime.
+unsafe fn paint_frame(window: Handle, dc: Handle) {
+    let (w, h) = client_size(window);
+    let painted = FRAME.with(|f| {
+        // `present` holds the frame only while it converts and blits, and
+        // neither sends messages; skip a repaint rather than ever panic.
+        let Ok(f) = f.try_borrow() else { return true };
+        if f.width == 0 || f.height == 0 || f.pixels.len() != f.width * f.height {
+            return false;
+        }
+        unsafe { blit(dc, (w, h), &f) };
+        true
+    });
+    if !painted {
+        unsafe { PatBlt(dc, 0, 0, w, h, 0x0042_0021) }; // BLACKNESS
+    }
+    PAINTED.with(|p| p.set((w, h)));
+}
+unsafe fn blit(dc: Handle, (w, h): (i32, i32), frame: &Frame) {
+    let info = BitmapInfo {
+        size: 40,
+        width: frame.width as i32,
+        height: -(frame.height as i32),
+        planes: 1,
+        bits: 32,
+        compression: 0,
+        image_size: 0,
+        xppm: 0,
+        yppm: 0,
+        used: 0,
+        important: 0,
+        color: 0,
+    };
+    // SAFETY: the pixels and header outlive the synchronous blit.
+    unsafe {
+        if (w, h) != (frame.width as i32, frame.height as i32) {
+            SetStretchBltMode(dc, 3); // COLORONCOLOR: no darkening when shrinking
+        }
+        StretchDIBits(
+            dc,
+            0,
+            0,
+            w,
+            h,
+            0,
+            0,
+            frame.width as i32,
+            frame.height as i32,
+            frame.pixels.as_ptr().cast(),
+            &info,
+            0,
+            0x00cc0020,
+        );
+    }
+}
 unsafe extern "system" fn window_proc(w: Handle, k: u32, wp: usize, lp: isize) -> isize {
     match k {
+        // WM_PAINT: the game loop also sees posted paints and presents a
+        // fresh full frame; until then (and during a modal move/size loop)
+        // the last frame fills the window instead of garbage or black.
+        0x0f => {
+            // SAFETY: BeginPaint fills the PAINTSTRUCT that EndPaint takes back.
+            unsafe {
+                let mut ps: PaintStruct = std::mem::zeroed();
+                let dc = BeginPaint(w, &mut ps);
+                if !dc.is_null() {
+                    paint_frame(w, dc);
+                }
+                EndPaint(w, &ps);
+            }
+            return 0;
+        }
+        // WM_ERASEBKGND: every paint covers the whole client area.
+        0x14 => return 1,
+        // WM_SIZE: the stretched frame must cover the new size at once.
+        0x05 => unsafe {
+            InvalidateRect(w, ptr::null(), 0);
+        },
+        // WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE: Windows runs a modal loop
+        // until the drag ends. A ~60 Hz timer keeps the picture matched to
+        // the window there; the game itself resumes after the drag.
+        0x231 => unsafe {
+            SetTimer(w, SIZE_MOVE_TIMER, 16, ptr::null());
+        },
+        0x232 => unsafe {
+            KillTimer(w, SIZE_MOVE_TIMER);
+        },
+        // WM_TIMER
+        0x113 if wp == SIZE_MOVE_TIMER => {
+            if PAINTED.with(|p| p.get()) != client_size(w) {
+                // SAFETY: the window DC is released right after the paint.
+                unsafe {
+                    let dc = GetDC(w);
+                    if !dc.is_null() {
+                        paint_frame(w, dc);
+                        ReleaseDC(w, dc);
+                    }
+                }
+            }
+            return 0;
+        }
         // WM_CLOSE (close button, Alt+F4, taskbar): end the game loop, which
         // then destroys the window in Drop. DefWindowProc would destroy it now.
         0x10 => {
@@ -185,8 +346,8 @@ pub(super) struct Window {
     instance: Handle,
     class: Vec<u16>,
     icon: Handle,
-    pixels: Vec<u32>,
     surrogate: Option<u16>,
+    xinput: XInput,
 }
 impl Window {
     pub fn new(title: &str, width: usize, height: usize) -> Result<Self, String> {
@@ -274,8 +435,8 @@ impl Window {
                 instance,
                 class,
                 icon,
-                pixels: Vec::new(),
                 surrogate: None,
+                xinput: XInput::default(),
             })
         }
     }
@@ -311,6 +472,10 @@ impl Window {
                         if m.wparam == 0x11 {
                             input.key(KeyCode::LeftControl, GetKeyState(0xa2) < 0);
                             input.key(KeyCode::RightControl, GetKeyState(0xa3) < 0);
+                        }
+                        if m.wparam == 0x10 {
+                            input.key(KeyCode::LeftShift, GetKeyState(0xa0) < 0);
+                            input.key(KeyCode::RightShift, GetKeyState(0xa1) < 0);
                         }
                         // F10 arrives as WM_SYSKEYDOWN/UP; DefWindowProc would open
                         // the window menu. It is the game's "next theme" key.
@@ -364,79 +529,59 @@ impl Window {
             }
         }
     }
+    /// Buttons held on any connected XInput controller (`gamepad` bits).
+    pub fn gamepad(&mut self) -> u16 {
+        self.xinput.poll()
+    }
     pub fn present(&mut self, surface: &Surface, damage: &[(usize, usize, usize, usize)]) {
-        // Only damaged rectangles change; convert those (everything after a
-        // size change) and keep the rest of the last frame.
-        let (w, h) = (surface.width, surface.height);
-        let all = [(0, 0, w, h)];
-        let regions = if self.pixels.len() != w * h {
-            self.pixels.clear();
-            self.pixels.resize(w * h, 0);
-            &all[..]
-        } else {
-            damage
-        };
-        for &(x0, y0, x1, y1) in regions {
-            let (x1, y1) = (x1.min(w), y1.min(h));
-            for y in y0..y1 {
-                let src = &surface.pixels[(y * w + x0) * 4..(y * w + x1) * 4];
-                for (dst, p) in self.pixels[y * w + x0..y * w + x1]
-                    .iter_mut()
-                    .zip(src.chunks_exact(4))
-                {
-                    *dst = (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32;
+        let window = self.window;
+        FRAME.with(|frame| {
+            let Ok(mut frame) = frame.try_borrow_mut() else {
+                return;
+            };
+            // Only damaged rectangles change; convert those (everything after
+            // a size change) and keep the rest of the last frame.
+            let (w, h) = (surface.width, surface.height);
+            let all = [(0, 0, w, h)];
+            let regions = if (frame.width, frame.height) != (w, h) || frame.pixels.len() != w * h {
+                frame.pixels.clear();
+                frame.pixels.resize(w * h, 0);
+                frame.width = w;
+                frame.height = h;
+                &all[..]
+            } else {
+                damage
+            };
+            for &(x0, y0, x1, y1) in regions {
+                let (x1, y1) = (x1.min(w), y1.min(h));
+                for y in y0..y1 {
+                    let src = &surface.pixels[(y * w + x0) * 4..(y * w + x1) * 4];
+                    for (dst, p) in frame.pixels[y * w + x0..y * w + x1]
+                        .iter_mut()
+                        .zip(src.chunks_exact(4))
+                    {
+                        *dst = (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32;
+                    }
                 }
             }
-        }
-        let info = BitmapInfo {
-            size: 40,
-            width: surface.width as i32,
-            height: -(surface.height as i32),
-            planes: 1,
-            bits: 32,
-            compression: 0,
-            image_size: 0,
-            xppm: 0,
-            yppm: 0,
-            used: 0,
-            important: 0,
-            color: 0,
-        };
-        // SAFETY: the pixel array and bitmap header live through the synchronous blit.
-        unsafe {
-            let mut rect = Rect {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            };
-            GetClientRect(self.window, &mut rect);
-            let dc = GetDC(self.window);
-            if !dc.is_null() {
-                StretchDIBits(
-                    dc,
-                    0,
-                    0,
-                    rect.right,
-                    rect.bottom,
-                    0,
-                    0,
-                    surface.width as i32,
-                    surface.height as i32,
-                    self.pixels.as_ptr().cast(),
-                    &info,
-                    0,
-                    0x00cc0020,
-                );
-                ReleaseDC(self.window, dc);
+            // SAFETY: the window DC is released right after the blit.
+            unsafe {
+                let dc = GetDC(window);
+                if !dc.is_null() {
+                    let size = client_size(window);
+                    blit(dc, size, &frame);
+                    PAINTED.with(|p| p.set(size));
+                    ReleaseDC(window, dc);
+                }
             }
-        }
+        });
     }
 }
 impl Drop for Window {
     fn drop(&mut self) {
         HWND.with(|h| h.set(ptr::null_mut()));
         unsafe {
+            KillTimer(self.window, SIZE_MOVE_TIMER);
             DestroyWindow(self.window);
             UnregisterClassW(self.class.as_ptr(), self.instance);
             if !self.icon.is_null() {
@@ -456,6 +601,8 @@ fn key_code(v: usize) -> Option<KeyCode> {
         0x4e => KeyCode::N,
         0x52 => KeyCode::R,
         0x56 => KeyCode::V,
+        0xa0 => KeyCode::LeftShift,
+        0xa1 => KeyCode::RightShift,
         0xa2 => KeyCode::LeftControl,
         0xa3 => KeyCode::RightControl,
         0x77 => KeyCode::F8,
@@ -469,6 +616,83 @@ fn key_code(v: usize) -> Option<KeyCode> {
         0x28 => KeyCode::Down,
         _ => return None,
     })
+}
+/// XInput controllers 0..3, loaded at run time (xinput1_4.dll, Windows 8+,
+/// or xinput9_1_0.dll). Asking about an empty slot can stall for a while, so
+/// slots without a controller are only probed every two seconds.
+#[derive(Default)]
+struct XInput {
+    get_state: Option<Option<XInputGetState>>,
+    connected: [bool; 4],
+    probed: Option<Instant>,
+}
+impl XInput {
+    fn poll(&mut self) -> u16 {
+        let get_state = *self.get_state.get_or_insert_with(|| {
+            // SAFETY: the library stays loaded for the process; the symbol
+            // has XInputGetState's documented signature.
+            unsafe {
+                ["xinput1_4.dll", "xinput9_1_0.dll"]
+                    .iter()
+                    .map(|name| LoadLibraryW(wide(name).as_ptr()))
+                    .find(|module| !module.is_null())
+                    .and_then(|module| {
+                        let f = GetProcAddress(module, c"XInputGetState".as_ptr().cast());
+                        (!f.is_null())
+                            .then(|| std::mem::transmute::<*const c_void, XInputGetState>(f))
+                    })
+            }
+        });
+        let Some(get_state) = get_state else {
+            return 0;
+        };
+        let probe = self
+            .probed
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(2));
+        if probe {
+            self.probed = Some(Instant::now());
+        }
+        let mut held = 0;
+        for (i, connected) in self.connected.iter_mut().enumerate() {
+            if !*connected && !probe {
+                continue;
+            }
+            let mut state = XInputState::default();
+            // SAFETY: XInputGetState writes one XINPUT_STATE.
+            *connected = unsafe { get_state(i as u32, &mut state) } == 0;
+            if *connected {
+                held |= xinput_buttons(&state);
+            }
+        }
+        held
+    }
+}
+fn xinput_buttons(state: &XInputState) -> u16 {
+    let b = state.buttons;
+    let mut held = 0;
+    for (mask, bit) in [
+        (0x0001, gamepad::UP),
+        (0x0002, gamepad::DOWN),
+        (0x0004, gamepad::LEFT),
+        (0x0008, gamepad::RIGHT),
+        (0x0010, gamepad::START),
+        (0x0020, gamepad::BACK),
+        (0x0100, gamepad::LB),
+        (0x0200, gamepad::RB),
+        (0x1000, gamepad::SOUTH),
+        (0x2000, gamepad::EAST),
+        (0x4000, gamepad::WEST),
+        (0x8000, gamepad::NORTH),
+    ] {
+        if b & mask != 0 {
+            held |= bit;
+        }
+    }
+    // XInput's stick y points up.
+    held | gamepad::stick(
+        state.thumb_lx as f32 / 32767.0,
+        -(state.thumb_ly as f32) / 32767.0,
+    )
 }
 pub(super) fn clipboard_set(text: &str) {
     let text = wide(text);

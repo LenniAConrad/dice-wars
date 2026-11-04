@@ -31,7 +31,7 @@ one module per concern. Unit tests sit next to the code they test.
 | `src/clipboard.rs` | clipboard through the platform's tools |
 | `src/svg.rs` | SVG export of the board and logo for the README |
 | `src/testutil.rs` | shared test helpers and the `GLOBALS` test lock |
-| `src/engine/` | renderer (`raster.rs`), font, images, audio mixer, RNG, and one window/input backend per OS (`linux.rs`, `windows.rs`, `macos.rs`) |
+| `src/engine/` | renderer (`raster.rs`), font, images, audio mixer, RNG, gamepads as key presses (`gamepad.rs`: Linux joystick API, XInput, GameController), and one window/input backend per OS (`linux.rs`, `windows.rs`, `macos.rs`) |
 
 The global RNG (`engine::random`) is for dice and map generation only. Seeds,
 bookmarks and replays depend on its exact sequence; never draw from it for
