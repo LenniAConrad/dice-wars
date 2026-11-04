@@ -1,3 +1,17 @@
+# Dice Wars v1.6.0
+
+Themes, settings and game-flow release.
+
+- **Themes**: Daylight, Midnight, Sakura, Sage, Paper, Ocean and Ember. The map art keeps its colors.
+- **Settings panel** replaces the icon toolbar: theme, sound, 1x/2x/4x speed, win chances, color assist and motion, all labelled.
+- **Faster flow**: fights between bots play faster, holding Space fast-forwards bot turns, and the turn toast only appears for human turns.
+- **Clearer panel**: plain turn labels, an END TURN explanation on hover, labelled player cards with a map-share bar.
+- **Window resizing**: no stretched or flashing frames, and a minimum window size.
+- **Fixes**: unpredictable online dice, reliable reconnects, host games without guests and replays match the dealt board and lobby teams, and a defeated player keeps watching while their team plays on.
+- **Code**: the game is split into focused modules with no clippy warnings.
+
+---
+
 # Dice Wars v1.5.0
 
 Interface, sound, LAN play and installer release.

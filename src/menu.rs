@@ -667,6 +667,14 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
         );
     });
     // the accent band doubles as the pick-your-color control
+    let first = r_color(0);
+    ui.text(
+        "YOUR COLOR",
+        COL_L - 230.0, // aligned with the other row labels
+        first.y + 11.0,
+        11.0,
+        with_alpha(INK(), 0.62),
+    );
     for i in 0..MAX_PLAYERS {
         let r = r_color(i);
         let base = if colorblind_mode() {
@@ -801,9 +809,9 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     ui.text_centered("JOIN GAME", rj.x + rj.w * 0.5, rj.y + 22.0, 14.0, INK());
 
     if menu.bookmarks.is_empty() {
-        ui.text_centered("Save a favorite map", COL_R, 380.0, 18.0, INK());
+        ui.text_centered("No saved maps yet", COL_R, 380.0, 17.0, INK());
         ui.text_centered(
-            "Use the star in the preview.",
+            "The star on the preview saves a map here.",
             COL_R,
             407.0,
             14.0,

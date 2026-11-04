@@ -239,9 +239,9 @@ impl App {
         let local = self.host.is_none() && self.guest.is_none();
         let pace = if local && g.bots_only() {
             if is_key_down(KeyCode::Space) {
-                4.0
+                6.0
             } else {
-                1.8
+                2.5
             }
         } else {
             1.0

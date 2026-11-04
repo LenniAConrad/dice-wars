@@ -60,10 +60,11 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
         assert image.getpixel((60, 936)) != image.getpixel((60, 900)), "GIF panel orientation"
 
     # Verify mouse and keyboard switching on the very frame of the input.
-    for name, action, size in [("theme-mouse", "2:click:842:32", "930x820"),
-                               ("theme-keyboard", "2:key:F10", "1200x820")]:
-        render(name, DW_FRAME_LIMIT="3", DW_CAPTURE_FRAMES="1,2", DW_INPUT=action, DW_SIZE=size)
-        with Image.open(out / f"{name}-1.png") as before, Image.open(out / f"{name}-2.png") as after:
+    # theme-mouse opens Settings on frame 2 and picks the Midnight swatch on frame 3.
+    for name, action, size in [("theme-mouse", "2:click:860:31;3:click:674:116", "930x820"),
+                               ("theme-keyboard", "3:key:F10", "1200x820")]:
+        render(name, DW_FRAME_LIMIT="4", DW_CAPTURE_FRAMES="2,3", DW_INPUT=action, DW_SIZE=size)
+        with Image.open(out / f"{name}-2.png") as before, Image.open(out / f"{name}-3.png") as after:
             assert before.getpixel((0, 0)) != after.getpixel((0, 0)), "theme delayed by a frame"
             assert after.getpixel((0, 0))[0] < 60, "dark background not updated"
             if name == "theme-mouse":
@@ -78,7 +79,15 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
                 assert len(pairs) > 3000, "missing pastel territory samples"
                 assert sum(a == b for a, b in pairs) / len(pairs) > 0.99, "theme recolored map art"
 
-    render("keyboard-focus", DW_AUTOSTART="1", DW_INPUT="1:key:Right;2:key:Enter")
+    # The settings panel opens over the menu in every theme.
+    for theme in ("Daylight", "Midnight", "Sakura", "Sage", "Paper", "Ocean", "Ember"):
+        render(f"settings-{theme.lower()}", DW_THEME=theme, DW_FRAME_LIMIT="4",
+               DW_CAPTURE_FRAMES="1", DW_INPUT="2:click:860:31")
+        with Image.open(out / f"settings-{theme.lower()}-1.png") as closed, \
+                Image.open(out / f"settings-{theme.lower()}.png") as opened:
+            region = (620, 80, 900, 400)
+            assert closed.crop(region).tobytes() != opened.crop(region).tobytes(), f"settings panel did not open in {theme}"
+        render("keyboard-focus", DW_AUTOSTART="1", DW_INPUT="1:key:Right;2:key:Enter")
     render("reduced-motion", DW_AUTOSTART="1", DW_BATTLE="1", DW_INPUT="1:key:F8")
     for theme in ("light", "dark"):
         path = render(f"selection-{theme}", DW_AUTOSTART="1", DW_SCENE="selection", DW_THEME=theme)
@@ -136,4 +145,4 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
                                                 before.getpixel((497, 330)))) <= 2, "uneven star fill"
         with Image.open(out / f"{scene}-3.png") as saved, Image.open(out / f"{scene}-4.png") as hovered:
             assert saved.getpixel((854, 330)) != hovered.getpixel((854, 330)), "delete hover invisible"
-    print(f"Verified 36 scenes, replay battle layout, menu cache refresh, white non-target territories and hover feedback in both themes, bookmark states, native output resolution, immediate theme switching, and GIF orientation. Screenshots: {out}")
+    print(f"Verified 43 scenes, replay battle layout, menu cache refresh, white non-target territories and hover feedback in both themes, bookmark states, native output resolution, immediate theme switching, and GIF orientation. Screenshots: {out}")

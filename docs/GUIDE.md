@@ -12,6 +12,8 @@
   region, placed randomly. Dice that do not fit are stored, up to 64, and come
   back on later turns; the button shows how many you will receive.
 - Win by conquering the map, or in team mode by being on the last team alive.
+  If you are knocked out of a team game, you keep watching while your team
+  plays on.
 
 ## Start screen
 
@@ -60,17 +62,23 @@ reinforcement, and **SAVE GIF**, which writes a timelapse `replay-<seed>.gif`
 to your data folder. **NEW MAP** (`R`) starts again and **MENU** (`Esc`)
 leaves.
 
-## Toolbar and accessibility
+## Settings and accessibility
 
-The toolbar in every screen controls sound (`M` cycles full, half and off),
-win chances, color assist (`F9`), 1×/2× game speed, the light or dark theme
-(`F10`) and reduced motion (`F8`). Hover over an icon for its state.
+The two buttons at the top right of every screen are a quick sound toggle and
+**Settings**, which holds every preference:
 
-- Color assist uses hues chosen for protan color vision and adds an owner
-  symbol to every dice badge.
-- Reduced motion removes shaking, bouncing, sliding and fades.
-- The keyboard works on the map: arrow keys move the focus, `Enter` selects
-  and attacks.
+- **Theme**: Daylight, Midnight, Sakura, Sage, Paper, Ocean or Ember. Themes
+  change the interface; the map and dice keep their colors. `F10` cycles them.
+- **Sound**: full, half or off (`M`).
+- **Game speed**: 1x, 2x or 4x. Fights between bots always play faster, and
+  holding `Space` during bot turns fast-forwards them in local games.
+- **Win chances**: show the exact odds on every attack target.
+- **Color assist** (`F9`): hues chosen for protan color vision, plus an owner
+  symbol on every dice badge.
+- **Motion** (`F8`): *Less* removes shaking, bouncing, sliding and fades.
+
+The keyboard also works on the map: arrow keys move the focus, `Enter` selects
+and attacks.
 
 ## Your files
 

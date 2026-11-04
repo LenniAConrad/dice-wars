@@ -19,7 +19,7 @@ CI runs the same script on every push. Builds use one worker by default
 
 | Script | What it verifies |
 | --- | --- |
-| `scripts/audit-ui.py` | 36 headless screenshot scenes in both themes: layout, hover feedback, theme switching, cache refresh, GIF orientation (needs Pillow). |
+| `scripts/audit-ui.py` | 43 headless screenshot scenes across themes: layout, hover feedback, theme switching, cache refresh, GIF orientation (needs Pillow). |
 | `scripts/audit-runtime.py` | Frame work per scene, including bots playing a whole turn cycle; reports mean, p95, max and frames over 16.7 ms. |
 | `scripts/audit-audio.py` | Two effects separated by silence reach the audio device, routed to a temporary sink (Linux, `pactl`/`parec`). |
 | `scripts/readme-art.sh` | Regenerates `assets/logo.svg` and `assets/board.svg`. |
@@ -41,7 +41,8 @@ All hooks are environment variables read at startup.
 | `DW_FRAME_LIMIT=n` | exit after n frames |
 | `DW_CAPTURE=out.png`, `DW_CAPTURE_FRAMES=1,2` | save the last frame, or numbered frames |
 | `DW_INPUT=frame:click:x:y;frame:move:x:y;frame:key:Name` | scripted input |
-| `DW_SEED`, `DW_PLAYERS`, `DW_THEME`, `DW_TEAMS`, `DW_ACCESSIBLE` | scene setup |
+| `DW_SEED`, `DW_PLAYERS`, `DW_TEAMS`, `DW_ACCESSIBLE` | scene setup |
+| `DW_THEME` | `light`, `dark`, or a theme name such as `Sakura` |
 | `DW_AUTOSTART=1`, `DW_TEST_AUTOEND=1` | start a game; bots also play your seat |
 | `DW_SCENE=…`, `DW_BATTLE=1` | fixed scenes (`join`, `confirm`, `selection`, `over`, `replay`, `gif`, `battle-replay`) |
 | `DW_EXPORT_SVG=dir` | on exit, write `board.svg` and `logo.svg` |

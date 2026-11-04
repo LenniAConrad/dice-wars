@@ -57,7 +57,11 @@ largest connected region. Conquer the whole map to win.
 | `Esc` | cancel the selection, or open the menu |
 | `R` | new map |
 | `M` | sound: full, half, off |
-| `F8` / `F9` / `F10` | reduced motion / colour assist / light or dark theme |
+| `F8` / `F9` / `F10` | less motion / colour assist / next theme |
+
+Everything else — seven themes, game speed, win chances and accessibility
+options — is in **Settings** at the top right of every screen. Hold `Space`
+during bot turns to fast-forward.
 
 ## Playing together
 
