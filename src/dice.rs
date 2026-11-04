@@ -227,10 +227,22 @@ pub(crate) fn draw_ellipse_fan(x: f32, y: f32, rx: f32, ry: f32, col: Color) {
 
 pub(crate) const DIE_W: f32 = 21.0;
 
+/// Vertical step between stacked dice, as a fraction of the die width. A
+/// little more than the die's side height leaves a sliver of each top face
+/// showing, so a tower reads as separate dice rather than one block.
+pub(crate) const STACK_STEP: f32 = 0.67;
+
+/// The contact shadow under a stack: (x radius, y radius) in die widths.
+pub(crate) fn stack_shadow(two_cols: bool) -> (f32, f32) {
+    (if two_cols { 1.1 } else { 0.68 }, 0.26 * 1.35)
+}
+
+pub(crate) const STACK_SHADOW: Color = Color::new(0.15, 0.16, 0.30, 0.34);
+
 pub(crate) fn draw_stack(t: &Territory, fx: TerrFx, time: f32) {
     let pal = palette(t.owner);
     let w = DIE_W;
-    let ch = w * 0.62;
+    let ch = w * STACK_STEP;
 
     // shake rattles side to side, bounce pops the stack up once
     let reduced = REDUCED_MOTION.load(Ordering::Relaxed);
@@ -257,12 +269,13 @@ pub(crate) fn draw_stack(t: &Territory, fx: TerrFx, time: f32) {
 
     // contact shadow, centered under the base diamond of the stack
     let qh = w * 0.26;
+    let (rx, ry) = stack_shadow(two_cols);
     draw_ellipse_fan(
         t.anchor.x,
         t.anchor.y + 4.0 - qh * 0.8,
-        if two_cols { w * 1.04 } else { w * 0.62 },
-        qh * 1.3,
-        Color::new(0.15, 0.16, 0.30, 0.26),
+        w * rx,
+        w * ry,
+        STACK_SHADOW,
     );
 
     // back-right column for dice 5..8, drawn first so the front column overlaps it

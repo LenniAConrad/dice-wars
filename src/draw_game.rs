@@ -16,9 +16,9 @@ use crate::play::{
 };
 use crate::settings::Settings;
 use crate::theme::{
-    accent_ink, color_map, colorblind_mode, darken, lighten, map_fill, mix, on_color, palette,
-    theme, theme_index, with_alpha, ACCENT, BG, BORDER, CARD_EDGE, INK, INK_ON_FILL, MAP_EDGE,
-    REDUCED_MOTION, SEA, SRF,
+    accent_ink, color_map, colorblind_mode, dark_mode, darken, lighten, map_fill, mix, on_color,
+    palette, theme, theme_index, with_alpha, ACCENT, BG, BORDER, CARD_EDGE, INK, INK_ON_FILL,
+    MAP_EDGE, REDUCED_MOTION, SEA, SRF,
 };
 use crate::ui::{
     control_fill_t, draw_game_menu_button, draw_icon_bar, draw_round_frame, draw_round_rect,
@@ -302,9 +302,10 @@ fn draw_stack_badge(t: &Territory, ui: &Ui) {
         draw_symbol(bx, by, 11.0, t.owner, pal.dark);
         ui.text_centered(&t.dice.to_string(), bx, by + 4.0, 11.0, on_color(pal.dark));
     } else {
-        draw_circle(bx, by, 10.0, SRF());
-        draw_circle(bx, by, 8.8, pal.dark);
-        ui.text_centered(&t.dice.to_string(), bx, by + 4.5, 13.0, on_color(pal.dark));
+        // small and quiet: the tower is the main signal, the badge confirms it
+        draw_circle(bx, by, 9.0, SRF());
+        draw_circle(bx, by, 7.8, pal.dark);
+        ui.text_centered(&t.dice.to_string(), bx, by + 4.2, 12.0, on_color(pal.dark));
     }
 }
 
@@ -476,14 +477,7 @@ fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
     let ph = WIN_H - py - 14.0;
 
     let _ = (px, pw, ph);
-    draw_round_rect(
-        20.0,
-        py - 9.0,
-        WIN_W - 40.0,
-        3.0,
-        1.5,
-        with_alpha(INK(), 0.12),
-    );
+    draw_panel_bar();
 
     let cur = game.current;
     let mp = mouse_virtual();
@@ -793,17 +787,25 @@ fn draw_player_cards(game: &Game, ui: &Ui, cy: f32, right_margin: f32) {
     }
 }
 
+// One quiet surface under the board holds the whole status area: turn,
+// instructions, rolls, END TURN and the player cards.
+fn draw_panel_bar() {
+    draw_round_frame(
+        16.0,
+        626.0,
+        WIN_W - 32.0,
+        WIN_H - 626.0 - 8.0,
+        20.0,
+        1.5,
+        mix(SRF(), BG(), if dark_mode() { 0.55 } else { 0.7 }),
+        CARD_EDGE(),
+    );
+}
+
 // replays show only the stats: no turn pill, instructions, or buttons
 pub(crate) fn draw_panel_replay(game: &Game, ui: &Ui) {
     let py = 632.0;
-    draw_round_rect(
-        20.0,
-        py - 9.0,
-        WIN_W - 40.0,
-        3.0,
-        1.5,
-        with_alpha(INK(), 0.12),
-    );
+    draw_panel_bar();
     // below the replay controls, in the lane the battle rolls use
     if let Some(last) = game.log.last().filter(|_| game.battle.is_none()) {
         ui.body_fitted(

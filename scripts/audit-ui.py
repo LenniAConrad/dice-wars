@@ -80,9 +80,13 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
     assert len(gifs) == 1, "GIF export failed"
     with Image.open(gifs[0]) as gif:
         assert gif.size == (1395, 1230)
-        # The panel divider is below the board, not upside-down above it.
+        # The status panel surface is below the board, not upside-down above it.
         image = gif.convert("RGB")
-        assert image.getpixel((60, 936)) != image.getpixel((60, 900)), "GIF panel orientation"
+        def inked(box):
+            return sum(min(px) < 200 for px in image.crop(box).getdata())
+        # player cards sit in the bottom band; the band above the board is empty
+        assert inked((270, 1110, 1130, 1190)) > 2000, "GIF panel orientation"
+        assert inked((270, 20, 1130, 80)) == 0, "GIF panel orientation"
 
     # Verify mouse and keyboard switching on the very frame of the input.
     # theme-mouse opens Settings on frame 2 and picks the Midnight swatch on frame 3.

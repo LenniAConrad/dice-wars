@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 use dicegame::engine::prelude::*;
 
 use crate::board::{cell_pos, neighbor_of, COLS, HEX, ROWS};
-use crate::dice::{face_val, DIE_W, PIPS};
+use crate::dice::{face_val, stack_shadow, DIE_W, PIPS, STACK_STEP};
 use crate::game::Game;
 use crate::theme::{
     darken, lighten, map_fill, mix, on_color, palette, pip_color, Palette, MAP_EDGE, PLAYER_BASE,
@@ -318,7 +318,7 @@ pub fn board(game: &Game) -> String {
     let mut order: Vec<usize> = (0..game.terrs.len()).collect();
     order.sort_by(|&a, &b| game.terrs[a].anchor.y.total_cmp(&game.terrs[b].anchor.y));
     let w = DIE_W;
-    let (ch, qh) = (w * 0.62, w * 0.26);
+    let (ch, qh) = (w * STACK_STEP, w * 0.26);
     // Every die is a <use> of a per-player body plus three pip symbols, all
     // defined once at the origin.
     let mut defs = String::new();
@@ -359,11 +359,11 @@ pub fn board(game: &Game) -> String {
         let base = terr.anchor + vec2(0.0, 4.0);
         let _ = write!(
             body,
-            r##"<ellipse cx="{:.1}" cy="{:.1}" rx="{:.1}" ry="{:.1}" fill="#262950" fill-opacity=".26"/>"##,
+            r##"<ellipse cx="{:.1}" cy="{:.1}" rx="{:.1}" ry="{:.1}" fill="#262950" fill-opacity=".34"/>"##,
             terr.anchor.x,
             terr.anchor.y + 4.0 - qh * 0.8,
-            if two_cols { w * 1.04 } else { w * 0.62 },
-            qh * 1.3
+            w * stack_shadow(two_cols).0,
+            w * stack_shadow(two_cols).1
         );
         for i in 0..n.saturating_sub(4) {
             let (x, y) = (base.x + bdx, base.y - w * 0.26 - i as f32 * ch);
@@ -388,9 +388,9 @@ pub fn board(game: &Game) -> String {
         let (bx, by) = (terr.anchor.x + 16.0, terr.anchor.y + 13.0);
         let _ = write!(
             body,
-            r##"<circle cx="{bx:.1}" cy="{by:.1}" r="10" fill="#fff"/><circle cx="{bx:.1}" cy="{by:.1}" r="8.8" fill="{}"/><text x="{bx:.1}" y="{:.1}" fill="{}">{}</text>"##,
+            r##"<circle cx="{bx:.1}" cy="{by:.1}" r="9" fill="#fff"/><circle cx="{bx:.1}" cy="{by:.1}" r="7.8" fill="{}"/><text x="{bx:.1}" y="{:.1}" fill="{}">{}</text>"##,
             hex(pal.dark),
-            by + 4.5,
+            by + 4.2,
             hex(on_color(pal.dark)),
             terr.dice
         );
@@ -400,7 +400,7 @@ pub fn board(game: &Game) -> String {
     let (vx, vy) = (x0 - pad, y0 - pad);
     let (vw, vh) = (x1 - x0 + pad * 2.0, y1 - y0 + pad * 2.0 + 12.0);
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="{vx:.0} {vy:.0} {vw:.0} {vh:.0}" width="{:.0}" height="{:.0}" role="img" aria-label="A Dice Wars board in the middle of a game"><title>Dice Wars board</title><style>text{{font:800 13px Nunito,"Arial Rounded MT Bold","DejaVu Sans",Verdana,sans-serif;text-anchor:middle}}</style><defs>{defs}</defs>{body}</svg>
+        r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="{vx:.0} {vy:.0} {vw:.0} {vh:.0}" width="{:.0}" height="{:.0}" role="img" aria-label="A Dice Wars board in the middle of a game"><title>Dice Wars board</title><style>text{{font:800 12px Nunito,"Arial Rounded MT Bold","DejaVu Sans",Verdana,sans-serif;text-anchor:middle}}</style><defs>{defs}</defs>{body}</svg>
 "#,
         vw * 1.0,
         vh * 1.0

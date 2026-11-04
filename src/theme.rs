@@ -232,14 +232,6 @@ pub(crate) fn dark_mode() -> bool {
     theme().dark
 }
 
-pub(crate) fn th(light: Color, dark: Color) -> Color {
-    if dark_mode() {
-        dark
-    } else {
-        light
-    }
-}
-
 #[allow(non_snake_case)]
 pub(crate) fn BG() -> Color {
     theme().bg

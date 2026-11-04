@@ -6,7 +6,9 @@ use crate::board::{
     apply_position_swap, cell_pos, gen_map, gen_map_local, neighbor_of, random_seed, COLS, HEX,
     ROWS, SQRT3,
 };
-use crate::dice::{draw_die, draw_ellipse_fan, draw_star, DIE_W};
+use crate::dice::{
+    draw_die, draw_ellipse_fan, draw_star, stack_shadow, DIE_W, STACK_SHADOW, STACK_STEP,
+};
 use crate::draw_game::fill_hex;
 use crate::game::{
     diff_idx, idx_diff, Difficulty, Game, TeamCfg, HUMAN, MAX_PLAYERS, MAX_TEAMS, SEED_MOD,
@@ -22,9 +24,9 @@ use crate::setup::{
 };
 use crate::sound::Snd;
 use crate::theme::{
-    accent_ink, apply_local_colors, color_map, colorblind_mode, dark_mode, map_fill, mix, palette,
-    th, theme_index, with_alpha, ACCENT, BG, BORDER, CARD_EDGE, INK, INK_ON_FILL, MAP_EDGE,
-    PLAYER_BASE, SEA, SRF,
+    accent_ink, apply_local_colors, color_map, colorblind_mode, dark_mode, darken, map_fill, mix,
+    palette, theme_index, with_alpha, Palette, ACCENT, BG, BORDER, CARD_EDGE, INK, INK_ON_FILL,
+    MAP_EDGE, PLAYER_BASE, SEA, SRF,
 };
 use crate::ui::{
     card, control_fill, control_fill_t, draw_icon_bar, draw_round_frame, draw_round_rect, hover_t,
@@ -414,7 +416,7 @@ fn draw_map_mini_live(game: &Game, area: Rect) {
     }
     // constant headroom for the tallest possible stack, so the preview
     // scale never shifts with the dice actually dealt
-    y0 -= DIE_W * 3.3;
+    y0 -= DIE_W * 3.45;
     let (bx, by, bw, bh) = (x0, y0, x1 - x0, y1 - y0);
     let k = (area.w / bw).min(area.h / bh);
     let ox = area.x + (area.w - bw * k) * 0.5 - bx * k;
@@ -461,7 +463,7 @@ fn draw_map_mini_live(game: &Game, area: Rect) {
     let mut order: Vec<usize> = (0..game.terrs.len()).collect();
     order.sort_by(|&a, &b| game.terrs[a].anchor.y.total_cmp(&game.terrs[b].anchor.y));
     let w = DIE_W * k;
-    let ch = w * 0.62;
+    let ch = w * STACK_STEP;
     for ti in order {
         let t = &game.terrs[ti];
         let pal = palette(t.owner);
@@ -472,13 +474,8 @@ fn draw_map_mini_live(game: &Game, area: Rect) {
         } else {
             (0.0, 0.0)
         };
-        draw_ellipse_fan(
-            base.x,
-            base.y - w * 0.21,
-            if n > 4 { w * 1.04 } else { w * 0.62 },
-            w * 0.34,
-            Color::new(0.15, 0.16, 0.30, 0.26),
-        );
+        let (rx, ry) = stack_shadow(n > 4);
+        draw_ellipse_fan(base.x, base.y - w * 0.21, w * rx, w * ry, STACK_SHADOW);
         for i in 0..n.saturating_sub(4) {
             draw_die(
                 base.x + bdx,
@@ -528,35 +525,31 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
         clear_background(BG());
         draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
 
-        // chunky extruded logo
+        // the logo: the yellow die from the README next to a clean wordmark
         let title = "DICE WARS";
-        let tw = ui.width(title, 58.0);
-        let tx = WIN_W * 0.5 - tw * 0.5;
-        // many faint offset copies blend into one soft drop shadow
-        let sh = with_alpha(
-            th(INK_ON_FILL, BLACK),
-            if dark_mode() { 0.12 } else { 0.055 },
+        let size = 54.0;
+        let die_w = 44.0;
+        let gap = 18.0;
+        let tw = ui.width(title, size);
+        let x0 = WIN_W * 0.5 - (die_w + gap + tw) * 0.5;
+        let base = PLAYER_BASE[0];
+        let logo = Palette {
+            fill: mix(base, WHITE, 0.46),
+            mid: base,
+            dark: darken(base, 0.78),
+            light: mix(base, WHITE, 0.62),
+            pip: Color::new(0.22, 0.23, 0.38, 1.0),
+        };
+        let (dx, dy) = (x0 + die_w * 0.5, 88.0);
+        draw_ellipse_fan(
+            dx,
+            dy - die_w * 0.2,
+            die_w * 0.66,
+            die_w * 0.3,
+            with_alpha(BLACK, if dark_mode() { 0.35 } else { 0.12 }),
         );
-        for (dx, dy) in [
-            (2.5, 3.5),
-            (4.0, 4.5),
-            (5.5, 5.5),
-            (3.0, 5.5),
-            (5.0, 3.5),
-            (4.0, 6.5),
-            (2.5, 5.0),
-            (5.5, 4.5),
-        ] {
-            ui.text(title, tx + dx, 86.0 + dy, 58.0, sh);
-        }
-        ui.text_outlined(
-            title,
-            tx,
-            86.0,
-            58.0,
-            mix(PLAYER_BASE[0], WHITE, 0.2),
-            INK_ON_FILL,
-        );
+        draw_die(dx, dy, die_w, 5, 0, &logo);
+        ui.text(title, x0 + die_w + gap, 84.0, size, INK());
         draw_preview(ui, Some(&menu.preview), "");
         draw_cards_static(menu, settings, ui);
     });
