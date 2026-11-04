@@ -2,7 +2,7 @@
 
 use dicegame::engine::prelude::*;
 
-use crate::board::gen_map_local;
+use crate::board::gen_map_local_with;
 use crate::draw_game::{draw_battle_overlay, draw_board, draw_panel_replay};
 use crate::game::HUMAN;
 use crate::game::{dice_count, split_sum, Battle, Game, RepEvent, MAX_DICE};
@@ -35,7 +35,14 @@ const REPLAY_SPEEDS: [(f32, &str); 3] = [(1.1, "1x"), (2.2, "2x"), (4.4, "4x")];
 
 impl Replay {
     pub(crate) fn new(src: &Game, saving: bool) -> Self {
-        let mut g = gen_map_local(src.seed, src.players, src.humans, src.difficulty, src.teams);
+        let mut g = gen_map_local_with(
+            src.seed,
+            src.players,
+            src.humans,
+            src.difficulty,
+            src.teams,
+            src.map,
+        );
         g.names = src.names.clone();
         // Lobby teams and the dealt board (after color swaps) come from the
         // finished game itself, never from regenerating with local colors.

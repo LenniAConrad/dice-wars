@@ -3,8 +3,8 @@
 use dicegame::engine::{self, prelude::*};
 
 use crate::board::{
-    apply_position_swap, cell_pos, gen_map, gen_map_local, neighbor_of, random_seed, COLS, HEX,
-    ROWS, SQRT3,
+    apply_position_swap, cell_pos, gen_map_local_with, gen_map_with, neighbor_of, random_seed,
+    MapOpts, MapShape, MapSize, COLS, HEX, ROWS, SQRT3,
 };
 use crate::dice::{
     draw_die, draw_ellipse_fan, draw_star, stack_shadow, DIE_W, STACK_SHADOW, STACK_STEP,
@@ -16,12 +16,12 @@ use crate::game::{
 use crate::lobby::JoinUi;
 use crate::net::{lobby_layout, net_port, HostNet, LobbyPicks};
 use crate::savegame::SaveInfo;
-use crate::settings::{load_bookmarks, save_bookmarks, save_settings, Settings};
+use crate::settings::{load_bookmarks, save_bookmarks, save_settings, Bookmark, Settings};
 use crate::setup::{
-    draw_color_row, draw_preview, draw_rule_rows, draw_seed_row, draw_team_block, r_color, r_diff,
-    r_mode, r_new, r_next, r_player, r_prev, r_preview, r_primary, r_secondary_half, r_seed,
-    r_team_bridge, r_team_count, r_team_ff, r_team_pick, BOTTOM_Y, COL_END, LEFT_X, RIGHT_W,
-    RIGHT_X, TEAM_BLOCK_H, TEAM_BLOCK_W, TOP_Y,
+    draw_color_row, draw_preview, draw_rule_rows, draw_seed_row, draw_team_block, map_label,
+    r_color, r_diff, r_map_islands, r_map_size, r_mode, r_new, r_next, r_player, r_prev, r_preview,
+    r_primary, r_secondary_half, r_seed, r_team_bridge, r_team_count, r_team_ff, r_team_pick,
+    BOTTOM_Y, COL_END, LEFT_X, RIGHT_W, RIGHT_X, TEAM_BLOCK_H, TEAM_BLOCK_W, TOP_Y,
 };
 use crate::sound::Snd;
 use crate::theme::{
@@ -46,19 +46,20 @@ enum MenuAction {
 
 pub(crate) struct Menu {
     pub(crate) players: usize,
+    pub(crate) map: MapOpts, // size and shape of the map
     pub(crate) humans: usize,
     pub(crate) difficulty: Difficulty,
     pub(crate) seed: u64,
     pub(crate) preview: Game,
     pub(crate) editing: bool,
     pub(crate) seed_text: String,
-    pub(crate) bookmarks: Vec<(u64, usize)>, // (seed, players)
-    pub(crate) hold_t: f32,                  // how long < or > has been held
-    pub(crate) hold_next: f32,               // countdown to the next auto-repeat step
-    pub(crate) bm_scroll: f32,               // bookmark list scroll offset, in rows
-    pub(crate) host_err: f32,                // countdown showing the hosting-failed message
-    pub(crate) show_rules: bool,             // info card shows the rules instead of your record
-    pub(crate) saved: Option<SaveInfo>,      // an unfinished solo game to continue
+    pub(crate) bookmarks: Vec<Bookmark>,
+    pub(crate) hold_t: f32,             // how long < or > has been held
+    pub(crate) hold_next: f32,          // countdown to the next auto-repeat step
+    pub(crate) bm_scroll: f32,          // bookmark list scroll offset, in rows
+    pub(crate) host_err: f32,           // countdown showing the hosting-failed message
+    pub(crate) show_rules: bool,        // info card shows the rules instead of your record
+    pub(crate) saved: Option<SaveInfo>, // an unfinished solo game to continue
 }
 
 impl Menu {
@@ -68,11 +69,19 @@ impl Menu {
         let difficulty = idx_diff(settings.difficulty);
         let seed = random_seed();
         Menu {
+            map: MapOpts::from_code(&settings.map).unwrap_or_default(),
             players,
             humans,
             difficulty,
             seed,
-            preview: gen_map_local(seed, players, humans, difficulty, TeamCfg::default()),
+            preview: gen_map_local_with(
+                seed,
+                players,
+                humans,
+                difficulty,
+                TeamCfg::default(),
+                MapOpts::from_code(&settings.map).unwrap_or_default(),
+            ),
             editing: false,
             seed_text: String::new(),
             bookmarks: load_bookmarks(),
@@ -87,12 +96,13 @@ impl Menu {
 
     pub(crate) fn regen(&mut self) {
         // the preview only shows the map, which team settings don't affect
-        self.preview = gen_map_local(
+        self.preview = gen_map_local_with(
             self.seed,
             self.players,
             self.humans,
             self.difficulty,
             TeamCfg::default(),
+            self.map,
         );
     }
 
@@ -105,7 +115,8 @@ impl Menu {
     }
 
     pub(crate) fn is_bookmarked(&self) -> bool {
-        self.bookmarks.contains(&(self.seed, self.players))
+        self.bookmarks
+            .contains(&(self.seed, self.players, self.map))
     }
 }
 
@@ -118,7 +129,7 @@ fn r_bookmark() -> Rect {
 
 // the lower right card: how to play, your record, or team setup
 fn r_info_card() -> Rect {
-    Rect::new(RIGHT_X, 392.0, RIGHT_W, BOTTOM_Y - 392.0)
+    Rect::new(RIGHT_X, 340.0, RIGHT_W, BOTTOM_Y - 340.0)
 }
 
 fn team_origin() -> Vec2 {
@@ -151,7 +162,7 @@ fn r_bm_del(i: usize) -> Rect {
     Rect::new(r.x + r.w - 40.0, r.y + 6.0, 32.0, 32.0)
 }
 
-const BM_SHOWN: usize = 4;
+const BM_SHOWN: usize = 3;
 
 // returns true when the game should start
 fn update_menu(
@@ -261,6 +272,31 @@ fn update_menu(
             return MenuAction::None;
         }
     }
+    for (k, size) in [MapSize::Small, MapSize::Medium, MapSize::Large]
+        .into_iter()
+        .enumerate()
+    {
+        if r_map_size(k).contains(m) {
+            menu.map.size = size;
+            settings.map = menu.map.code().to_string();
+            save_settings(settings);
+            menu.regen();
+            snd.push(Snd::Click);
+            return MenuAction::None;
+        }
+    }
+    if r_map_islands().contains(m) {
+        menu.map.shape = if menu.map.shape == MapShape::Islands {
+            MapShape::Continent
+        } else {
+            MapShape::Islands
+        };
+        settings.map = menu.map.code().to_string();
+        save_settings(settings);
+        menu.regen();
+        snd.push(Snd::Click);
+        return MenuAction::None;
+    }
     for k in 0..2 {
         if r_mode(k).contains(m) {
             settings.teams = k == 1;
@@ -341,9 +377,10 @@ fn update_menu(
     }
     if r_bookmark().contains(m) {
         if menu.is_bookmarked() {
-            menu.bookmarks.retain(|&b| b != (menu.seed, menu.players));
+            menu.bookmarks
+                .retain(|&b| b != (menu.seed, menu.players, menu.map));
         } else {
-            menu.bookmarks.push((menu.seed, menu.players));
+            menu.bookmarks.push((menu.seed, menu.players, menu.map));
         }
         save_bookmarks(&menu.bookmarks);
         snd.push(Snd::Click);
@@ -363,9 +400,10 @@ fn update_menu(
             return MenuAction::None;
         }
         if r_bm_row(i).contains(m) {
-            let (s, p) = menu.bookmarks[i + bm_off];
+            let (s, p, map) = menu.bookmarks[i + bm_off];
             menu.seed = s;
             menu.players = p;
+            menu.map = map;
             menu.regen();
             snd.push(Snd::Select);
             return MenuAction::None;
@@ -394,6 +432,7 @@ pub(crate) fn draw_map_mini(game: &Game, area: Rect) {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     (
         game.seed,
+        game.map.code(),
         theme_index(),
         colorblind_mode(),
         area.x.to_bits(),
@@ -518,7 +557,14 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
     // and palette changes still invalidate on the input frame.
     use std::hash::{Hash, Hasher};
     let mut art_key = std::collections::hash_map::DefaultHasher::new();
-    (menu.seed, menu.players, theme_index(), colorblind_mode()).hash(&mut art_key);
+    (
+        menu.seed,
+        menu.map.code(),
+        menu.players,
+        theme_index(),
+        colorblind_mode(),
+    )
+        .hash(&mut art_key);
     // the static parts of the right-hand cards are cached too
     (
         menu.bookmarks.is_empty(),
@@ -578,7 +624,15 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
         format!("{:08}", menu.seed)
     };
     draw_seed_row(ui, m, &seed_str, menu.editing, true);
-    draw_rule_rows(ui, m, true, menu.players, menu.difficulty, settings.teams);
+    draw_rule_rows(
+        ui,
+        m,
+        true,
+        menu.players,
+        menu.difficulty,
+        settings.teams,
+        menu.map,
+    );
     draw_color_row(ui, m, settings.color, &[]);
 
     // the star on the preview saves the map
@@ -722,7 +776,7 @@ fn draw_cards_static(menu: &Menu, settings: &Settings, ui: &Ui) {
 fn draw_saved_rows(menu: &Menu, ui: &Ui, m: Vec2) {
     let c = r_saved_card();
     let bm_off = menu.bm_scroll as usize;
-    for (i, &(seed, players)) in menu
+    for (i, &(seed, players, map)) in menu
         .bookmarks
         .iter()
         .skip(bm_off)
@@ -730,7 +784,7 @@ fn draw_saved_rows(menu: &Menu, ui: &Ui, m: Vec2) {
         .enumerate()
     {
         let r = r_bm_row(i);
-        let active = seed == menu.seed && players == menu.players;
+        let active = seed == menu.seed && players == menu.players && map == menu.map;
         let fill = if active { palette(HUMAN).fill } else { SRF() };
         let del = r_bm_del(i);
         crate::focus::focusable(del);
@@ -744,8 +798,8 @@ fn draw_saved_rows(menu: &Menu, ui: &Ui, m: Vec2) {
         let ink = if active { INK_ON_FILL } else { INK() };
         ui.text(&format!("#{:08}", seed), r.x + 16.0, r.y + 29.0, 18.0, ink);
         ui.body(
-            &format!("{} players", players),
-            r.x + r.w - 128.0,
+            &format!("{}P · {}", players, map_label(map)),
+            r.x + r.w - 150.0,
             r.y + 28.0,
             13.0,
             with_alpha(ink, 0.72),
@@ -893,12 +947,13 @@ impl App {
                 }
             },
             MenuAction::Start => {
-                self.game = Some(gen_map_local(
+                self.game = Some(gen_map_local_with(
                     self.menu.seed,
                     self.menu.players,
                     1,
                     self.menu.difficulty,
                     self.settings.team_cfg(),
+                    self.menu.map,
                 ));
                 self.screen = Screen::Play;
                 self.snd_queue.push(Snd::Click);
@@ -921,12 +976,13 @@ impl App {
                         &self.lobby_picks,
                         self.settings.color,
                     );
-                    let mut g0 = gen_map(
+                    let mut g0 = gen_map_with(
                         self.menu.seed,
                         self.menu.players,
                         1,
                         self.menu.difficulty,
                         TeamCfg::default(),
+                        self.menu.map,
                     );
                     apply_position_swap(&mut g0, &cv);
                     self.menu.preview = g0;

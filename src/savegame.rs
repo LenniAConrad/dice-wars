@@ -4,7 +4,7 @@
 //! owners, dice, stored dice, whose turn it is, the teams, and the event list
 //! (so replays and the summary still cover the whole game).
 
-use crate::board::gen_map_local;
+use crate::board::{gen_map_local_with, MapOpts};
 use crate::game::{diff_idx, idx_diff, Game, RepEvent, TeamCfg, MAX_TEAMS};
 use crate::settings::data_file;
 use crate::theme::apply_local_colors;
@@ -29,8 +29,9 @@ pub(crate) fn encode(g: &Game, color: usize) -> String {
     let join = |v: &mut dyn Iterator<Item = String>| v.collect::<Vec<_>>().join(" ");
     let t = g.teams;
     let mut s = format!(
-        "{HEADER}\nseed {}\nplayers {}\ndifficulty {}\nteams {} {} {} {} {} {}\ncolor {}\n",
+        "{HEADER}\nseed {}\nmap {}\nplayers {}\ndifficulty {}\nteams {} {} {} {} {} {}\ncolor {}\n",
         g.seed,
+        g.map.code(),
         g.players,
         diff_idx(g.difficulty),
         t.on as u8,
@@ -85,6 +86,7 @@ pub(crate) fn encode(g: &Game, color: usize) -> String {
 
 struct Parsed {
     seed: u64,
+    map: MapOpts,
     players: usize,
     difficulty: usize,
     teams: TeamCfg,
@@ -108,6 +110,7 @@ fn parse(text: &str) -> Option<Parsed> {
     };
     let mut p = Parsed {
         seed: 0,
+        map: MapOpts::default(),
         players: 0,
         difficulty: 1,
         teams: TeamCfg::default(),
@@ -124,6 +127,7 @@ fn parse(text: &str) -> Option<Parsed> {
         let (key, rest) = line.split_once(' ').unwrap_or((line, ""));
         match key {
             "seed" => p.seed = rest.trim().parse().ok()?,
+            "map" => p.map = MapOpts::from_code(rest)?,
             "players" => p.players = rest.trim().parse().ok()?,
             "difficulty" => p.difficulty = rest.trim().parse::<usize>().ok()?.min(2),
             "color" => p.color = rest.trim().parse().ok()?,
@@ -193,7 +197,7 @@ pub(crate) fn decode(text: &str) -> Option<(Game, usize)> {
         return None;
     }
     apply_local_colors(p.color);
-    let mut g = gen_map_local(p.seed, p.players, 1, idx_diff(p.difficulty), p.teams);
+    let mut g = gen_map_local_with(p.seed, p.players, 1, idx_diff(p.difficulty), p.teams, p.map);
     let n = g.terrs.len();
     let valid = p.owners.len() == n
         && p.dice.len() == n

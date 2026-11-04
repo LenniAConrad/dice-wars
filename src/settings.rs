@@ -40,7 +40,10 @@ pub(crate) fn data_file(name: &str) -> String {
     }
 }
 
-pub(crate) fn load_bookmarks() -> Vec<(u64, usize)> {
+/// A saved map: seed, player count and map size/shape.
+pub(crate) type Bookmark = (u64, usize, crate::board::MapOpts);
+
+pub(crate) fn load_bookmarks() -> Vec<Bookmark> {
     std::fs::read_to_string(data_file(BOOKMARK_FILE))
         .ok()
         .map(|s| {
@@ -49,15 +52,23 @@ pub(crate) fn load_bookmarks() -> Vec<(u64, usize)> {
                     let mut it = l.split_whitespace();
                     let seed: u64 = it.next()?.parse().ok()?;
                     let players: usize = it.next()?.parse().ok()?;
-                    Some((seed % SEED_MOD, players.clamp(2, MAX_PLAYERS)))
+                    // older files have no map column: those are medium continents
+                    let map = it
+                        .next()
+                        .and_then(crate::board::MapOpts::from_code)
+                        .unwrap_or_default();
+                    Some((seed % SEED_MOD, players.clamp(2, MAX_PLAYERS), map))
                 })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-pub(crate) fn save_bookmarks(b: &[(u64, usize)]) {
-    let s: String = b.iter().map(|(s, p)| format!("{} {}\n", s, p)).collect();
+pub(crate) fn save_bookmarks(b: &[Bookmark]) {
+    let s: String = b
+        .iter()
+        .map(|(s, p, m)| format!("{} {} {}\n", s, p, m.code()))
+        .collect();
     let _ = write_atomic(&data_file(BOOKMARK_FILE), &s);
 }
 
@@ -93,6 +104,7 @@ pub(crate) struct Settings {
     pub(crate) name: String,        // display name in multiplayer lobbies
     pub(crate) last_addr: String,   // last host address joined, prefilled next time
     pub(crate) relay: String,       // internet relay address (host[:port]); empty = none
+    pub(crate) map: String,         // map size and shape code ("m-c" = medium continent)
     pub(crate) players: usize,      // last chosen player count
     pub(crate) difficulty: usize,   // last chosen difficulty index
     pub(crate) played: [u32; 3],    // finished solo games per difficulty
@@ -166,6 +178,7 @@ fn parse_settings(txt: &str) -> Settings {
         played: [0; 3],
         won: [0; 3],
         tutorial_done: false,
+        map: "m-c".to_string(),
     };
     let has_theme = txt.lines().any(|l| l.starts_with("theme "));
     for l in txt.lines() {
@@ -205,6 +218,9 @@ fn parse_settings(txt: &str) -> Settings {
             }
             (Some("difficulty"), Some(v)) => s.difficulty = v.parse::<usize>().unwrap_or(1).min(2),
             (Some("tutorial"), Some(v)) => s.tutorial_done = v != "0",
+            (Some("map"), Some(v)) if crate::board::MapOpts::from_code(v).is_some() => {
+                s.map = v.to_string()
+            }
             // record p_easy w_easy p_normal w_normal p_hard w_hard
             (Some("record"), Some(first)) => {
                 let n: Vec<u32> = std::iter::once(first)
@@ -230,7 +246,7 @@ pub(crate) fn save_settings(s: &Settings) {
     let _ = write_atomic(
         &data_file(SETTINGS_FILE),
         &format!(
-            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\nrelay {}\nplayers {}\ndifficulty {}\nreducedmotion {}\nquiet {}\ntheme {}\nrecord {} {} {} {} {} {}\ntutorial {}\n",
+            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\nrelay {}\nplayers {}\ndifficulty {}\nreducedmotion {}\nquiet {}\ntheme {}\nrecord {} {} {} {} {} {}\ntutorial {}\nmap {}\n",
             s.chances as u8,
             s.muted as u8,
             s.colorblind as u8,
@@ -257,7 +273,8 @@ pub(crate) fn save_settings(s: &Settings) {
             s.won[1],
             s.played[2],
             s.won[2],
-            s.tutorial_done as u8
+            s.tutorial_done as u8,
+            s.map
         ),
     );
 }
@@ -331,7 +348,8 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.ends_with(".tmp"))
             .collect();
-        save_bookmarks(&[(12345678, 4)]);
+        let islands = crate::board::MapOpts::from_code("s-i").unwrap();
+        save_bookmarks(&[(12345678, 4, islands)]);
         let bookmarks = load_bookmarks();
 
         match old {
@@ -341,7 +359,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
-        assert_eq!(bookmarks, vec![(12345678, 4)]);
+        assert_eq!(bookmarks, vec![(12345678, 4, islands)]);
         assert_eq!(
             (
                 l.chances,

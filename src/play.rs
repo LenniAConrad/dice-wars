@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use dicegame::engine::prelude::*;
 
 use crate::board::{
-    apply_position_swap, cell_pos, gen_map, gen_map_local, random_seed, COLS, HEX, ROWS,
+    apply_position_swap, cell_pos, gen_map_local_with, gen_map_with, random_seed, MapOpts, COLS,
+    HEX, ROWS,
 };
 use crate::draw_game::{draw_confirm, draw_game};
 use crate::game::{Difficulty, Game, RepEvent, MAX_PLAYERS};
@@ -352,13 +353,15 @@ impl App {
                                     self.settings.color,
                                     &self.settings.name,
                                     self.settings.speed,
+                                    self.menu.map,
                                 );
-                                let mut ng = gen_map(
+                                let mut ng = gen_map_with(
                                     self.menu.seed,
                                     self.menu.players,
                                     humans,
                                     self.menu.difficulty,
                                     cfg,
+                                    self.menu.map,
                                 );
                                 ng.team = tv;
                                 ng.names = nm;
@@ -369,12 +372,13 @@ impl App {
                                 self.awaiting.clear();
                                 *g = ng;
                             } else {
-                                *g = gen_map_local(
+                                *g = gen_map_local_with(
                                     self.menu.seed,
                                     self.menu.players,
                                     1,
                                     self.menu.difficulty,
                                     self.settings.team_cfg(),
+                                    self.menu.map,
                                 );
                             }
                         }
@@ -397,12 +401,13 @@ impl App {
         } else if is_key_pressed(KeyCode::R) && self.guest.is_none() && !modifier_down() {
             if g.over.is_some() && self.host.is_none() {
                 self.menu.seed = random_seed();
-                *g = gen_map_local(
+                *g = gen_map_local_with(
                     self.menu.seed,
                     self.menu.players,
                     1,
                     self.menu.difficulty,
                     self.settings.team_cfg(),
+                    self.menu.map,
                 );
             } else {
                 self.confirm = Some(Confirm::NewMap);
@@ -419,12 +424,13 @@ impl App {
                 } else if r_over_new().contains(m) && self.guest.is_none() {
                     if self.host.is_none() {
                         self.menu.seed = random_seed();
-                        *g = gen_map_local(
+                        *g = gen_map_local_with(
                             self.menu.seed,
                             self.menu.players,
                             1,
                             self.menu.difficulty,
                             self.settings.team_cfg(),
+                            self.menu.map,
                         );
                     } else {
                         self.confirm = Some(Confirm::NewMap);
@@ -720,10 +726,11 @@ fn guest_tick(gn: &mut GuestNet, g: &mut Game, do_ping: bool) {
                 let (colors, teams, team_v, names) = parse_start_tail(&mut it);
                 let absent: Vec<usize> = it.next().map(parse_csv_usize).unwrap_or_default();
                 gn.speed = parse_speed(it.next());
+                let map = it.next().and_then(MapOpts::from_code).unwrap_or_default();
                 gn.awaiting_resume = false;
                 gn.pending.clear();
                 let mut ng = build_guest_game(
-                    seed, players, humans, di, seat, &colors, teams, team_v, names,
+                    seed, players, humans, di, seat, &colors, teams, team_v, names, map,
                 );
                 gn.seat = ng.my_seat;
                 if absent.len() == ng.players {
@@ -745,11 +752,12 @@ fn guest_tick(gn: &mut GuestNet, g: &mut Game, do_ping: bool) {
                 let seat: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(gn.seat);
                 let (colors, teams, team_v, names) = parse_start_tail(&mut it);
                 gn.speed = parse_speed(it.next());
+                let map = it.next().and_then(MapOpts::from_code).unwrap_or_default();
                 gn.pending.clear();
                 gn.catching_up = false;
                 gn.awaiting_resume = false;
                 let ng = build_guest_game(
-                    seed, players, humans, di, seat, &colors, teams, team_v, names,
+                    seed, players, humans, di, seat, &colors, teams, team_v, names, map,
                 );
                 gn.seat = ng.my_seat;
                 *g = ng;

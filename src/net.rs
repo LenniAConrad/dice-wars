@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use dicegame::engine;
 
+use crate::board::MapOpts;
 use crate::board::N_SEEDS;
 use crate::game::{
     diff_idx, fill_teams, Difficulty, Game, RepEvent, TeamCfg, MAX_DICE, MAX_PLAYERS, MAX_TEAMS,
@@ -24,7 +25,7 @@ use crate::theme::{color_map, resolve_colors};
 
 const NET_PORT_DEFAULT: u16 = 7777;
 
-pub(crate) const NET_PROTO: &str = "8"; // bumped whenever map generation or messages change
+pub(crate) const NET_PROTO: &str = "9"; // bumped whenever map generation or messages change
 
 pub(crate) const NET_ROOM_CODE_LEN: usize = 6;
 
@@ -444,6 +445,7 @@ impl HostNet {
         host_color: usize,
         host_name: &str,
         speed: f32,
+        map: MapOpts,
     ) -> (usize, Vec<usize>, Vec<usize>, Vec<String>) {
         let mut sh = self.shared.lock().unwrap();
         sh.started = true;
@@ -471,7 +473,7 @@ impl HostNet {
             });
         }
         let line_tail = format!(
-            "{} {} {} {} {} {} {} {} {}",
+            "{} {} {} {} {} {} {} {} {} {}",
             csv_usize(&color_v),
             teams.on as u8,
             teams.bridge as u8,
@@ -480,7 +482,8 @@ impl HostNet {
             teams.hvb as u8,
             csv_usize(&team_v),
             names.join(","),
-            speed
+            speed,
+            map.code()
         );
         self.remap.clear();
         for (k, &seat) in occupied.iter().enumerate() {
@@ -532,7 +535,7 @@ impl HostNet {
         let absent: Vec<usize> = g.absent.iter().map(|&a| a as usize).collect();
         if let Some(s) = sh.seats.get_mut(lobby_seat - 1).and_then(Option::as_mut) {
             let header = format!(
-                "RESUME {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+                "RESUME {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
                 seed,
                 g.players,
                 g.humans,
@@ -547,7 +550,8 @@ impl HostNet {
                 csv_usize(&g.team),
                 names.join(","),
                 csv_usize(&absent),
-                self.speed
+                self.speed,
+                g.map.code()
             );
             if write_net_line(s, &header).is_err() {
                 let _ = s.shutdown(std::net::Shutdown::Both);
@@ -881,7 +885,7 @@ pub(crate) fn lobby_line(
         });
     }
     format!(
-        "LOBBY {} {} {} {} {} {} {} {} {} {} {} {}",
+        "LOBBY {} {} {} {} {} {} {} {} {} {} {} {} {}",
         menu.seed,
         menu.players,
         diff_idx(menu.difficulty),
@@ -897,7 +901,8 @@ pub(crate) fn lobby_line(
         },
         csv_usize(&team_v),
         csv_usize(&color_v),
-        names.join(",")
+        names.join(","),
+        menu.map.code()
     )
 }
 
@@ -1686,6 +1691,7 @@ mod tests {
             0,
             "Host",
             4.0,
+            MapOpts::default(),
         );
         assert_eq!(humans, 2);
         let tokens = host.shared.lock().unwrap().tokens.clone();

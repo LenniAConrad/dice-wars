@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 
 use dicegame::engine::{self, prelude::*};
 
-use crate::board::gen_map_local;
+use crate::board::gen_map_local_with;
 use crate::dice::draw_die;
 use crate::game::{diff_idx, split_sum, Battle, Game, RepEvent, MAX_PLAYERS, SEED_MOD};
 use crate::gif::downsample;
@@ -206,12 +206,13 @@ impl App {
         let mut screen = Screen::Menu;
         let mut game: Option<Game> = None;
         if std::env::var("DW_AUTOSTART").is_ok() {
-            game = Some(gen_map_local(
+            game = Some(gen_map_local_with(
                 menu.seed,
                 menu.players,
                 1,
                 menu.difficulty,
                 settings.team_cfg(),
+                menu.map,
             ));
             screen = Screen::Play;
         }

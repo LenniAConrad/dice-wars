@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use dicegame::engine::prelude::*;
 
-use crate::board::{apply_position_swap, gen_map, random_seed};
+use crate::board::{apply_position_swap, gen_map_with, random_seed, MapOpts, MapShape, MapSize};
 use crate::clipboard::{copy_to_clipboard, paste_from_clipboard, spawn_clipboard_paste};
 use crate::game::{
     diff_idx, idx_diff, Difficulty, Game, TeamCfg, HUMAN, MAX_PLAYERS, MAX_TEAMS, SEED_MOD,
@@ -19,9 +19,9 @@ use crate::net::{
 use crate::settings::{clean_name, clean_relay_addr, save_settings, Settings};
 use crate::setup::{
     draw_color_row, draw_preview, draw_roster_row, draw_rule_rows, draw_seed_row, draw_team_block,
-    draw_title, r_color, r_diff, r_mode, r_new, r_next, r_player, r_prev, r_primary, r_secondary,
-    r_team_bridge, r_team_count, r_team_ff, r_team_pick, BOTTOM_Y, CTRL_X, LEFT_X, RIGHT_W,
-    RIGHT_X, TOP_Y,
+    draw_title, r_color, r_diff, r_map_islands, r_map_size, r_mode, r_new, r_next, r_player,
+    r_prev, r_primary, r_secondary, r_team_bridge, r_team_count, r_team_ff, r_team_pick, BOTTOM_Y,
+    CTRL_X, LEFT_X, RIGHT_W, RIGHT_X, TOP_Y,
 };
 use crate::sound::Snd;
 use crate::theme::{
@@ -37,6 +37,7 @@ use crate::{App, Screen};
 // the host's lobby snapshot, as far as this guest has seen it
 pub(crate) struct LobbyView {
     pub(crate) players: usize,
+    pub(crate) map: MapOpts,
     pub(crate) diff: usize,
     pub(crate) ton: bool,
     pub(crate) thvb: bool,
@@ -127,12 +128,13 @@ pub(crate) fn build_guest_game(
     teams: TeamCfg,
     team_v: Vec<usize>,
     names: Vec<String>,
+    map: MapOpts,
 ) -> Game {
     let players = players.clamp(2, MAX_PLAYERS);
     let humans = humans.clamp(1, players);
     let mut teams = teams;
     teams.count = teams.count.clamp(2, MAX_TEAMS);
-    let mut g = gen_map(seed % SEED_MOD, players, humans, idx_diff(di), teams);
+    let mut g = gen_map_with(seed % SEED_MOD, players, humans, idx_diff(di), teams, map);
     if team_v.len() == g.players {
         g.team = team_v.into_iter().map(|t| t % teams.count).collect();
     }
@@ -470,7 +472,15 @@ fn draw_host_lobby(
     // ---- left: the map and every game setting, exactly as in the menu
     draw_preview(ui, Some(&menu.preview), "");
     draw_seed_row(ui, m, &format!("{:08}", menu.seed), false, true);
-    draw_rule_rows(ui, m, true, menu.players, menu.difficulty, settings.teams);
+    draw_rule_rows(
+        ui,
+        m,
+        true,
+        menu.players,
+        menu.difficulty,
+        settings.teams,
+        menu.map,
+    );
     let occ = h.occupied();
     let cfg = settings.team_cfg();
     let (team_v, color_v) = lobby_layout(&occ, menu.players, cfg, picks, settings.color);
@@ -597,7 +607,7 @@ fn draw_guest_lobby(
         ff: v.tff,
     };
     draw_seed_row(ui, m, &format!("#{:08}", j.preview_key.0), false, false);
-    draw_rule_rows(ui, m, false, v.players, idx_diff(v.diff), cfg.on);
+    draw_rule_rows(ui, m, false, v.players, idx_diff(v.diff), cfg.on, v.map);
     let own_row = 1 + v.occupied.iter().position(|&x| x == my_seat).unwrap_or(0);
     let my_color = j
         .my_color
@@ -1026,6 +1036,29 @@ impl App {
                     self.snd_queue.push(Snd::Click);
                 }
             }
+            for (k, size) in [MapSize::Small, MapSize::Medium, MapSize::Large]
+                .into_iter()
+                .enumerate()
+            {
+                if r_map_size(k).contains(m2) {
+                    self.menu.map.size = size;
+                    self.settings.map = self.menu.map.code().to_string();
+                    save_settings(&self.settings);
+                    dirty = true;
+                    self.snd_queue.push(Snd::Click);
+                }
+            }
+            if r_map_islands().contains(m2) {
+                self.menu.map.shape = if self.menu.map.shape == MapShape::Islands {
+                    MapShape::Continent
+                } else {
+                    MapShape::Islands
+                };
+                self.settings.map = self.menu.map.code().to_string();
+                save_settings(&self.settings);
+                dirty = true;
+                self.snd_queue.push(Snd::Click);
+            }
             for k in 0..2 {
                 if r_lobby_mode(k).contains(m2) {
                     self.settings.teams = k == 1;
@@ -1125,12 +1158,13 @@ impl App {
                 &self.lobby_picks,
                 self.settings.color,
             );
-            let mut g = gen_map(
+            let mut g = gen_map_with(
                 self.menu.seed,
                 self.menu.players,
                 1,
                 self.menu.difficulty,
                 TeamCfg::default(),
+                self.menu.map,
             );
             apply_position_swap(&mut g, &cv);
             self.menu.preview = g;
@@ -1154,13 +1188,15 @@ impl App {
                 self.settings.color,
                 &self.settings.name,
                 self.settings.speed,
+                self.menu.map,
             );
-            let mut ng = gen_map(
+            let mut ng = gen_map_with(
                 self.menu.seed,
                 self.menu.players,
                 humans,
                 self.menu.difficulty,
                 cfg,
+                self.menu.map,
             );
             ng.team = tv;
             ng.names = nm;
@@ -1254,8 +1290,9 @@ impl App {
                         let seat = it.next().and_then(|v| v.parse().ok()).unwrap_or(gn.seat);
                         let (colors, teams, team_v, names) = parse_start_tail(&mut it);
                         gn.speed = crate::net::parse_speed(it.next());
+                        let map = it.next().and_then(MapOpts::from_code).unwrap_or_default();
                         let g = build_guest_game(
-                            seed, players, humans, di, seat, &colors, teams, team_v, names,
+                            seed, players, humans, di, seat, &colors, teams, team_v, names, map,
                         );
                         gn.seat = g.my_seat;
                         self.game = Some(g);
@@ -1317,17 +1354,26 @@ impl App {
                             .map(|color| color % MAX_PLAYERS)
                             .collect();
                         let names = it.next().map(parse_names_csv).unwrap_or_default();
+                        let map = it.next().and_then(MapOpts::from_code).unwrap_or_default();
                         if self.join.preview_key != (seed, players)
                             || self.join.preview_colors != colors
+                            || self.join.view.as_ref().is_some_and(|v| v.map != map)
                         {
-                            let mut pg =
-                                gen_map(seed, players, 1, Difficulty::Normal, TeamCfg::default());
+                            let mut pg = gen_map_with(
+                                seed,
+                                players,
+                                1,
+                                Difficulty::Normal,
+                                TeamCfg::default(),
+                                map,
+                            );
                             apply_position_swap(&mut pg, &colors);
                             self.join.preview = Some(pg);
                             self.join.preview_key = (seed, players);
                             self.join.preview_colors = colors.clone();
                         }
                         self.join.view = Some(LobbyView {
+                            map,
                             players,
                             diff,
                             ton,
@@ -1597,6 +1643,7 @@ mod tests {
             teams,
             vec![usize::MAX; MAX_PLAYERS],
             vec!["name-with-invalid-characters!".to_string(); MAX_PLAYERS + 4],
+            MapOpts::default(),
         );
         assert_eq!(g.players, MAX_PLAYERS);
         assert_eq!(g.humans, MAX_PLAYERS);

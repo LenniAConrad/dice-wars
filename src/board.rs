@@ -112,6 +112,7 @@ pub(crate) fn random_seed() -> u64 {
 }
 
 // seed the global RNG, then generate: the same seed always yields the same map
+#[cfg_attr(not(test), allow(dead_code))] // the default-map shorthand tests use
 pub(crate) fn gen_map(
     seed: u64,
     players: usize,
@@ -157,6 +158,7 @@ pub(crate) fn gen_map_seeded_with(
 }
 
 // gen_map plus the position swap for THIS machine's current colors
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn gen_map_local(
     seed: u64,
     players: usize,
@@ -250,9 +252,11 @@ impl MapOpts {
             (MapSize::Small, MapShape::Continent) => (36, 5),
             (MapSize::Medium, MapShape::Continent) => (N_SEEDS, N_HOLES),
             (MapSize::Large, MapShape::Continent) => (72, 5),
-            (MapSize::Small, MapShape::Islands) => (34, 2),
-            (MapSize::Medium, MapShape::Islands) => (48, 2),
-            (MapSize::Large, MapShape::Islands) => (62, 2),
+            // islands seed a few regions on the thin bridges; spare holes
+            // absorb those slivers so island layouts rarely need a retry
+            (MapSize::Small, MapShape::Islands) => (36, 4),
+            (MapSize::Medium, MapShape::Islands) => (52, 6),
+            (MapSize::Large, MapShape::Islands) => (68, 8),
         }
     }
 }
@@ -275,7 +279,7 @@ fn land_mask(opts: MapOpts) -> Option<Vec<bool>> {
             let (k, per) = match size {
                 MapSize::Small => (3, 120),
                 MapSize::Medium => (4, 118),
-                MapSize::Large => (6, 96),
+                MapSize::Large => (6, 80),
             };
             let mut owner = vec![usize::MAX; COLS * ROWS];
             let centers = island_centers(k);

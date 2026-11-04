@@ -15,6 +15,7 @@
 
 use dicegame::engine::prelude::*;
 
+use crate::board::{MapOpts, MapShape, MapSize};
 use crate::dice::draw_symbol;
 use crate::game::{team_letter, Difficulty, Game, TeamCfg, MAX_PLAYERS, MAX_TEAMS};
 use crate::menu::draw_map_mini;
@@ -33,30 +34,31 @@ pub(crate) const RIGHT_W: f32 = 320.0;
 pub(crate) const TOP_Y: f32 = 112.0;
 pub(crate) const BOTTOM_Y: f32 = 772.0;
 const ROW_H: f32 = 40.0;
-const ROW_PLAYERS: f32 = 452.0;
-const ROW_DIFF: f32 = 504.0;
-const ROW_MODE: f32 = 556.0;
+const ROW_PLAYERS: f32 = 400.0;
+const ROW_DIFF: f32 = 452.0;
+const ROW_MODE: f32 = 504.0;
+const ROW_MAP: f32 = 556.0;
 const ROW_COLOR: f32 = 608.0;
 const ACTION_Y: f32 = 700.0;
 
 pub(crate) fn r_preview() -> Rect {
-    Rect::new(LEFT_X, TOP_Y, COL_END - LEFT_X, 268.0)
+    Rect::new(LEFT_X, TOP_Y, COL_END - LEFT_X, 216.0)
 }
 
 pub(crate) fn r_prev() -> Rect {
-    Rect::new(LEFT_X, 392.0, 44.0, 44.0)
+    Rect::new(LEFT_X, 340.0, 44.0, 44.0)
 }
 
 pub(crate) fn r_seed() -> Rect {
-    Rect::new(LEFT_X + 52.0, 392.0, 260.0, 44.0)
+    Rect::new(LEFT_X + 52.0, 340.0, 260.0, 44.0)
 }
 
 pub(crate) fn r_next() -> Rect {
-    Rect::new(LEFT_X + 320.0, 392.0, 44.0, 44.0)
+    Rect::new(LEFT_X + 320.0, 340.0, 44.0, 44.0)
 }
 
 pub(crate) fn r_new() -> Rect {
-    Rect::new(LEFT_X + 372.0, 392.0, COL_END - LEFT_X - 372.0, 44.0)
+    Rect::new(LEFT_X + 372.0, 340.0, COL_END - LEFT_X - 372.0, 44.0)
 }
 
 pub(crate) fn r_player(k: usize) -> Rect {
@@ -69,6 +71,29 @@ pub(crate) fn r_diff(k: usize) -> Rect {
 
 pub(crate) fn r_mode(k: usize) -> Rect {
     Rect::new(CTRL_X + k as f32 * 180.0, ROW_MODE, 180.0, ROW_H)
+}
+
+/// k = 0..2: small, medium, large.
+pub(crate) fn r_map_size(k: usize) -> Rect {
+    Rect::new(CTRL_X + k as f32 * 80.0, ROW_MAP, 80.0, ROW_H)
+}
+
+pub(crate) fn r_map_islands() -> Rect {
+    Rect::new(CTRL_X + 256.0, ROW_MAP + 8.0, 104.0, 24.0)
+}
+
+/// "Medium continent", "Small islands", ...
+pub(crate) fn map_label(map: MapOpts) -> String {
+    let size = match map.size {
+        MapSize::Small => "Small",
+        MapSize::Medium => "Medium",
+        MapSize::Large => "Large",
+    };
+    let shape = match map.shape {
+        MapShape::Continent => "continent",
+        MapShape::Islands => "islands",
+    };
+    format!("{size} {shape}")
 }
 
 pub(crate) fn r_color(i: usize) -> Rect {
@@ -164,7 +189,7 @@ pub(crate) fn draw_seed_row(ui: &Ui, m: Vec2, text: &str, editing: bool, live: b
     ui.text_centered("NEW", rr.x + rr.w * 0.5, rr.y + 28.0, 16.0, INK());
 }
 
-/// PLAYERS, DIFFICULTY and MODE.
+/// PLAYERS, DIFFICULTY, MODE and MAP.
 pub(crate) fn draw_rule_rows(
     ui: &Ui,
     m: Vec2,
@@ -172,6 +197,7 @@ pub(crate) fn draw_rule_rows(
     players: usize,
     diff: Difficulty,
     teams: bool,
+    map: MapOpts,
 ) {
     let nums = ["2", "3", "4", "5", "6", "7", "8", "9"];
     let row: Vec<(Rect, &str, bool)> = (0..MAX_PLAYERS - 1)
@@ -193,6 +219,23 @@ pub(crate) fn draw_rule_rows(
         (r_mode(1), "TEAMS", teams),
     ];
     seg_row(ui, m, live, "MODE", &row, 15.0);
+    let row: Vec<(Rect, &str, bool)> = [
+        ("SMALL", MapSize::Small),
+        ("MEDIUM", MapSize::Medium),
+        ("LARGE", MapSize::Large),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(k, (l, s))| (r_map_size(k), l, map.size == s))
+    .collect();
+    seg_row(ui, m, live, "MAP", &row, 13.0);
+    draw_toggle(
+        r_map_islands(),
+        "ISLANDS",
+        map.shape == MapShape::Islands,
+        ui,
+        if live { m } else { vec2(-1.0, -1.0) },
+    );
 }
 
 /// YOUR COLOR swatches; colors other people already took are crossed out.

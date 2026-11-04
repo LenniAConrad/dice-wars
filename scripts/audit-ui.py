@@ -69,6 +69,11 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
         with Image.open(out / f"layers-partial-{frames}.png") as partial, \
                 Image.open(out / f"layers-full-{frames}.png") as full:
             assert partial.tobytes() == full.tobytes(), f"partial board repaint differs at frame {frames}"
+    # MAP: LARGE plus ISLANDS regenerate the preview.
+    render("map-options", DW_FRAME_LIMIT="6", DW_CAPTURE_FRAMES="1", DW_INPUT="2:click:370:576;3:click:460:576")
+    with Image.open(out / "map-options-1.png") as before, Image.open(out / "map-options.png") as after:
+        region = (160, 150, 440, 300)
+        assert before.crop(region).tobytes() != after.crop(region).tobytes(), "map options ignored"
     # Keyboard navigation: arrows show a focus ring, Enter activates.
     render("keyboard-nav", DW_FRAME_LIMIT="6", DW_CAPTURE_FRAMES="1",
            DW_INPUT="2:key:Down;3:key:Down;4:key:Right")
@@ -123,7 +128,7 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
             assert before.getpixel((0, 0)) != after.getpixel((0, 0)), "theme delayed by a frame"
             assert after.getpixel((0, 0))[0] < 60, "dark background not updated"
             if name == "theme-mouse":
-                region = (160, 160, 440, 360)
+                region = (160, 150, 440, 300)
                 light = before.crop(region).convert("RGB")
                 dark = after.crop(region).convert("RGB")
                 # Compare flat pastel territory interiors, excluding the sea
@@ -158,9 +163,9 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
                 gap = image.crop((420, 727, 570, 734))
                 assert len(gap.getcolors(gap.width * gap.height) or []) == 1, "replay result overlaps team cards"
     render("menu-refresh", DW_FRAME_LIMIT="5", DW_CAPTURE_FRAMES="1,2,3,4",
-           DW_INPUT="2:click:412:414;3:key:F9;4:click:227:628")
+           DW_INPUT="2:click:412:362;3:key:F9;4:click:227:628")
     with Image.open(out / "menu-refresh-1.png") as first, Image.open(out / "menu-refresh-2.png") as seed, Image.open(out / "menu-refresh-3.png") as assist, Image.open(out / "menu-refresh-4.png") as color:
-        region = (160, 160, 440, 360)
+        region = (160, 150, 440, 300)
         assert first.crop(region).tobytes() != seed.crop(region).tobytes(), "cached preview ignored seed change"
         assert seed.crop(region).tobytes() != assist.crop(region).tobytes(), "cached preview ignored color assist"
         assert assist.getpixel((100, 710)) != color.getpixel((100, 710)), "color selection ignored"
@@ -169,8 +174,8 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
     for theme in ("light", "dark"):
         for name, changes, points in [
             ("menu-hover", {"DW_TEAMS": "1"},
-             [(518, 400), (370, 705), (178, 462), (360, 462),
-              (486, 130), (650, 580), (830, 24), (187, 628)]),
+             [(518, 348), (370, 705), (178, 410), (360, 410),
+              (486, 130), (650, 528), (830, 24), (187, 628)]),
             ("join-hover", {"DW_SCENE": "join"},
              [(484, 508), (330, 154), (650, 512)]),
             ("game-hover", {"DW_AUTOSTART": "1"},
@@ -202,4 +207,4 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
                                                 before.getpixel((499, 143)))) <= 2, "uneven star fill"
         with Image.open(out / f"{scene}-3.png") as saved, Image.open(out / f"{scene}-4.png") as hovered:
             assert saved.getpixel((842, 170)) != hovered.getpixel((842, 170)), "delete hover invisible"
-    print(f"Verified 60 scenes, keyboard navigation, first-game tips, saving and continuing, partial board repaints, the host lobby, the record card, replay battle layout, menu cache refresh, white non-target territories and hover feedback in both themes, bookmark states, native output resolution, immediate theme switching, and GIF orientation. Screenshots: {out}")
+    print(f"Verified 60 scenes, map options, keyboard navigation, first-game tips, saving and continuing, partial board repaints, the host lobby, the record card, replay battle layout, menu cache refresh, white non-target territories and hover feedback in both themes, bookmark states, native output resolution, immediate theme switching, and GIF orientation. Screenshots: {out}")

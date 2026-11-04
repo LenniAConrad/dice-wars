@@ -93,6 +93,7 @@ All hooks are environment variables read at startup.
 | `DW_PORT=n` | game port (LAN discovery uses n + 1) |
 | `DW_DICE_SEED=n` | pin the dice and bot choices (headless runs only) |
 | `DW_FULL_LAYERS=1` | repaint cached layers in full instead of by region |
+| `DW_SIM=n` | play n bot-only games without rendering and print win rates by seat and difficulty (`DW_SIM_PLAYERS=2,4,8`, `DW_SIM_DIFF=hard,normal`, `DW_SIM_SEED`, `DW_SIM_MAP=l-i`) |
 | `DW_TEST_HOST`, `DW_TEST_JOIN="addr code"` | open a host lobby or join one at startup (network tests); `addr` may be `relay://host:port` |
 
 See `scripts/audit-ui.py` for examples, and look at the PNGs you produce:

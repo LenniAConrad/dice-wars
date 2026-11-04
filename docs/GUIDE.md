@@ -11,6 +11,10 @@
 - **END TURN** (`Space`) gives one die per land in your largest connected
   region, placed randomly. Dice that do not fit are stored, up to 64, and come
   back on later turns; the button shows how many you will receive.
+- Going first is an advantage, so in the first round only, the earliest
+  players get part of their reinforcement (with 2 players the first gets 35%,
+  with 6 players 95%; from 7 players everyone gets it all). It applies to bots
+  and humans alike and makes every seat about equally likely to win.
 - Win by conquering the map, or in team mode by being on the last team alive.
   If you are knocked out of a team game, you keep watching while your team
   plays on.
@@ -24,15 +28,19 @@ in the same place.
 - **Your color**: the swatches below the rules choose the color, and the map
   position, you play.
 - **Difficulty**: EASY bots hesitate and need a big edge; NORMAL plays by
-  personality; HARD takes even fights and keeps its territory together. Bots
-  roll the same dice and follow the same reinforcement rules as you.
+  personality; HARD weighs every attack by what it gains and how exposed it
+  leaves its lands, and wins well over half of its games against Normal bots.
+  Bots roll the same dice, see the same board and follow the same
+  reinforcement rules as you.
 - **Players**: 2 to 9 in total.
+- **Map**: SMALL, MEDIUM or LARGE sets how many lands there are; ISLANDS
+  splits the land into several islands joined by narrow bridges.
 - **Mode**: FREE-FOR-ALL, or TEAMS with 2–4 teams (or humans against bots).
   Teammates never share dice. Two rules can be toggled: *Friendly fire*
   (teammates may attack each other) and *Islands link via allies* (an ally's
   land can connect your regions for reinforcement).
-- **Seed**: the same 8-digit seed and player count always produce the same
-  map. Type one, step with `<` and `>`, or press `NEW` (`N`). The star on the
+- **Seed**: the same 8-digit seed, player count and map option always
+  produce the same map. Type one, step with `<` and `>`, or press `NEW` (`N`). The star on the
   preview saves the map to **Saved maps**.
 - **How to play / Your record**: the card at the bottom right shows the rules
   until you finish a game, then your wins per difficulty (the **RULES** button

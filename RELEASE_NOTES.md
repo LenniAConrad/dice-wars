@@ -1,3 +1,20 @@
+# Dice Wars v1.8.0
+
+Game summary, continue, map options, stronger bots and internet play.
+
+- **After a game**: a chart of every player's lands over the game, with rounds, battles won, the luckiest win and the biggest take.
+- **Continue later**: solo games are saved after every move; the start screen offers CONTINUE.
+- **Map options**: small, medium or large maps, and islands joined by narrow bridges. Saved maps remember their option.
+- **Fair starts**: in the first round the earliest players get only part of their reinforcement, so every seat wins about equally often (measured over thousands of simulated games).
+- **Stronger Hard bots**: one Hard bot now wins about 60% of its games against Normal bots (it was about 18% in a 6-player game).
+- **First-game tips**: bubbles point at the next step during your first turn.
+- **Keyboard and controllers everywhere**: Tab, arrows and Enter work on every screen, and gamepads work on Linux, Windows and macOS.
+- **Internet play**: `dice-wars-relay` lets friends play without port forwarding; set the relay in the lobby (INTERNET) and on the join screen.
+- **Windows**: the window keeps its picture while you drag or resize it.
+- **For developers**: a headless simulator (`DW_SIM`) for balance work.
+
+---
+
 # Dice Wars v1.7.0
 
 Consistent interface and multiplayer reliability release.
