@@ -14,11 +14,16 @@ struct Voice {
     volume: f32,
     looped: bool,
 }
+/// Headless runs are silent unless DW_HEADLESS_AUDIO opts in, which lets the
+/// audio audit exercise the real output path without opening a window.
+pub fn headless_audio() -> bool {
+    std::env::var_os("DW_HEADLESS").is_some() && std::env::var_os("DW_HEADLESS_AUDIO").is_some()
+}
 static MIXER: OnceLock<Option<mpsc::SyncSender<Voice>>> = OnceLock::new();
 fn mixer() -> Option<&'static mpsc::SyncSender<Voice>> {
     MIXER
         .get_or_init(|| {
-            if std::env::var_os("DW_HEADLESS").is_some() {
+            if std::env::var_os("DW_HEADLESS").is_some() && !headless_audio() {
                 return None;
             }
             let (tx, rx) = mpsc::sync_channel::<Voice>(32);
@@ -56,7 +61,7 @@ fn mixer() -> Option<&'static mpsc::SyncSender<Voice>> {
                                 v.position += 1;
                             }
                         }
-                        *sample = sum.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+                        *sample = soft_limit(sum);
                     }
                     voices.retain(|v| v.looped || v.position < v.samples.len());
                     if !device.write(&output) {
@@ -74,6 +79,22 @@ fn mixer() -> Option<&'static mpsc::SyncSender<Voice>> {
         })
         .as_ref()
 }
+/// Gentle saturation instead of hard clipping when many voices overlap:
+/// unity gain up to about half scale, then a smooth cubic knee to full scale.
+fn soft_limit(sum: f32) -> i16 {
+    let x = sum / 32767.0;
+    let knee = 0.5;
+    let y = if x.abs() <= knee {
+        x
+    } else {
+        // Map (knee, knee + 1.5 * (1 - knee)] smoothly onto (knee, 1].
+        let over = ((x.abs() - knee) / (1.5 * (1.0 - knee))).min(1.0);
+        let curved = over - over * over * over / 3.0; // slope 1 → 0
+        (knee + (1.0 - knee) * curved * 1.5).min(1.0) * x.signum()
+    };
+    (y * 32767.0) as i16
+}
+
 pub fn load_sound_from_bytes(bytes: &[u8]) -> Result<Sound, &'static str> {
     if bytes.len() < 44 || &bytes[..4] != b"RIFF" || &bytes[8..16] != b"WAVEfmt " {
         return Err("invalid WAV");
@@ -250,7 +271,15 @@ mod native {
         fn waveOutReset(handle: *mut c_void) -> u32;
         fn waveOutClose(handle: *mut c_void) -> u32;
     }
-    pub struct Device(*mut c_void);
+    const SLOTS: usize = 4; // 4 × 10 ms queued: smooth, still responsive
+    const PREPARED: u32 = 2; // WHDR_PREPARED
+    const DONE: u32 = 1; // WHDR_DONE
+    pub struct Device {
+        handle: *mut c_void,
+        headers: Vec<*mut Header>,
+        buffers: Vec<Vec<i16>>,
+        next: usize,
+    }
     impl Device {
         pub fn new() -> Option<Self> {
             let f = Format {
@@ -264,51 +293,79 @@ mod native {
             };
             let mut h = std::ptr::null_mut();
             if unsafe { waveOutOpen(&mut h, u32::MAX, &f, 0, 0, 0) } == 0 {
-                Some(Self(h))
+                Some(Self {
+                    handle: h,
+                    headers: (0..SLOTS)
+                        .map(|_| {
+                            Box::into_raw(Box::new(Header {
+                                data: std::ptr::null_mut(),
+                                length: 0,
+                                recorded: 0,
+                                user: 0,
+                                flags: 0,
+                                loops: 0,
+                                next: std::ptr::null_mut(),
+                                reserved: 0,
+                            }))
+                        })
+                        .collect(),
+                    buffers: (0..SLOTS).map(|_| Vec::with_capacity(1024)).collect(),
+                    next: 0,
+                })
             } else {
                 None
             }
         }
         pub fn write(&mut self, samples: &[i16]) -> bool {
-            let mut data = samples.to_vec();
-            let mut h = Header {
-                data: data.as_mut_ptr().cast(),
-                length: (data.len() * 2) as u32,
-                recorded: 0,
-                user: 0,
-                flags: 0,
-                loops: 0,
-                next: std::ptr::null_mut(),
-                reserved: 0,
-            };
+            // Keep several buffers queued so the device never runs dry between
+            // writes: wait only for the oldest slot, refill it, and requeue it.
             let size = std::mem::size_of::<Header>() as u32;
-            // SAFETY: header and sample buffer stay alive until playback completes or is reset.
+            let slot = self.next;
+            self.next = (self.next + 1) % SLOTS;
+            let start = std::time::Instant::now();
+            // SAFETY: each header and its buffer live in `self` until reset/close.
             unsafe {
-                if waveOutPrepareHeader(self.0, &mut h, size) != 0 {
-                    return false;
-                }
-                if waveOutWrite(self.0, &mut h, size) != 0 {
-                    waveOutUnprepareHeader(self.0, &mut h, size);
-                    return false;
-                }
-                let start = std::time::Instant::now();
-                while std::ptr::read_volatile(&h.flags) & 1 == 0 {
-                    if start.elapsed().as_millis() > 250 {
-                        waveOutReset(self.0);
-                        break;
+                let h = &mut *self.headers[slot];
+                if h.flags & PREPARED != 0 {
+                    while std::ptr::read_volatile(&h.flags) & DONE == 0 {
+                        if start.elapsed().as_millis() > 500 {
+                            waveOutReset(self.handle);
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    waveOutUnprepareHeader(self.handle, h, size);
                 }
-                waveOutUnprepareHeader(self.0, &mut h, size);
+                let buffer = &mut self.buffers[slot];
+                buffer.clear();
+                buffer.extend_from_slice(samples);
+                h.data = buffer.as_mut_ptr().cast();
+                h.length = (buffer.len() * 2) as u32;
+                h.flags = 0;
+                if waveOutPrepareHeader(self.handle, h, size) != 0 {
+                    return false;
+                }
+                if waveOutWrite(self.handle, h, size) != 0 {
+                    waveOutUnprepareHeader(self.handle, h, size);
+                    return false;
+                }
             }
             true
         }
     }
     impl Drop for Device {
         fn drop(&mut self) {
+            let size = std::mem::size_of::<Header>() as u32;
+            // SAFETY: reset returns every queued buffer before headers are freed.
             unsafe {
-                waveOutReset(self.0);
-                waveOutClose(self.0);
+                waveOutReset(self.handle);
+                for &h in &self.headers {
+                    if (*h).flags & PREPARED != 0 {
+                        waveOutUnprepareHeader(self.handle, h, size);
+                    }
+                    drop(Box::from_raw(h));
+                }
+                waveOutClose(self.handle);
             }
         }
     }

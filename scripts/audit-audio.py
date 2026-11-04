@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Linux output-only check: two game effects separated by silence. No microphone."""
+"""Linux output-only check, headless: two game effects separated by silence. No microphone, no window."""
 import argparse
 import array
 import json
@@ -21,7 +21,10 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audio-") as data:
     module = subprocess.check_output(["pactl", "load-module", "module-null-sink",
         f"sink_name={sink_name}"], timeout=3).decode().strip()
     env = {k: v for k, v in os.environ.items() if not k.startswith("DW_")}
-    env.update(XDG_DATA_HOME=data, DW_FRAME_LIMIT="240", DW_INPUT="60:key:F10;150:key:F10")
+    # Headless: no window opens. DW_HEADLESS_AUDIO keeps the real audio
+    # device and 60 Hz pacing so the effects play in real time.
+    env.update(XDG_DATA_HOME=data, DW_HEADLESS="1", DW_HEADLESS_AUDIO="1", DW_FORBID_WINDOW="1",
+               DW_SIZE="930x820", DW_FRAME_LIMIT="240", DW_INPUT="60:key:F10;150:key:F10")
     game = None
     recorder = None
     try:

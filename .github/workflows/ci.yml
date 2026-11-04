@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  headless-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install runtime libraries and Pillow
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-6 libpulse0 python3-pil
+      - name: Add cross-check targets
+        run: rustup target add x86_64-pc-windows-gnu aarch64-apple-darwin x86_64-apple-darwin
+      - name: Headless checks
+        run: scripts/check.sh

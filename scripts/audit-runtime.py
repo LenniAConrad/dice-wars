@@ -13,10 +13,16 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--binary", type=Path, default=root / "target/release/dicegame")
 parser.add_argument("--native", action="store_true", help="open three short native-window checks")
 args = parser.parse_args()
+if args.native and os.environ.get("DW_ALLOW_WINDOWS") != "1":
+    # Automated runs (agents, CI) must stay headless; a person measuring real
+    # presentation cost opts in explicitly.
+    parser.error("--native opens windows; set DW_ALLOW_WINDOWS=1 to confirm")
 
 with tempfile.TemporaryDirectory(prefix="dice-wars-runtime-") as data:
     base = {k: v for k, v in os.environ.items() if not k.startswith("DW_")}
     base.update(XDG_DATA_HOME=data, APPDATA=data, DW_SEED="31337", DW_PROFILE="1")
+    if not args.native:
+        base["DW_FORBID_WINDOW"] = "1"
     hover = {"DW_INPUT": ";".join(f"{i}:move:{440 if i % 2 else 390}:{560 if i % 2 else 708}" for i in range(1, 121))}
     cases = [("idle", None, {}), ("menu-hover", None, hover), ("battle", None, {"DW_AUTOSTART": "1", "DW_BATTLE": "1"})] if args.native else [
         ("idle", "930x820", {}),

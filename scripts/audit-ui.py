@@ -16,11 +16,11 @@ out = args.output.resolve()
 out.mkdir(parents=True, exist_ok=True)
 
 with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
-    base = dict(os.environ, XDG_DATA_HOME=data, APPDATA=data, DW_HEADLESS="1",
+    base = dict(os.environ, XDG_DATA_HOME=data, APPDATA=data, DW_HEADLESS="1", DW_FORBID_WINDOW="1",
                 DW_SEED="31337", DW_PLAYERS="6", DW_FRAME_LIMIT="2", DW_THEME="light")
     # Do not inherit automation switches from the caller.
     for key in list(base):
-        if key.startswith("DW_") and key not in {"DW_HEADLESS", "DW_SEED", "DW_PLAYERS", "DW_FRAME_LIMIT", "DW_THEME"}:
+        if key.startswith("DW_") and key not in {"DW_HEADLESS", "DW_FORBID_WINDOW", "DW_SEED", "DW_PLAYERS", "DW_FRAME_LIMIT", "DW_THEME"}:
             del base[key]
 
     def render(name, **changes):
@@ -108,7 +108,7 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-audit-") as data:
              [(440, 560), (390, 708), (200, 258), (365, 258),
               (490, 320), (590, 730), (830, 24), (330, 106)]),
             ("join-hover", {"DW_SCENE": "join"},
-             [(490, 588), (308, 322), (650, 322)]),
+             [(490, 588), (330, 234), (650, 582)]),
             ("game-hover", {"DW_AUTOSTART": "1"},
              [(726, 702), (820, 702)]),
             ("confirm-hover", {"DW_AUTOSTART": "1", "DW_SCENE": "confirm"},

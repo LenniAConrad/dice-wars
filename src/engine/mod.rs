@@ -226,6 +226,11 @@ fn raster_size(w: usize, h: usize) -> (usize, usize) {
 }
 pub fn init(title: &str, width: usize, height: usize) -> Result<(), String> {
     let headless = std::env::var_os("DW_HEADLESS").is_some();
+    // Automated checks set DW_FORBID_WINDOW so a missing DW_HEADLESS fails
+    // loudly instead of opening a window on someone's desktop.
+    if !headless && std::env::var_os("DW_FORBID_WINDOW").is_some() {
+        return Err("DW_FORBID_WINDOW is set: run with DW_HEADLESS=1".to_string());
+    }
     let native = if headless {
         None
     } else {
@@ -750,12 +755,13 @@ pub fn next_frame() -> bool {
         } else {
             1.0 / 15.0
         });
-        if !r.headless {
+        // Headless runs are unpaced, except when they produce real-time audio.
+        if !r.headless || audio::headless_audio() {
             if let Some(remaining) = period.checked_sub(r.started.elapsed()) {
                 std::thread::sleep(remaining);
             }
         }
-        r.dt = if r.headless {
+        r.dt = if r.headless && !audio::headless_audio() {
             1.0 / 60.0
         } else {
             r.started.elapsed().as_secs_f32().min(0.1)

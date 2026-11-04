@@ -730,22 +730,56 @@ fn wav_bytes(samples: &[f32]) -> Vec<u8> {
     d
 }
 
+fn secs(n: f32) -> usize {
+    (n * SND_RATE as f32) as usize
+}
+
+// Every effect starts and ends at zero: a short attack ramp and a release
+// fade remove the clicks a truncated decay would otherwise leave.
+fn finish(mut v: Vec<f32>) -> Vec<f32> {
+    let attack = secs(0.002).min(v.len());
+    for (i, s) in v.iter_mut().take(attack).enumerate() {
+        *s *= i as f32 / attack as f32;
+    }
+    let release = secs(0.015).min(v.len());
+    let n = v.len();
+    for i in 0..release {
+        v[n - 1 - i] *= i as f32 / release as f32;
+    }
+    v
+}
+
+// A soft mallet: a fundamental with quickly fading overtones, like a
+// marimba bar. Warmer than a bare sine at the same loudness.
+fn tone(f: f32, dur: f32, amp: f32, decay: f32) -> Vec<f32> {
+    let tau = std::f32::consts::TAU;
+    (0..secs(dur))
+        .map(|i| {
+            let t = i as f32 / SND_RATE as f32;
+            let body = (tau * f * t).sin()
+                + 0.32 * (tau * 2.0 * f * t).sin() * (-t * decay * 1.8).exp()
+                + 0.10 * (tau * 3.01 * f * t).sin() * (-t * decay * 3.0).exp();
+            body * amp * (-t * decay).exp() * (t / 0.003).min(1.0)
+        })
+        .collect()
+}
+
 // a tone sliding from f0 to f1 with exponential decay
 fn glide(f0: f32, f1: f32, dur: f32, amp: f32, decay: f32) -> Vec<f32> {
-    let n = (dur * SND_RATE as f32) as usize;
+    let n = secs(dur);
     let mut phase = 0.0f32;
     (0..n)
         .map(|i| {
             let t = i as f32 / SND_RATE as f32;
             let f = f0 + (f1 - f0) * (t / dur);
             phase += std::f32::consts::TAU * f / SND_RATE as f32;
-            phase.sin() * amp * (-t * decay).exp()
+            (phase.sin() + 0.2 * (2.0 * phase).sin()) * amp * (-t * decay).exp()
         })
         .collect()
 }
 
 fn add_at(base: &mut Vec<f32>, add: Vec<f32>, offset: f32) {
-    let off = (offset * SND_RATE as f32) as usize;
+    let off = secs(offset);
     if base.len() < off + add.len() {
         base.resize(off + add.len(), 0.0);
     }
@@ -754,41 +788,84 @@ fn add_at(base: &mut Vec<f32>, add: Vec<f32>, offset: f32) {
     }
 }
 
-// soft dice tumble, like dice dropped on felt: heavily low-passed noise with
-// gentle attacks and a low warm thump under each bounce
-fn rattle() -> Vec<f32> {
-    let dur = 0.38f32;
-    let n = (dur * SND_RATE as f32) as usize;
-    let mut seed = 0x1234_5678u32;
-    let bursts = [0.0f32, 0.1, 0.19];
-    let mut lp = 0.0f32;
-    (0..n)
-        .map(|i| {
-            let t = i as f32 / SND_RATE as f32;
-            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let noise = (seed >> 16) as f32 / 32768.0 - 1.0;
-            lp += 0.05 * (noise - lp); // very mellow: only the low rumble remains
-            let mut s = 0.0f32;
-            for &b in &bursts {
-                if t >= b {
-                    let a = t - b;
-                    let env = (a * 120.0).min(1.0) * (-a * 30.0).exp();
-                    s += lp * 1.6 * env + (a * 150.0 * std::f32::consts::TAU).sin() * 0.22 * env;
-                }
-            }
-            s * 0.8
-        })
-        .collect()
+// Two quiet early reflections give musical cues a little room.
+fn room(mut v: Vec<f32>) -> Vec<f32> {
+    let dry = v.clone();
+    for (delay, gain) in [(0.067, 0.20), (0.131, 0.09)] {
+        let mut wet: Vec<f32> = dry.iter().map(|s| s * gain).collect();
+        // darken the reflections slightly
+        let mut lp = 0.0;
+        for s in &mut wet {
+            lp += 0.35 * (*s - lp);
+            *s = lp;
+        }
+        add_at(&mut v, wet, delay);
+    }
+    v
 }
 
-#[derive(Clone, Copy)]
+struct Noise(u32);
+impl Noise {
+    fn next(&mut self) -> f32 {
+        self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (self.0 >> 8) as f32 / 8_388_608.0 - 1.0
+    }
+}
+
+// A die landing on the table: a band-limited tick with a short wooden body.
+fn clack(seed: u32, amp: f32) -> Vec<f32> {
+    let mut noise = Noise(seed);
+    let (mut lp, mut hp_prev) = (0.0f32, 0.0f32);
+    let mut v: Vec<f32> = (0..secs(0.05))
+        .map(|i| {
+            let t = i as f32 / SND_RATE as f32;
+            let n = noise.next();
+            lp += 0.45 * (n - lp);
+            let band = lp - hp_prev;
+            hp_prev += 0.08 * (lp - hp_prev);
+            band * (-t * 140.0).exp() * amp
+        })
+        .collect();
+    add_at(&mut v, tone(620.0 + (seed % 7) as f32 * 40.0, 0.045, amp * 0.25, 90.0), 0.0);
+    v
+}
+
+// Dice tumbling on felt, as long as the on-screen shake. Each variant has its
+// own bounce pattern, and bigger battles throw more dice at once.
+fn rattle(seed: u32, big: bool) -> Vec<f32> {
+    let dur = T_SHAKE * 0.6 + 0.02;
+    let mut noise = Noise(seed);
+    let mut v = vec![0.0f32; secs(dur)];
+    let hits = if big { 11 } else { 6 };
+    for k in 0..hits {
+        let at = (k as f32 + 0.5 * (noise.next() + 1.0)) / hits as f32 * (dur - 0.06);
+        let amp = 0.16 + 0.10 * (noise.next() + 1.0) * 0.5;
+        add_at(&mut v, clack(seed.wrapping_add(k * 977), amp), at);
+    }
+    // a soft felt rumble underneath
+    let mut lp = 0.0f32;
+    let gain = if big { 0.5 } else { 0.32 };
+    for (i, s) in v.iter_mut().enumerate() {
+        let t = i as f32 / SND_RATE as f32;
+        lp += 0.04 * (noise.next() - lp);
+        *s += lp * gain * (t / 0.03).min(1.0) * ((dur - t) / 0.08).clamp(0.0, 1.0);
+    }
+    v
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Snd {
     Click,
     Select,
     Invalid,
-    Roll,
-    Capture,
-    Repel,
+    Roll { big: bool, quiet: bool },
+    Land { quiet: bool },
+    Capture,  // you took a land
+    Repel,    // your attack failed
+    Lost,     // one of your lands fell
+    Defended, // your land held
+    OtherCapture,
+    OtherRepel,
     Reinforce,
     Turn,
     Eliminated,
@@ -800,78 +877,125 @@ struct Sounds {
     click: Sound,
     select: Sound,
     invalid: Sound,
-    roll: Sound,
+    rolls: Vec<Sound>,     // small battles
+    rolls_big: Vec<Sound>, // big battles
+    land: Sound,
     capture: Sound,
     repel: Sound,
+    lost: Sound,
+    defended: Sound,
+    other_capture: Sound,
+    other_repel: Sound,
     reinforce: Sound,
     turn: Sound,
     eliminated: Sound,
     win: Sound,
     lose: Sound,
+    variant: std::cell::Cell<usize>,
+    volume: std::cell::Cell<f32>,
 }
 
 impl Sounds {
     // None if the audio device is unavailable — the game then runs silent
     fn load() -> Option<Sounds> {
         fn snd(samples: Vec<f32>) -> Option<Sound> {
-            load_sound_from_bytes(&wav_bytes(&samples)).ok()
+            load_sound_from_bytes(&wav_bytes(&finish(samples))).ok()
         }
-        let capture = {
-            let mut v = glide(523.0, 523.0, 0.30, 0.32, 9.0);
-            add_at(&mut v, glide(659.0, 659.0, 0.24, 0.28, 9.0), 0.07);
-            add_at(&mut v, glide(784.0, 784.0, 0.22, 0.28, 8.0), 0.14);
+        fn notes(seq: &[(f32, f32, f32, f32)], amp: f32, decay: f32) -> Vec<f32> {
+            let mut v = Vec::new();
+            for &(f, at, dur, gain) in seq {
+                add_at(&mut v, tone(f, dur, amp * gain, decay), at);
+            }
             v
-        };
-        let reinforce = {
-            let mut v = glide(720.0, 900.0, 0.08, 0.3, 22.0);
-            add_at(&mut v, glide(900.0, 1120.0, 0.08, 0.3, 22.0), 0.09);
-            v
-        };
-        let win = {
-            let mut v = glide(523.0, 523.0, 0.5, 0.3, 5.0);
-            add_at(&mut v, glide(659.0, 659.0, 0.45, 0.28, 5.0), 0.12);
-            add_at(&mut v, glide(784.0, 784.0, 0.4, 0.28, 4.5), 0.24);
-            add_at(&mut v, glide(1046.0, 1046.0, 0.6, 0.3, 3.5), 0.36);
-            v
-        };
+        }
+        // C major for good news, its relative minor for bad news.
+        let (c5, e5, g5, c6) = (523.25, 659.25, 783.99, 1046.5);
+        let (a4, d5, ef5) = (440.0, 587.33, 622.25);
+        let capture = room(notes(&[(c5, 0.0, 0.32, 1.0), (e5, 0.06, 0.3, 0.9), (g5, 0.12, 0.34, 0.9)], 0.22, 9.0));
+        let lost = room(notes(&[(ef5, 0.0, 0.3, 1.0), (c5, 0.09, 0.42, 1.0)], 0.2, 7.0));
+        let defended = room(notes(&[(d5, 0.0, 0.26, 1.0), (a4 * 2.0, 0.0, 0.22, 0.6)], 0.17, 12.0));
+        let mut repel = glide(250.0, 150.0, 0.26, 0.24, 9.0);
+        add_at(&mut repel, clack(91, 0.25), 0.0);
+        let mut reinforce = Vec::new();
+        for (k, f) in [880.0, 1108.7, 1318.5].into_iter().enumerate() {
+            add_at(&mut reinforce, tone(f, 0.09, 0.16, 30.0), k as f32 * 0.055);
+            add_at(&mut reinforce, clack(300 + k as u32, 0.12), k as f32 * 0.055);
+        }
+        let win = room(notes(
+            &[
+                (c5, 0.0, 0.5, 1.0),
+                (e5, 0.11, 0.5, 0.9),
+                (g5, 0.22, 0.5, 0.9),
+                (c6, 0.33, 0.9, 1.0),
+                (e5, 0.33, 0.9, 0.5),
+                (g5, 0.33, 0.9, 0.5),
+            ],
+            0.2,
+            3.6,
+        ));
+        let mut lose = notes(&[(g5 * 0.5, 0.0, 0.5, 1.0), (ef5 * 0.5, 0.16, 0.5, 1.0), (c5 * 0.5, 0.32, 0.8, 1.0)], 0.24, 4.0);
+        add_at(&mut lose, glide(220.0, 110.0, 0.7, 0.08, 3.0), 0.3);
         Some(Sounds {
-            click: snd(glide(900.0, 840.0, 0.05, 0.5, 60.0))?,
-            select: snd(glide(1250.0, 1180.0, 0.06, 0.4, 55.0))?,
-            invalid: snd(glide(220.0, 140.0, 0.18, 0.45, 15.0))?,
-            roll: snd(rattle())?,
+            click: snd(tone(1760.0, 0.035, 0.22, 95.0))?,
+            select: snd(notes(&[(1318.5, 0.0, 0.08, 1.0), (1975.5, 0.012, 0.06, 0.4)], 0.22, 48.0))?,
+            invalid: snd(notes(&[(311.1, 0.0, 0.09, 1.0), (233.1, 0.08, 0.14, 1.0)], 0.3, 20.0))?,
+            rolls: (0..3).map(|k| snd(rattle(0x1234_5678 + k * 7919, false))).collect::<Option<_>>()?,
+            rolls_big: (0..3).map(|k| snd(rattle(0x0BAD_5EED + k * 104_729, true))).collect::<Option<_>>()?,
+            land: snd({
+                let mut v = clack(4242, 0.3);
+                add_at(&mut v, clack(777, 0.22), 0.028);
+                v
+            })?,
             capture: snd(capture)?,
-            repel: snd(glide(260.0, 150.0, 0.3, 0.3, 8.0))?,
+            repel: snd(repel)?,
+            lost: snd(lost)?,
+            defended: snd(defended)?,
+            other_capture: snd(tone(392.0, 0.22, 0.2, 14.0))?,
+            other_repel: snd(glide(200.0, 150.0, 0.16, 0.18, 16.0))?,
             reinforce: snd(reinforce)?,
-            turn: snd(glide(600.0, 660.0, 0.09, 0.28, 26.0))?,
-            eliminated: {
-                let mut v = glide(440.0, 440.0, 0.16, 0.35, 12.0);
-                add_at(&mut v, glide(294.0, 294.0, 0.3, 0.35, 8.0), 0.14);
-                snd(v)?
-            },
+            turn: snd(room(notes(&[(g5, 0.0, 0.16, 1.0), (c6, 0.09, 0.26, 1.0)], 0.17, 13.0)))?,
+            eliminated: snd(room(notes(&[(a4, 0.0, 0.2, 1.0), (370.0, 0.12, 0.2, 1.0), (293.7, 0.24, 0.4, 1.0)], 0.22, 7.0)))?,
             win: snd(win)?,
-            lose: snd(glide(300.0, 80.0, 0.8, 0.4, 3.5))?,
+            lose: snd(lose)?,
+            variant: std::cell::Cell::new(0),
+            volume: std::cell::Cell::new(1.0),
         })
     }
 
     fn play(&self, s: Snd) {
+        // Variants rotate rather than using the game RNG, which must stay
+        // reserved for dice so seeds and replays remain reproducible.
+        let pick = |v: &Vec<Sound>| {
+            let k = self.variant.get();
+            self.variant.set(k.wrapping_add(1));
+            v[k % v.len()].clone()
+        };
         let (sound, volume) = match s {
-            Snd::Click => (&self.click, 0.5),
-            Snd::Select => (&self.select, 0.5),
-            Snd::Invalid => (&self.invalid, 0.5),
-            Snd::Roll => (&self.roll, 0.32),
-            Snd::Capture => (&self.capture, 0.48),
-            Snd::Repel => (&self.repel, 0.42),
-            Snd::Reinforce => (&self.reinforce, 0.5),
-            Snd::Turn => (&self.turn, 0.5),
-            Snd::Eliminated => (&self.eliminated, 0.6),
-            Snd::Win => (&self.win, 0.7),
-            Snd::Lose => (&self.lose, 0.7),
+            Snd::Click => (self.click.clone(), 0.45),
+            Snd::Select => (self.select.clone(), 0.5),
+            Snd::Invalid => (self.invalid.clone(), 0.5),
+            Snd::Roll { big, quiet } => (
+                pick(if big { &self.rolls_big } else { &self.rolls }),
+                if quiet { 0.32 } else { 0.6 },
+            ),
+            Snd::Land { quiet } => (self.land.clone(), if quiet { 0.28 } else { 0.55 }),
+            Snd::Capture => (self.capture.clone(), 0.7),
+            Snd::Repel => (self.repel.clone(), 0.6),
+            Snd::Lost => (self.lost.clone(), 0.7),
+            Snd::Defended => (self.defended.clone(), 0.65),
+            Snd::OtherCapture => (self.other_capture.clone(), 0.3),
+            Snd::OtherRepel => (self.other_repel.clone(), 0.28),
+            Snd::Reinforce => (self.reinforce.clone(), 0.55),
+            Snd::Turn => (self.turn.clone(), 0.6),
+            Snd::Eliminated => (self.eliminated.clone(), 0.6),
+            Snd::Win => (self.win.clone(), 0.75),
+            Snd::Lose => (self.lose.clone(), 0.7),
         };
         play_sound(
-            sound,
+            &sound,
             PlaySoundParams {
                 looped: false,
-                volume,
+                volume: volume * self.volume.get(),
             },
         );
     }
@@ -1504,7 +1628,32 @@ impl Game {
         self.fx[d].shake = 1.0;
         self.selected = None;
         self.turn_timer = TURN_SECS; // acting resets the idle clock
-        self.snd.push(Snd::Roll);
+        self.snd.push(self.roll_sound(a, d));
+    }
+
+    // Sounds speak from this screen's point of view; fights between other
+    // players are quieter and neutral.
+    fn involves_me(&self, a: usize, d: usize) -> bool {
+        self.terrs[a].owner == self.my_seat || self.terrs[d].owner == self.my_seat
+    }
+
+    fn roll_sound(&self, a: usize, d: usize) -> Snd {
+        Snd::Roll {
+            big: self.terrs[a].dice + self.terrs[d].dice >= 10,
+            quiet: !self.involves_me(a, d),
+        }
+    }
+
+    fn result_sound(&self, b: &Battle) -> Snd {
+        let me = self.my_seat;
+        match (self.terrs[b.a].owner == me, self.terrs[b.d].owner == me, b.captured) {
+            (true, _, true) => Snd::Capture,
+            (true, _, false) => Snd::Repel,
+            (_, true, true) => Snd::Lost,
+            (_, true, false) => Snd::Defended,
+            (_, _, true) => Snd::OtherCapture,
+            (_, _, false) => Snd::OtherRepel,
+        }
     }
 
     fn push_log(&mut self, s: String) {
@@ -1547,8 +1696,6 @@ impl Game {
             ));
         }
         self.terrs[b.a].dice = 1;
-        self.snd
-            .push(if b.captured { Snd::Capture } else { Snd::Repel });
         if b.captured && self.count(def) == 0 {
             self.push_log(format!("{} eliminated!", self.name_of(def)));
             self.snd.push(Snd::Eliminated);
@@ -1748,7 +1895,7 @@ impl Game {
         self.fx[d].shake = 1.0;
         self.selected = None;
         self.turn_timer = TURN_SECS;
-        self.snd.push(Snd::Roll);
+        self.snd.push(self.roll_sound(a, d));
         true
     }
 
@@ -2008,9 +2155,32 @@ impl Game {
             self.over_t = (self.over_t + dt * 2.0).min(1.0);
         }
 
-        // battle animation
+        // battle animation; sounds follow the picture: the dice land when the
+        // rolls appear, and the result plays as soon as the totals settle
+        let mut cues = Vec::new();
         if let Some(b) = &mut self.battle {
+            let before = b.t;
             b.t += dt;
+            let land = T_SHAKE * 0.6;
+            let settle = battle_settle_time(b);
+            if before < land && b.t >= land {
+                cues.push(0);
+            }
+            if before < settle && b.t >= settle {
+                cues.push(1);
+            }
+        }
+        if let Some(b) = self.battle.clone() {
+            for cue in cues {
+                let s = if cue == 0 {
+                    Snd::Land {
+                        quiet: !self.involves_me(b.a, b.d),
+                    }
+                } else {
+                    self.result_sound(&b)
+                };
+                self.snd.push(s);
+            }
         }
         if self.battle.as_ref().map_or(false, |b| b.t >= T_BATTLE) {
             let b = self.battle.take().unwrap();
@@ -3221,7 +3391,17 @@ fn handle_icon_bar_click(settings: &mut Settings, snd: &mut Vec<Snd>, m: Vec2) -
             continue;
         }
         match i {
-            0 => settings.muted = !settings.muted,
+            // Sound cycles full → half volume → off.
+            0 => {
+                if settings.muted {
+                    settings.muted = false;
+                    settings.quiet = false;
+                } else if settings.quiet {
+                    settings.muted = true;
+                } else {
+                    settings.quiet = true;
+                }
+            }
             1 => settings.chances = !settings.chances,
             2 => {
                 settings.colorblind = !settings.colorblind;
@@ -3280,7 +3460,12 @@ fn draw_icon_bar(settings: &Settings, ui: &Ui, mp: Vec2) {
                     INK(),
                 );
                 if !settings.muted {
-                    for (rr, aa) in [(4.5f32, 0.9f32), (8.0, 0.55)] {
+                    let arcs: &[(f32, f32)] = if settings.quiet {
+                        &[(4.5, 0.9)]
+                    } else {
+                        &[(4.5, 0.9), (8.0, 0.55)]
+                    };
+                    for &(rr, aa) in arcs {
                         let n = 6;
                         for k in 0..n {
                             let t0 = -0.85 + 1.7 * k as f32 / n as f32;
@@ -3345,8 +3530,10 @@ fn draw_icon_bar(settings: &Settings, ui: &Ui, mp: Vec2) {
                 0 => {
                     if settings.muted {
                         "Sound off · M"
+                    } else if settings.quiet {
+                        "Sound 50% · M"
                     } else {
-                        "Sound on · M"
+                        "Sound 100% · M"
                     }
                 }
                 1 => {
@@ -4868,7 +5055,8 @@ impl Replay {
                 });
                 self.g.fx[a].shake = 1.0;
                 self.g.fx[d].shake = 1.0;
-                self.g.snd.push(Snd::Roll);
+                let roll = self.g.roll_sound(a, d);
+                self.g.snd.push(roll);
             }
             RepEvent::Reinforce { player, lands } => {
                 let n = lands.len();
@@ -5210,10 +5398,15 @@ fn draw_face_die(x: f32, y: f32, s: f32, val: usize, pal: &Palette) {
 }
 
 // Both rolls live in the existing status lane, clear of the map and controls.
+// When the last die of a battle has appeared and the totals are final.
+fn battle_settle_time(b: &Battle) -> f32 {
+    T_SHAKE * 0.6 + (b.ad.len().max(b.dd.len()) as f32 - 1.0).max(0.0) * 0.06 + 0.14
+}
+
 fn draw_battle_overlay(game: &Game, ui: &Ui) {
     let Some(b) = &game.battle else { return };
     let reveal = b.t - T_SHAKE * 0.6;
-    let settled = reveal >= (b.ad.len().max(b.dd.len()) as f32 - 1.0).max(0.0) * 0.06 + 0.14;
+    let settled = b.t >= battle_settle_time(b);
     for (row, (player, dice, role)) in [
         (game.terrs[b.a].owner, &b.ad, "ATTACK"),
         (game.terrs[b.d].owner, &b.dd, "DEFEND"),
@@ -5339,6 +5532,7 @@ const SETTINGS_FILE: &str = "settings.txt";
 struct Settings {
     chances: bool, // show win-chance hints on attack options
     muted: bool,
+    quiet: bool, // half volume
     colorblind: bool, // alternative palette + shape badges on the map
     color: usize,     // which palette color the human plays as
     speed: f32,       // game speed multiplier (1x / 2x)
@@ -5381,6 +5575,7 @@ fn load_settings() -> Settings {
     let mut s = Settings {
         chances: true,
         muted: false,
+        quiet: false,
         colorblind: false,
         color: 0,
         speed: 1.0,
@@ -5403,6 +5598,7 @@ fn load_settings() -> Settings {
             match (it.next(), it.next()) {
                 (Some("chances"), Some(v)) => s.chances = v != "0",
                 (Some("muted"), Some(v)) => s.muted = v != "0",
+                (Some("quiet"), Some(v)) => s.quiet = v != "0",
                 (Some("colorblind"), Some(v)) => s.colorblind = v != "0",
                 (Some("color"), Some(v)) => s.color = v.parse::<usize>().unwrap_or(0) % MAX_PLAYERS,
                 (Some("speed"), Some(v)) => s.speed = if v == "2" { 2.0 } else { 1.0 },
@@ -5437,7 +5633,7 @@ fn save_settings(s: &Settings) {
     let _ = std::fs::write(
         data_file(SETTINGS_FILE),
         format!(
-            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\nplayers {}\ndifficulty {}\nreducedmotion {}\n",
+            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\nplayers {}\ndifficulty {}\nreducedmotion {}\nquiet {}\n",
             s.chances as u8,
             s.muted as u8,
             s.colorblind as u8,
@@ -5454,7 +5650,8 @@ fn save_settings(s: &Settings) {
             s.last_addr,
             s.players,
             s.difficulty,
-            s.reduced_motion as u8
+            s.reduced_motion as u8,
+            s.quiet as u8
         ),
     );
 }
@@ -8925,6 +9122,7 @@ fn main() {
         }
 
         if let Some(s) = &sounds {
+            s.volume.set(if settings.quiet { 0.5 } else { 1.0 });
             if settings.muted {
                 snd_queue.clear();
             }
@@ -9611,6 +9809,45 @@ mod tests {
         let _ = replay.shutdown(std::net::Shutdown::Both);
         drop(host);
         std::env::remove_var("DW_PORT");
+    }
+
+    #[test]
+    fn sound_effects_start_and_end_silently_and_vary() {
+        for v in [
+            tone(523.25, 0.3, 0.3, 9.0),
+            glide(250.0, 150.0, 0.26, 0.3, 9.0),
+            rattle(1, false),
+            rattle(2, true),
+            room(tone(659.25, 0.2, 0.3, 9.0)),
+        ] {
+            let v = finish(v);
+            assert!(v[0].abs() < 1e-3 && v[v.len() - 1].abs() < 1e-3, "audible click at an edge");
+            assert!(v.iter().all(|s| s.abs() < 1.0), "effect clips on its own");
+        }
+        assert_ne!(rattle(1, false), rattle(2, false), "roll variants are identical");
+        assert!(rattle(1, true).len() >= secs(T_SHAKE * 0.6), "rattle shorter than the shake");
+    }
+
+    #[test]
+    fn battle_sounds_follow_the_local_point_of_view() {
+        let mut g = mk_game(&[0, 1, 2], &[(0, 1), (1, 2), (0, 2)], 3, TeamCfg::default());
+        g.my_seat = 0;
+        let fight = |a, d, captured| Battle {
+            a,
+            d,
+            ra: 0,
+            rd: 0,
+            ad: vec![],
+            dd: vec![],
+            captured,
+            t: 0.0,
+        };
+        assert_eq!(g.result_sound(&fight(0, 1, true)), Snd::Capture);
+        assert_eq!(g.result_sound(&fight(0, 1, false)), Snd::Repel);
+        assert_eq!(g.result_sound(&fight(1, 0, true)), Snd::Lost);
+        assert_eq!(g.result_sound(&fight(1, 0, false)), Snd::Defended);
+        assert_eq!(g.result_sound(&fight(1, 2, true)), Snd::OtherCapture);
+        assert_eq!(g.roll_sound(1, 2), Snd::Roll { big: false, quiet: true });
     }
 
     #[test]

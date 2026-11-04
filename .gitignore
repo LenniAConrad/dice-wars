@@ -10,3 +10,6 @@ replay-*.gif
 
 # release artifacts
 dist/
+
+# local agent state and worktrees
+/.claude/
