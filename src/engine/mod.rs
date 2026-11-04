@@ -326,6 +326,22 @@ pub fn is_key_pressed(key: KeyCode) -> bool {
 pub fn is_key_down(key: KeyCode) -> bool {
     read(false, |r| r.input.keys.contains(&key))
 }
+/// Swallow this frame's click, e.g. when an overlay already handled it.
+pub fn consume_click() {
+    RUNTIME.with(|r| {
+        if let Some(r) = r.borrow_mut().as_mut() {
+            r.input.clicked = false;
+        }
+    });
+}
+/// Swallow this frame's press of `key`.
+pub fn consume_key(key: KeyCode) {
+    RUNTIME.with(|r| {
+        if let Some(r) = r.borrow_mut().as_mut() {
+            r.input.pressed.remove(&key);
+        }
+    });
+}
 pub fn is_mouse_button_pressed(_: MouseButton) -> bool {
     read(false, |r| r.input.clicked)
 }

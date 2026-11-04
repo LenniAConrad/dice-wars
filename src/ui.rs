@@ -4,18 +4,17 @@
 //! Everything is drawn on a WIN_W x WIN_H virtual canvas which is scaled
 //! (letterboxed) to the actual window; the mouse is mapped back into it.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dicegame::engine::{self, prelude::*};
 
-use crate::dice::draw_ellipse_fan;
 use crate::game::HUMAN;
 use crate::menu::COL_L;
 use crate::settings::{save_settings, Settings};
 use crate::sound::Snd;
 use crate::theme::{
-    dark_mode, darken, mix, on_color, palette, with_alpha, ACCENT, BORDER, CARD_EDGE, COLORBLIND,
-    DARK, INK, INK_ON_FILL, REDUCED_MOTION, SRF,
+    dark_mode, darken, mix, on_color, palette, set_theme, theme_index, with_alpha, ACCENT, BG,
+    BORDER, CARD_EDGE, COLORBLIND, INK, INK_ON_FILL, REDUCED_MOTION, SRF, THEMES,
 };
 
 // virtual canvas; scaled to the real window with letterboxing
@@ -202,206 +201,343 @@ pub(crate) fn draw_round_frame(
     engine::rounded_frame(x, y, w, h, radius, stroke, fill, border);
 }
 
-pub(crate) fn r_icon(i: usize) -> Rect {
-    Rect::new(WIN_W - 284.0 + i as f32 * 44.0, 18.0, 40.0, 28.0)
+// ---------------------------------------------------------------- toolbar
+// Two controls in every screen: a quick sound button and a Settings button
+// that opens one labelled panel for every preference.
+
+static SETTINGS_OPEN: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn r_sound() -> Rect {
+    Rect::new(WIN_W - 166.0, 16.0, 40.0, 30.0)
 }
 
-pub(crate) fn handle_icon_bar_click(settings: &mut Settings, snd: &mut Vec<Snd>, m: Vec2) -> bool {
-    for i in 0..6 {
-        if !r_icon(i).contains(m) {
-            continue;
+pub(crate) fn r_settings() -> Rect {
+    Rect::new(WIN_W - 120.0, 16.0, 100.0, 30.0)
+}
+
+pub(crate) fn settings_open() -> bool {
+    SETTINGS_OPEN.load(Ordering::Relaxed)
+}
+
+/// Whether `m` is on the toolbar or the open settings panel, so screens can
+/// ignore clicks that belong to them.
+pub(crate) fn toolbar_contains(m: Vec2) -> bool {
+    r_sound().contains(m) || r_settings().contains(m) || (settings_open() && r_panel().contains(m))
+}
+
+const PANEL_W: f32 = 312.0;
+const ROW_Y: f32 = 150.0; // first option row, below the theme swatches
+const ROW_H: f32 = 44.0;
+const ROWS: [(&str, &[&str]); 5] = [
+    ("Sound", &["Full", "Half", "Off"]),
+    ("Game speed", &["1x", "2x", "4x"]),
+    ("Win chances", &["Show", "Hide"]),
+    ("Color assist", &["Off", "On"]),
+    ("Motion", &["Full", "Less"]),
+];
+
+fn r_panel() -> Rect {
+    Rect::new(
+        WIN_W - 20.0 - PANEL_W,
+        54.0,
+        PANEL_W,
+        ROW_Y - 54.0 + ROWS.len() as f32 * ROW_H + 44.0,
+    )
+}
+
+fn r_theme(i: usize) -> Rect {
+    let p = r_panel();
+    Rect::new(p.x + 20.0 + i as f32 * 40.0, p.y + 46.0, 32.0, 32.0)
+}
+
+fn r_option(row: usize, k: usize) -> Rect {
+    let p = r_panel();
+    let n = ROWS[row].1.len() as f32;
+    let (x0, w) = (p.x + 128.0, PANEL_W - 128.0 - 18.0);
+    Rect::new(
+        x0 + k as f32 * w / n,
+        ROW_Y + row as f32 * ROW_H,
+        w / n,
+        30.0,
+    )
+}
+
+fn option_selected(settings: &Settings, row: usize) -> usize {
+    match row {
+        0 => {
+            if settings.muted {
+                2
+            } else if settings.quiet {
+                1
+            } else {
+                0
+            }
         }
-        match i {
-            // Sound cycles full → half volume → off.
-            0 => {
-                if settings.muted {
-                    settings.muted = false;
-                    settings.quiet = false;
-                } else if settings.quiet {
-                    settings.muted = true;
-                } else {
-                    settings.quiet = true;
-                }
-            }
-            1 => settings.chances = !settings.chances,
-            2 => {
-                settings.colorblind = !settings.colorblind;
-                COLORBLIND.store(settings.colorblind, Ordering::Relaxed);
-            }
-            3 => settings.speed = if settings.speed > 1.5 { 1.0 } else { 2.0 },
-            4 => {
-                settings.dark = !settings.dark;
-                DARK.store(settings.dark, Ordering::Relaxed);
-            }
-            _ => {
-                settings.reduced_motion = !settings.reduced_motion;
-                REDUCED_MOTION.store(settings.reduced_motion, Ordering::Relaxed);
-            }
+        1 => match settings.speed {
+            s if s > 3.0 => 2,
+            s if s > 1.5 => 1,
+            _ => 0,
+        },
+        2 => (!settings.chances) as usize,
+        3 => settings.colorblind as usize,
+        _ => settings.reduced_motion as usize,
+    }
+}
+
+fn set_option(settings: &mut Settings, row: usize, k: usize) {
+    match row {
+        0 => {
+            settings.muted = k == 2;
+            settings.quiet = k == 1;
         }
+        1 => settings.speed = [1.0, 2.0, 4.0][k.min(2)],
+        2 => settings.chances = k == 0,
+        3 => {
+            settings.colorblind = k == 1;
+            COLORBLIND.store(settings.colorblind, Ordering::Relaxed);
+        }
+        _ => {
+            settings.reduced_motion = k == 1;
+            REDUCED_MOTION.store(settings.reduced_motion, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Keyboard shortcuts for the toolbar: M sound, F8 motion, F9 color assist,
+/// F10 next theme.
+pub(crate) fn toolbar_shortcut(settings: &mut Settings, snd: &mut Vec<Snd>, text_editing: bool) {
+    let changed = if is_key_pressed(KeyCode::F10) {
+        settings.theme = (settings.theme + 1) % THEMES.len();
+        set_theme(settings.theme);
+        true
+    } else if is_key_pressed(KeyCode::F9) {
+        set_option(settings, 3, (!settings.colorblind) as usize);
+        true
+    } else if is_key_pressed(KeyCode::F8) {
+        set_option(settings, 4, (!settings.reduced_motion) as usize);
+        true
+    } else if !text_editing && is_key_pressed(KeyCode::M) {
+        set_option(settings, 0, (option_selected(settings, 0) + 1) % 3);
+        true
+    } else {
+        false
+    };
+    if changed {
         save_settings(settings);
         snd.push(Snd::Click);
-        return true;
     }
-    false
+}
+
+/// Toolbar and settings-panel clicks. Returns true when the click was used
+/// here; the caller then hides it from the screen underneath.
+pub(crate) fn handle_toolbar_click(settings: &mut Settings, snd: &mut Vec<Snd>, m: Vec2) -> bool {
+    if r_sound().contains(m) {
+        set_option(settings, 0, (option_selected(settings, 0) + 1) % 3);
+    } else if r_settings().contains(m) {
+        SETTINGS_OPEN.store(!settings_open(), Ordering::Relaxed);
+    } else if settings_open() {
+        if !r_panel().contains(m) {
+            // A click outside closes the panel and does nothing else.
+            SETTINGS_OPEN.store(false, Ordering::Relaxed);
+            return true;
+        }
+        let theme = (0..THEMES.len()).find(|&i| r_theme(i).contains(m));
+        let option = (0..ROWS.len())
+            .flat_map(|row| (0..ROWS[row].1.len()).map(move |k| (row, k)))
+            .find(|&(row, k)| r_option(row, k).contains(m));
+        if let Some(i) = theme {
+            settings.theme = i;
+            set_theme(i);
+        } else if let Some((row, k)) = option {
+            set_option(settings, row, k);
+        } else {
+            return true; // inside the panel, between controls
+        }
+    } else {
+        return false;
+    }
+    save_settings(settings);
+    snd.push(Snd::Click);
+    true
+}
+
+pub(crate) fn close_settings() {
+    SETTINGS_OPEN.store(false, Ordering::Relaxed);
+}
+
+fn draw_speaker(cx: f32, cy: f32, settings: &Settings) {
+    draw_round_rect(cx - 11.0, cy - 3.5, 5.5, 7.0, 2.0, INK());
+    draw_triangle(
+        vec2(cx - 7.0, cy),
+        vec2(cx - 0.5, cy - 7.0),
+        vec2(cx - 0.5, cy + 7.0),
+        INK(),
+    );
+    if settings.muted {
+        draw_line(cx + 2.0, cy - 5.0, cx + 10.0, cy + 5.0, 2.0, INK());
+        draw_line(cx + 2.0, cy + 5.0, cx + 10.0, cy - 5.0, 2.0, INK());
+        return;
+    }
+    let arcs: &[(f32, f32)] = if settings.quiet {
+        &[(4.5, 0.9)]
+    } else {
+        &[(4.5, 0.9), (8.0, 0.55)]
+    };
+    for &(rr, aa) in arcs {
+        let n = 6;
+        for k in 0..n {
+            let t0 = -0.85 + 1.7 * k as f32 / n as f32;
+            let t1 = -0.85 + 1.7 * (k + 1) as f32 / n as f32;
+            draw_line(
+                cx + 1.0 + rr * t0.cos(),
+                cy + rr * t0.sin(),
+                cx + 1.0 + rr * t1.cos(),
+                cy + rr * t1.sin(),
+                1.5,
+                with_alpha(INK(), aa),
+            );
+        }
+    }
+}
+
+// three slider tracks with knobs: the conventional "settings" glyph
+fn draw_sliders(cx: f32, cy: f32) {
+    for (k, knob) in [(-1.0f32, 0.35f32), (0.0, -0.4), (1.0, 0.15)] {
+        let y = cy + k * 5.0;
+        draw_line(cx - 7.0, y, cx + 7.0, y, 1.6, with_alpha(INK(), 0.8));
+        draw_circle(cx + knob * 7.0, y, 2.4, INK());
+    }
 }
 
 pub(crate) fn draw_icon_bar(settings: &Settings, ui: &Ui, mp: Vec2) {
-    let slash = |r: Rect| {
-        draw_line(
-            r.x + 8.0,
-            r.y + r.h - 5.0,
-            r.x + r.w - 8.0,
-            r.y + 5.0,
-            2.0,
-            palette(2).dark,
-        );
-    };
-    for i in 0..6 {
-        let r = r_icon(i);
-        let hov = r.contains(mp);
-        draw_round_frame(
-            r.x,
-            r.y,
-            r.w,
-            r.h,
-            8.0,
-            1.5,
-            control_fill(SRF(), hov),
-            if hov { ACCENT() } else { CARD_EDGE() },
-        );
-        let (cx, cy) = (r.x + r.w * 0.5, r.y + r.h * 0.5);
-        match i {
-            0 => {
-                // speaker: rounded body, cone, and sound-wave arcs
-                draw_round_rect(cx - 11.0, cy - 3.5, 5.5, 7.0, 2.0, INK());
-                draw_triangle(
-                    vec2(cx - 7.0, cy),
-                    vec2(cx - 0.5, cy - 7.0),
-                    vec2(cx - 0.5, cy + 7.0),
-                    INK(),
-                );
-                if !settings.muted {
-                    let arcs: &[(f32, f32)] = if settings.quiet {
-                        &[(4.5, 0.9)]
-                    } else {
-                        &[(4.5, 0.9), (8.0, 0.55)]
-                    };
-                    for &(rr, aa) in arcs {
-                        let n = 6;
-                        for k in 0..n {
-                            let t0 = -0.85 + 1.7 * k as f32 / n as f32;
-                            let t1 = -0.85 + 1.7 * (k + 1) as f32 / n as f32;
-                            draw_line(
-                                cx + 1.0 + rr * t0.cos(),
-                                cy + rr * t0.sin(),
-                                cx + 1.0 + rr * t1.cos(),
-                                cy + rr * t1.sin(),
-                                1.5,
-                                with_alpha(INK(), aa),
-                            );
-                        }
-                    }
-                } else {
-                    slash(r);
-                }
-            }
-            1 => {
-                ui.text_centered("%", cx, cy + 6.0, 18.0, INK());
-                if !settings.chances {
-                    slash(r);
-                }
-            }
-            2 => {
-                // eye; crossed out = colorblind assist on
-                draw_ellipse_fan(cx, cy, 10.0, 5.5, INK());
-                draw_circle(cx, cy, 3.4, SRF());
-                draw_circle(cx, cy, 1.6, INK());
-                if settings.colorblind {
-                    slash(r);
-                }
-            }
-            3 => {
-                ui.text_centered(
-                    if settings.speed > 1.5 { "2x" } else { "1x" },
-                    cx,
-                    cy + 6.0,
-                    15.0,
-                    INK(),
-                );
-            }
-            4 => {
-                // moon: theme toggle
-                let f = if hov {
-                    mix(SRF(), palette(HUMAN).fill, 0.35)
-                } else {
-                    SRF()
-                };
-                draw_circle(cx + 1.0, cy, 7.0, INK());
-                draw_circle(cx + 4.5, cy - 2.5, 5.6, f);
-            }
-            _ => {
-                ui.text_centered("FX", cx, cy + 5.0, 13.0, INK());
-                if settings.reduced_motion {
-                    slash(r);
-                }
-            }
+    let rs = r_sound();
+    let hov = rs.contains(mp);
+    draw_round_frame(
+        rs.x,
+        rs.y,
+        rs.w,
+        rs.h,
+        10.0,
+        1.5,
+        control_fill(SRF(), hov),
+        if hov { ACCENT() } else { CARD_EDGE() },
+    );
+    draw_speaker(rs.x + rs.w * 0.5, rs.y + rs.h * 0.5, settings);
+    let rg = r_settings();
+    let open = settings_open();
+    let hov = rg.contains(mp);
+    draw_round_frame(
+        rg.x,
+        rg.y,
+        rg.w,
+        rg.h,
+        10.0,
+        1.5,
+        control_fill(if open { mix(SRF(), ACCENT(), 0.14) } else { SRF() }, hov),
+        if hov || open { ACCENT() } else { CARD_EDGE() },
+    );
+    draw_sliders(rg.x + 20.0, rg.y + rg.h * 0.5);
+    ui.text("Settings", rg.x + 34.0, rg.y + 20.0, 13.0, INK());
+    if hov && !open {
+        tooltip(ui, "Theme, sound, speed, accessibility", rg);
+    } else if rs.contains(mp) && !open {
+        let tip = match option_selected(settings, 0) {
+            0 => "Sound on · M",
+            1 => "Sound at half volume · M",
+            _ => "Sound off · M",
+        };
+        tooltip(ui, tip, rs);
+    }
+}
+
+fn tooltip(ui: &Ui, tip: &str, anchor: Rect) {
+    let width = ui.width(tip, 12.0) + 20.0;
+    let x = (anchor.x + anchor.w - width).max(20.0);
+    let y = anchor.y + anchor.h + 8.0;
+    soft_shadow(x, y, width, 26.0, 8.0, 1.0);
+    draw_round_frame(x, y, width, 26.0, 8.0, 1.0, SRF(), CARD_EDGE());
+    ui.text(tip, x + 10.0, y + 18.0, 12.0, INK());
+}
+
+/// The settings panel, drawn last so it floats above every screen.
+pub(crate) fn draw_settings_panel(settings: &Settings, ui: &Ui, m: Vec2) {
+    if !settings_open() {
+        return;
+    }
+    let p = r_panel();
+    soft_shadow(p.x, p.y, p.w, p.h, 18.0, 2.4);
+    draw_round_frame(p.x, p.y, p.w, p.h, 18.0, 1.5, SRF(), CARD_EDGE());
+    let label = |text: &str, y: f32| ui.text(text, p.x + 20.0, y, 13.0, with_alpha(INK(), 0.75));
+    label(&format!("Theme · {}", THEMES[theme_index()].name), p.y + 32.0);
+    for (i, t) in THEMES.iter().enumerate() {
+        let r = r_theme(i);
+        let (cx, cy, rad) = (r.x + r.w * 0.5, r.y + r.h * 0.5, r.w * 0.5);
+        let chosen = i == theme_index();
+        if chosen || r.contains(m) {
+            draw_circle(cx, cy, rad + 2.5, if chosen { ACCENT() } else { CARD_EDGE() });
+            draw_circle(cx, cy, rad, SRF());
         }
-        if hov {
-            let tip = match i {
-                0 => {
-                    if settings.muted {
-                        "Sound off · M"
-                    } else if settings.quiet {
-                        "Sound 50% · M"
-                    } else {
-                        "Sound 100% · M"
-                    }
-                }
-                1 => {
-                    if settings.chances {
-                        "Win chances on"
-                    } else {
-                        "Win chances off"
-                    }
-                }
-                2 => {
-                    if settings.colorblind {
-                        "Color assist on · F9"
-                    } else {
-                        "Color assist off · F9"
-                    }
-                }
-                3 => {
-                    if settings.speed > 1.5 {
-                        "Game speed 2x"
-                    } else {
-                        "Game speed 1x"
-                    }
-                }
-                4 => {
-                    if settings.dark {
-                        "Dark theme · F10"
-                    } else {
-                        "Light theme · F10"
-                    }
-                }
-                _ => {
-                    if settings.reduced_motion {
-                        "Reduced motion · F8"
-                    } else {
-                        "Motion on · F8"
-                    }
-                }
-            };
-            let width = ui.width(tip, 12.0) + 20.0;
-            // Right-aligned under the toolbar, so tips never cover the title.
-            let _ = cx;
-            let x = r_icon(5).x + r_icon(5).w - width;
-            soft_shadow(x, 54.0, width, 26.0, 8.0, 1.0);
-            draw_round_frame(x, 54.0, width, 26.0, 8.0, 1.0, SRF(), CARD_EDGE());
-            ui.text(tip, x + 10.0, 72.0, 12.0, INK());
+        // each swatch shows the theme's surface with its accent dot
+        draw_circle(cx, cy, rad - 2.0, t.edge_color());
+        draw_circle(cx, cy, rad - 3.5, t.srf_color());
+        draw_circle(cx, cy, 5.5, t.accent_color());
+    }
+    for (row, (name, options)) in ROWS.iter().enumerate() {
+        let y = ROW_Y + row as f32 * ROW_H;
+        label(name, y + 20.0);
+        let first = r_option(row, 0);
+        let last = r_option(row, options.len() - 1);
+        draw_round_frame(
+            first.x,
+            y,
+            last.x + last.w - first.x,
+            first.h,
+            first.h * 0.5,
+            1.5,
+            mix(SRF(), BG(), 0.5),
+            CARD_EDGE(),
+        );
+        let sel = option_selected(settings, row);
+        for (k, text) in options.iter().enumerate() {
+            let r = r_option(row, k);
+            let hov = r.contains(m);
+            if k == sel {
+                draw_round_frame(
+                    r.x + 2.0,
+                    r.y + 2.0,
+                    r.w - 4.0,
+                    r.h - 4.0,
+                    (r.h - 4.0) * 0.5,
+                    1.5,
+                    SRF(),
+                    ACCENT(),
+                );
+            } else if hov {
+                draw_round_rect(
+                    r.x + 2.0,
+                    r.y + 2.0,
+                    r.w - 4.0,
+                    r.h - 4.0,
+                    (r.h - 4.0) * 0.5,
+                    control_fill(SRF(), true),
+                );
+            }
+            ui.text_centered(
+                text,
+                r.x + r.w * 0.5,
+                r.y + 20.0,
+                12.5,
+                if k == sel { ACCENT() } else { with_alpha(INK(), 0.8) },
+            );
         }
     }
+    ui.text_centered(
+        "M sound · F8 motion · F9 color · F10 theme",
+        p.x + p.w * 0.5,
+        p.y + p.h - 16.0,
+        11.0,
+        with_alpha(INK(), 0.5),
+    );
 }
 
 pub(crate) fn control_fill(fill: Color, hovered: bool) -> Color {
@@ -412,11 +548,7 @@ pub(crate) fn control_fill(fill: Color, hovered: bool) -> Color {
     if fill.r == surface.r && fill.g == surface.g && fill.b == surface.b {
         // White cannot be lightened. Give neutral controls a visible accent
         // tint in either theme, while retaining contrast with their labels.
-        mix(
-            fill,
-            palette(HUMAN).fill,
-            if dark_mode() { 0.16 } else { 0.30 },
-        )
+        mix(fill, ACCENT(), if dark_mode() { 0.16 } else { 0.10 })
     } else if on_color(fill).r > 0.5 {
         darken(fill, 0.85)
     } else {

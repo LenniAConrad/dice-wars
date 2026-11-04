@@ -1,6 +1,7 @@
 //! Persistent settings and seed bookmarks in the per-user data directory.
 
 use crate::game::{TeamCfg, MAX_PLAYERS, MAX_TEAMS, SEED_MOD};
+use crate::theme::THEMES;
 
 const BOOKMARK_FILE: &str = "bookmarks.txt";
 
@@ -68,9 +69,9 @@ pub(crate) struct Settings {
     pub(crate) quiet: bool,      // half volume
     pub(crate) colorblind: bool, // alternative palette + shape badges on the map
     pub(crate) color: usize,     // which palette color the human plays as
-    pub(crate) speed: f32,       // game speed multiplier (1x / 2x)
+    pub(crate) speed: f32,       // game speed multiplier (1x / 2x / 4x)
     pub(crate) reduced_motion: bool,
-    pub(crate) dark: bool,        // dark mode
+    pub(crate) theme: usize,      // index into theme::THEMES
     pub(crate) teams: bool,       // team mode on/off
     pub(crate) team_count: usize, // number of teams (2..=MAX_TEAMS)
     pub(crate) team_hvb: bool,    // humans vs bots
@@ -112,7 +113,7 @@ pub(crate) fn load_settings() -> Settings {
         colorblind: false,
         color: 0,
         speed: 1.0,
-        dark: false,
+        theme: 0,
         reduced_motion: false,
         teams: false,
         team_count: 2,
@@ -126,6 +127,7 @@ pub(crate) fn load_settings() -> Settings {
         difficulty: 1,
     };
     if let Ok(txt) = std::fs::read_to_string(data_file(SETTINGS_FILE)) {
+        let has_theme = txt.lines().any(|l| l.starts_with("theme "));
         for l in txt.lines() {
             let mut it = l.split_whitespace();
             match (it.next(), it.next()) {
@@ -134,9 +136,19 @@ pub(crate) fn load_settings() -> Settings {
                 (Some("quiet"), Some(v)) => s.quiet = v != "0",
                 (Some("colorblind"), Some(v)) => s.colorblind = v != "0",
                 (Some("color"), Some(v)) => s.color = v.parse::<usize>().unwrap_or(0) % MAX_PLAYERS,
-                (Some("speed"), Some(v)) => s.speed = if v == "2" { 2.0 } else { 1.0 },
+                (Some("speed"), Some(v)) => {
+                    s.speed = match v {
+                        "2" => 2.0,
+                        "4" => 4.0,
+                        _ => 1.0,
+                    }
+                }
                 (Some("reducedmotion"), Some(v)) => s.reduced_motion = v == "1",
-                (Some("dark"), Some(v)) => s.dark = v != "0",
+                // older settings files only know light/dark
+                (Some("dark"), Some(v)) if !has_theme => s.theme = (v != "0") as usize,
+                (Some("theme"), Some(v)) => {
+                    s.theme = v.parse::<usize>().unwrap_or(0) % THEMES.len()
+                }
                 (Some("teams"), Some(v)) => s.teams = v != "0",
                 (Some("teamcount"), Some(v)) => {
                     s.team_count = v.parse::<usize>().unwrap_or(2).clamp(2, MAX_TEAMS)
@@ -166,13 +178,13 @@ pub(crate) fn save_settings(s: &Settings) {
     let _ = std::fs::write(
         data_file(SETTINGS_FILE),
         format!(
-            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\nplayers {}\ndifficulty {}\nreducedmotion {}\nquiet {}\n",
+            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\nplayers {}\ndifficulty {}\nreducedmotion {}\nquiet {}\ntheme {}\n",
             s.chances as u8,
             s.muted as u8,
             s.colorblind as u8,
             s.color,
             s.speed as u8,
-            s.dark as u8,
+            THEMES[s.theme % THEMES.len()].dark as u8,
             s.teams as u8,
             s.team_count,
             s.team_hvb as u8,
@@ -184,7 +196,8 @@ pub(crate) fn save_settings(s: &Settings) {
             s.players,
             s.difficulty,
             s.reduced_motion as u8,
-            s.quiet as u8
+            s.quiet as u8,
+            s.theme
         ),
     );
 }

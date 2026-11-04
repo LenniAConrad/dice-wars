@@ -93,13 +93,143 @@ pub(crate) fn apply_local_colors(my_color: usize) {
     apply_colors(&v);
 }
 
-// theme: every surface color goes through these so dark mode is one flag
 pub(crate) static REDUCED_MOTION: AtomicBool = AtomicBool::new(false);
 
-pub(crate) static DARK: AtomicBool = AtomicBool::new(false);
+// Interface themes. Every surface color goes through the current theme; the
+// pastel map art and dice keep their colors in every theme.
+pub(crate) struct Theme {
+    pub(crate) name: &'static str,
+    pub(crate) dark: bool,
+    bg: Color,
+    srf: Color,
+    ink: Color,
+    border: Color,
+    accent: Color,
+    edge: Color,
+    sea: Color,
+    // dark themes tint water cells so holes in the map stay readable
+    pub(crate) water: Option<Color>,
+}
+
+const fn hex(v: u32) -> Color {
+    Color::from_rgba((v >> 16) as u8, (v >> 8) as u8, v as u8, 0xFF)
+}
+
+pub(crate) const THEMES: [Theme; 7] = [
+    Theme {
+        name: "Daylight",
+        dark: false,
+        bg: hex(0xF1F3F8),
+        srf: hex(0xFFFFFF),
+        ink: hex(0x262951),
+        border: hex(0x61699A),
+        accent: hex(0x5466DB),
+        edge: hex(0xDDE0E8),
+        sea: hex(0xD7D5CD),
+        water: None,
+    },
+    Theme {
+        name: "Midnight",
+        dark: true,
+        bg: hex(0x12141D),
+        srf: hex(0x1D202E),
+        ink: hex(0xE6E8F5),
+        border: hex(0x8F99CC),
+        accent: hex(0x94A6FF),
+        edge: hex(0x383D54),
+        sea: hex(0x383C52),
+        water: Some(hex(0x282B3C)),
+    },
+    Theme {
+        name: "Sakura",
+        dark: false,
+        bg: hex(0xFBEFF3),
+        srf: hex(0xFFFAFB),
+        ink: hex(0x3B2333),
+        border: hex(0x9A6A86),
+        accent: hex(0xC93F7D),
+        edge: hex(0xF0DAE3),
+        sea: hex(0xE6CDD6),
+        water: None,
+    },
+    Theme {
+        name: "Sage",
+        dark: false,
+        bg: hex(0xEBF1E9),
+        srf: hex(0xFAFCF8),
+        ink: hex(0x1F3326),
+        border: hex(0x5E7A66),
+        accent: hex(0x2F7F50),
+        edge: hex(0xD5E1D2),
+        sea: hex(0xC8D5C3),
+        water: None,
+    },
+    Theme {
+        name: "Paper",
+        dark: false,
+        bg: hex(0xF3EDE1),
+        srf: hex(0xFFFBF3),
+        ink: hex(0x3A2F24),
+        border: hex(0x85735C),
+        accent: hex(0xB0602A),
+        edge: hex(0xE6DCC9),
+        sea: hex(0xD9CCB4),
+        water: None,
+    },
+    Theme {
+        name: "Ocean",
+        dark: true,
+        bg: hex(0x081521),
+        srf: hex(0x0F2434),
+        ink: hex(0xE2F0F8),
+        border: hex(0x7FA6C4),
+        accent: hex(0x4FC1F0),
+        edge: hex(0x22405A),
+        sea: hex(0x2A4A63),
+        water: Some(hex(0x163049)),
+    },
+    Theme {
+        name: "Ember",
+        dark: true,
+        bg: hex(0x150E0D),
+        srf: hex(0x241817),
+        ink: hex(0xF6E8E3),
+        border: hex(0xC49A8C),
+        accent: hex(0xFF8A5B),
+        edge: hex(0x43302C),
+        sea: hex(0x4A3431),
+        water: Some(hex(0x2E201E)),
+    },
+];
+
+impl Theme {
+    pub(crate) fn srf_color(&self) -> Color {
+        self.srf
+    }
+    pub(crate) fn edge_color(&self) -> Color {
+        self.edge
+    }
+    pub(crate) fn accent_color(&self) -> Color {
+        self.accent
+    }
+}
+
+static THEME: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn theme() -> &'static Theme {
+    &THEMES[THEME.load(Ordering::Relaxed) % THEMES.len()]
+}
+
+pub(crate) fn theme_index() -> usize {
+    THEME.load(Ordering::Relaxed) % THEMES.len()
+}
+
+pub(crate) fn set_theme(i: usize) {
+    THEME.store(i % THEMES.len(), Ordering::Relaxed);
+}
 
 pub(crate) fn dark_mode() -> bool {
-    DARK.load(Ordering::Relaxed)
+    theme().dark
 }
 
 pub(crate) fn th(light: Color, dark: Color) -> Color {
@@ -112,57 +242,39 @@ pub(crate) fn th(light: Color, dark: Color) -> Color {
 
 #[allow(non_snake_case)]
 pub(crate) fn BG() -> Color {
-    th(
-        Color::new(0.945, 0.953, 0.972, 1.0),
-        Color::new(0.070, 0.078, 0.115, 1.0),
-    )
+    theme().bg
 }
 
 #[allow(non_snake_case)]
 pub(crate) fn BORDER() -> Color {
-    th(
-        Color::new(0.38, 0.41, 0.60, 1.0),
-        Color::new(0.56, 0.60, 0.80, 1.0),
-    )
+    theme().border
 }
 
-// Focus and hover outlines use one calm indigo accent in both themes.
+// Focus and hover outlines use the theme's single accent.
 #[allow(non_snake_case)]
 pub(crate) fn ACCENT() -> Color {
-    th(
-        Color::new(0.33, 0.40, 0.86, 1.0),
-        Color::new(0.58, 0.65, 1.0, 1.0),
-    )
+    theme().accent
 }
 
 #[allow(non_snake_case)]
 pub(crate) fn CARD_EDGE() -> Color {
-    th(
-        Color::new(0.865, 0.880, 0.910, 1.0),
-        Color::new(0.22, 0.24, 0.33, 1.0),
-    )
+    theme().edge
 }
 
 #[allow(non_snake_case)]
 pub(crate) fn INK() -> Color {
-    th(
-        Color::new(0.15, 0.16, 0.30, 1.0),
-        Color::new(0.90, 0.91, 0.96, 1.0),
-    )
+    theme().ink
 }
 
 #[allow(non_snake_case)]
 pub(crate) fn SEA() -> Color {
-    th(
-        Color::new(0.845, 0.835, 0.805, 1.0),
-        Color::new(0.22, 0.235, 0.32, 1.0),
-    )
+    theme().sea
 }
 
-// the main surface: white in light mode, deep navy in dark mode
+// the main surface of the current theme
 #[allow(non_snake_case)]
 pub(crate) fn SRF() -> Color {
-    th(WHITE, Color::new(0.115, 0.125, 0.18, 1.0))
+    theme().srf
 }
 
 // pastel fills are light in both themes, so text on them is always dark
@@ -348,14 +460,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn labels_and_roll_pips_have_contrast_in_both_themes() {
+    fn labels_and_roll_pips_have_contrast_in_every_theme() {
         let _guard = GLOBALS.lock().unwrap();
-        let original_dark = dark_mode();
+        let original_theme = theme_index();
         let original_accessible = colorblind_mode();
         apply_local_colors(0);
-        for dark in [false, true] {
-            DARK.store(dark, Ordering::Relaxed);
-            assert!(contrast(INK(), SRF()) >= 7.0);
+        for (i, t) in THEMES.iter().enumerate() {
+            set_theme(i);
+            assert!(contrast(INK(), SRF()) >= 7.0, "{} ink", t.name);
+            assert!(contrast(INK(), BG()) >= 7.0, "{} ink on background", t.name);
+            assert!(contrast(ACCENT(), SRF()) >= 3.0, "{} accent", t.name);
             for accessible in [false, true] {
                 COLORBLIND.store(accessible, Ordering::Relaxed);
                 for player in 0..MAX_PLAYERS {
@@ -386,7 +500,7 @@ mod tests {
                 }
             }
         }
-        DARK.store(original_dark, Ordering::Relaxed);
+        set_theme(original_theme);
         COLORBLIND.store(original_accessible, Ordering::Relaxed);
     }
 

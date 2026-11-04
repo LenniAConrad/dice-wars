@@ -17,7 +17,7 @@ use crate::net::{
 use crate::replay::Replay;
 use crate::sound::Snd;
 use crate::theme::{apply_colors, apply_local_colors, BORDER, INK, SRF};
-use crate::ui::{draw_round_frame, mouse_virtual, r_icon, WIN_H, WIN_W};
+use crate::ui::{draw_round_frame, mouse_virtual, toolbar_contains, WIN_H, WIN_W};
 use crate::{App, GuestNet, HostNet, Screen};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -172,7 +172,7 @@ fn handle_input(game: &mut Game, mut net_out: Option<&mut Vec<String>>) {
     if r_btn_menu().contains(mp) || r_btn_new().contains(mp) {
         return; // handled in the main loop (also works during AI turns)
     }
-    if (0..6).any(|i| r_icon(i).contains(mp)) {
+    if toolbar_contains(mp) {
         return; // toolbar clicks are handled in the main loop
     }
     let Some(t) = (if keyboard_activate {
@@ -234,7 +234,19 @@ impl App {
     // One frame of a match: network traffic, input, drawing.
     pub(crate) fn run_play(&mut self, dt: f32) {
         let g = self.game.as_mut().unwrap();
-        g.update(dt * self.settings.speed);
+        // Fights between bots run faster, and holding SPACE fast-forwards bot
+        // turns. Only local games: a host's clock also paces its guests.
+        let local = self.host.is_none() && self.guest.is_none();
+        let pace = if local && g.bots_only() {
+            if is_key_down(KeyCode::Space) {
+                4.0
+            } else {
+                1.8
+            }
+        } else {
+            1.0
+        };
+        g.update(dt * self.settings.speed * pace);
         g.tick_turn_timer(dt);
         if let Some(gn) = self.guest.as_mut() {
             if gn.rec_failed && is_mouse_button_pressed(MouseButton::Left) {
@@ -310,9 +322,8 @@ impl App {
                                 ng.team = tv;
                                 ng.names = nm;
                                 apply_colors(&cv);
-                                if ng.humans > 1 {
-                                    apply_position_swap(&mut ng, &cv);
-                                }
+                                // every seat plays the position of its color, as in the preview
+                                apply_position_swap(&mut ng, &cv);
                                 h.sent = 0;
                                 self.awaiting.clear();
                                 *g = ng;

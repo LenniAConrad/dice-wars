@@ -19,6 +19,18 @@ pub fn srand(seed: u64) {
     STATE.fetch_add(seed, Ordering::Relaxed);
     rand();
 }
+/// Reseed from OS entropy. Called once a seeded map is dealt, so dice rolls
+/// and bot choices cannot be predicted from the public map seed.
+pub fn srand_from_entropy() {
+    let mut bytes = [0u8; 8];
+    let seed = match fill_secure(&mut bytes) {
+        Ok(()) => u64::from_le_bytes(bytes),
+        Err(_) => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64),
+    };
+    srand(seed);
+}
 pub trait RandomRange {
     fn from_unit(low: Self, high: Self, unit: f64) -> Self;
 }

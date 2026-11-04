@@ -176,6 +176,9 @@ pub(crate) struct Game {
     pub(crate) net_guest: bool,   // this instance mirrors a remote host: no AI, no dice rolls
     pub(crate) my_seat: usize,    // which seat this screen controls (0 = host/local)
     pub(crate) events: Vec<RepEvent>,
+    // owners and dice before the first event, so replays start from the
+    // board as it was actually dealt (after color swaps and lobby picks)
+    pub(crate) start: Vec<(usize, u32)>,
     pub(crate) cell_terr: Vec<i32>, // -1 = not part of the map
     pub(crate) terrs: Vec<Territory>,
     pub(crate) fx: Vec<TerrFx>,
@@ -190,6 +193,7 @@ pub(crate) struct Game {
     pub(crate) over_t: f32,
     pub(crate) battle: Option<Battle>,
     pub(crate) floats: Vec<FloatText>,
+    pub(crate) spectating: bool, // out of a team game whose team still plays
     pub(crate) banner: String,
     pub(crate) banner_t: f32,
     pub(crate) time: f32,
@@ -310,6 +314,7 @@ impl Game {
     }
 
     pub(crate) fn begin_attack(&mut self, a: usize, d: usize) {
+        self.mark_start();
         let ad: Vec<u8> = (0..self.terrs[a].dice)
             .map(|_| gen_range(1u32, 7u32) as u8)
             .collect();
@@ -431,16 +436,8 @@ impl Game {
         if self.over.is_some() {
             return;
         }
-        let humans_alive = (0..self.humans).filter(|&p| self.count(p) > 0).count();
-        if humans_alive == 0 {
-            self.over = Some(if self.humans == 1 {
-                "You have been wiped out!".to_string()
-            } else {
-                "The AI has conquered you all!".to_string()
-            });
-            self.banner_t = 0.0;
-            self.snd.push(Snd::Lose);
-        } else if self.teams.on {
+        let humans_alive = (0..self.humans).any(|p| self.count(p) > 0);
+        if self.teams.on {
             let mut alive = [false; MAX_TEAMS];
             for p in 0..self.players {
                 if self.count(p) > 0 {
@@ -450,16 +447,16 @@ impl Game {
             if alive.iter().filter(|&&a| a).count() == 1 {
                 let t = alive.iter().position(|&a| a).unwrap();
                 let mine = self.team_of(self.my_seat) == t;
-                self.over = Some(if self.teams.hvb {
-                    if t == 0 {
-                        if self.humans == 1 {
-                            "You have defeated the bots!".to_string()
-                        } else {
-                            "The humans are victorious!".to_string()
-                        }
+                // whether any human sits on the winning team
+                let humans_won = (0..self.humans).any(|p| self.team_of(p) == t);
+                self.over = Some(if self.teams.hvb && humans_won {
+                    if self.humans == 1 {
+                        "You have defeated the bots!".to_string()
                     } else {
-                        "The bots have conquered you!".to_string()
+                        "The humans are victorious!".to_string()
                     }
+                } else if self.teams.hvb && (0..self.humans).all(|p| self.team_of(p) == 0) {
+                    "The bots have conquered you!".to_string()
                 } else if self.humans == 1 {
                     if mine {
                         "Your team is victorious!".to_string()
@@ -471,20 +468,44 @@ impl Game {
                 });
                 self.banner_t = 0.0;
                 self.snd.push(if mine { Snd::Win } else { Snd::Lose });
+                return;
             }
+            // Out of the game, but teammates fight on: keep watching.
+            let my_team_alive = alive[self.team_of(self.my_seat) % MAX_TEAMS];
+            if self.count(self.my_seat) == 0 && my_team_alive && self.my_seat < self.humans {
+                if !self.spectating {
+                    self.spectating = true;
+                    self.push_log("You are out, but your team fights on.".to_string());
+                }
+                return;
+            }
+            let human_team_alive = (0..self.humans).any(|p| alive[self.team_of(p) % MAX_TEAMS]);
+            if human_team_alive {
+                return;
+            }
+        }
+        if !humans_alive {
+            self.over = Some(if self.humans == 1 {
+                "You have been wiped out!".to_string()
+            } else {
+                "The bots have conquered you all!".to_string()
+            });
+            self.banner_t = 0.0;
+            self.snd.push(Snd::Lose);
         } else if let Some(w) = (0..self.players).find(|&p| self.count(p) == self.terrs.len()) {
-            self.over = Some(if w == HUMAN && self.humans == 1 {
+            self.over = Some(if w == self.my_seat {
                 "You conquered the whole map!".to_string()
             } else {
                 format!("{} conquered the whole map!", self.name_of(w))
             });
             self.banner_t = 0.0;
             self.snd
-                .push(if w < self.humans { Snd::Win } else { Snd::Lose });
+                .push(if w == self.my_seat { Snd::Win } else { Snd::Lose });
         }
     }
 
     pub(crate) fn end_turn(&mut self) {
+        self.mark_start();
         let p = self.current;
         // stored dice from earlier turns join this turn's reinforcements
         let n = self.largest_region(p) + self.reserve[p];
@@ -556,12 +577,17 @@ impl Game {
         if self.current < self.humans {
             self.snd.push(Snd::Turn);
         }
-        self.banner = if self.current == HUMAN && self.humans == 1 {
-            "Your turn".to_string()
+        // Only human turns get the toast; bot turns show in the status panel.
+        if self.is_human(self.current) {
+            self.banner = if self.current == self.my_seat {
+                "Your turn".to_string()
+            } else {
+                format!("{}'s turn", self.name_of(self.current))
+            };
+            self.banner_t = 1.6;
         } else {
-            format!("{}'s turn", self.name_of(self.current))
-        };
-        self.banner_t = 1.6;
+            self.banner_t = 0.0;
+        }
     }
 
     pub(crate) fn valid_net_attack(
@@ -598,6 +624,7 @@ impl Game {
         rd: u32,
         captured: bool,
     ) -> bool {
+        self.mark_start();
         if !self.valid_net_attack(a, d, ra, rd, captured) {
             return false;
         }
@@ -639,6 +666,7 @@ impl Game {
         rd: u32,
         captured: bool,
     ) -> bool {
+        self.mark_start();
         if !self.valid_net_attack(a, d, ra, rd, captured) {
             return false;
         }
@@ -663,6 +691,7 @@ impl Game {
     }
 
     pub(crate) fn net_apply_reinforce(&mut self, player: usize, lands: Vec<usize>) -> bool {
+        self.mark_start();
         if self.over.is_some()
             || player >= self.players
             || player >= self.reserve.len()
@@ -713,6 +742,22 @@ impl Game {
         }
         self.advance_turn();
         true
+    }
+
+    fn mark_start(&mut self) {
+        if self.start.is_empty() {
+            self.start = self.terrs.iter().map(|t| (t.owner, t.dice)).collect();
+        }
+    }
+
+    /// Bots are acting and no human land is in the current fight, so the
+    /// game may play faster without hiding anything that matters to a player.
+    pub(crate) fn bots_only(&self) -> bool {
+        !self.is_human(self.current)
+            && self.over.is_none()
+            && self.battle.as_ref().is_none_or(|b| {
+                !self.is_human(self.terrs[b.a].owner) && !self.is_human(self.terrs[b.d].owner)
+            })
     }
 
     pub(crate) fn update(&mut self, dt: f32) {
@@ -909,6 +954,34 @@ mod tests {
             t: 0.0,
         });
         assert!(g.over.as_deref().unwrap_or("").contains("victorious"));
+    }
+
+    #[test]
+    fn a_defeated_human_watches_while_the_team_plays_on() {
+        // team A: you (p0, one land) + bot p2; team B: bot p1
+        let mut g = mk_game(&[0, 1, 2, 1], &[(0, 1), (1, 2), (2, 3)], 3, TEAMS_FF);
+        g.apply_battle(Battle {
+            a: 1,
+            d: 0,
+            ra: 9,
+            rd: 3,
+            ad: Vec::new(),
+            dd: Vec::new(),
+            captured: true,
+            t: 0.0,
+        });
+        assert_eq!(g.count(0), 0);
+        assert!(g.over.is_none(), "game ended while your team still plays");
+        assert!(g.spectating);
+    }
+
+    #[test]
+    fn the_first_action_records_the_dealt_board() {
+        let mut g = mk_game(&[0, 1], &[(0, 1)], 2, TeamCfg::default());
+        g.terrs[0].dice = 5;
+        let dealt: Vec<(usize, u32)> = g.terrs.iter().map(|t| (t.owner, t.dice)).collect();
+        g.begin_attack(0, 1);
+        assert_eq!(g.start, dealt);
     }
 
     #[test]

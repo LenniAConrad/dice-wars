@@ -1195,9 +1195,8 @@ impl App {
             ng.team = tv;
             ng.names = nm;
             apply_colors(&cv);
-            if ng.humans > 1 {
-                apply_position_swap(&mut ng, &cv);
-            }
+            // every seat plays the position of its color, as in the preview
+            apply_position_swap(&mut ng, &cv);
             h.sent = 0;
             self.game = Some(ng);
             self.screen = Screen::Play;

@@ -28,6 +28,15 @@ impl Replay {
     pub(crate) fn new(src: &Game, saving: bool) -> Self {
         let mut g = gen_map_local(src.seed, src.players, src.humans, src.difficulty, src.teams);
         g.names = src.names.clone();
+        // Lobby teams and the dealt board (after color swaps) come from the
+        // finished game itself, never from regenerating with local colors.
+        g.team = src.team.clone();
+        if src.start.len() == g.terrs.len() {
+            for (t, &(owner, dice)) in g.terrs.iter_mut().zip(&src.start) {
+                t.owner = owner;
+                t.dice = dice;
+            }
+        }
         g.recording = false;
         g.banner_t = 0.0;
         let (gif, saved) = if saving {

@@ -23,7 +23,7 @@ use crate::theme::{
 };
 use crate::ui::{
     control_fill, draw_icon_bar, draw_round_frame, draw_round_rect, draw_toggle, menu_button,
-    mouse_virtual, r_icon, seg_row, Ui, WIN_H, WIN_W,
+    mouse_virtual, toolbar_contains, seg_row, Ui, WIN_H, WIN_W,
 };
 use crate::{App, Screen};
 
@@ -392,7 +392,7 @@ fn update_menu(
         snd.push(Snd::Click);
         return MenuAction::None;
     }
-    if (0..6).any(|i| r_icon(i).contains(m)) {
+    if toolbar_contains(m) {
         return MenuAction::None;
     }
     let bm_off = menu.bm_scroll as usize;

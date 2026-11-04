@@ -16,7 +16,7 @@ use crate::play::{
 };
 use crate::settings::Settings;
 use crate::theme::{
-    accent_ink, color_map, colorblind_mode, dark_mode, darken, lighten, map_fill, mix, on_color,
+    accent_ink, theme, color_map, colorblind_mode, dark_mode, darken, lighten, map_fill, mix, on_color,
     palette, with_alpha, ACCENT, BORDER, CARD_EDGE, INK, INK_ON_FILL, MAP_EDGE, REDUCED_MOTION,
     SEA, SRF,
 };
@@ -90,8 +90,8 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
     for i in 0..COLS * ROWS {
         if game.cell_terr[i] < 0 {
             let p = cell_pos(i);
-            if dark_mode() {
-                fill_hex(p, HEX + 0.6, Color::new(0.155, 0.17, 0.235, 1.0));
+            if let Some(water) = theme().water {
+                fill_hex(p, HEX + 0.6, water);
             }
             draw_circle(p.x, p.y, 2.2, SEA());
         }
@@ -446,14 +446,10 @@ fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
     // ---- who is playing, and which phase
     let turn_text = if game.over.is_some() {
         "Game over".to_string()
-    } else if cur < game.humans {
-        if cur == game.my_seat {
-            "Your turn — attack phase".to_string()
-        } else {
-            format!("{}'s turn — attack phase", game.name_of(cur))
-        }
+    } else if cur == game.my_seat && cur < game.humans {
+        "Your turn".to_string()
     } else {
-        format!("{}'s turn (AI)", game.name_of(cur))
+        format!("{}'s turn", game.name_of(cur))
     };
     let tw = ui.width(&turn_text, 21.0).min(492.0);
     draw_round_frame(
@@ -483,13 +479,27 @@ fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
     // ---- current step instruction, invalid-action hint, or attack preview
     let hover = pick_territory(game, mp);
     let instruction = if game.battle.is_some() {
-        "Battle! Watch the dice roll...".to_string()
+        String::new()
     } else if game.over.is_some() {
-        "Watch the replay, save a GIF, or return to the menu.".to_string()
+        "Watch the replay, save a GIF, or start a new map.".to_string()
     } else if cur >= game.humans {
-        "The AI players are taking their turns...".to_string()
+        if game.humans == 1 {
+            "Bots are playing. Hold SPACE to fast-forward.".to_string()
+        } else {
+            "Bots are playing...".to_string()
+        }
     } else if cur != game.my_seat {
-        format!("Waiting for {} to make their move...", game.name_of(cur))
+        format!("Waiting for {}...", game.name_of(cur))
+    } else if r_endturn().contains(mp) {
+        let region = game.largest_region(game.my_seat);
+        let stored = game.reserve[game.my_seat];
+        if stored > 0 {
+            format!(
+                "End your turn: +{region} dice for your largest region, plus {stored} stored."
+            )
+        } else {
+            format!("End your turn: +{region} dice, one per land in your largest region.")
+        }
     } else if let Some(sel) = game.selected {
         let target = hover.filter(|&h| {
             game.can_target(cur, game.terrs[h].owner) && game.terrs[sel].neighbors.contains(&h)
@@ -513,10 +523,10 @@ fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
                 )
             }
         } else {
-            "Select an adjacent enemy to attack. ESC cancels selection.".to_string()
+            "Now click a neighboring enemy land. ESC cancels.".to_string()
         }
     } else {
-        "Select your land (2+ dice). Arrow keys + Enter also work.".to_string()
+        "Click one of your lands with 2 or more dice to attack from it.".to_string()
     };
     if game.hint_t > 0.0 && game.battle.is_none() && game.over.is_none() {
         ui.text_fitted(&game.hint, 40.0, py + 76.0, 17.0, 648.0, accent_ink(2));
@@ -530,7 +540,7 @@ fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
     // ---- last event, small
     if let Some(last) = game.log.last().filter(|_| game.battle.is_none()) {
         ui.text_fitted(
-            &format!("Last: {}", last),
+            last,
             40.0,
             py + 98.0,
             13.5,
@@ -664,13 +674,15 @@ fn draw_player_cards(game: &Game, ui: &Ui, cy: f32, right_margin: f32) {
                     darken(palette(p).fill, 0.7),
                 );
             } else {
-                draw_round_frame(cx, cy, chip_w, chip_h, 14.0, 2.0, SRF(), CARD_EDGE());
+                let mine = p == game.my_seat && game.recording;
+                let edge = if mine { ACCENT() } else { CARD_EDGE() };
+                draw_round_frame(cx, cy, chip_w, chip_h, 14.0, 2.0, SRF(), edge);
             }
             let a = if alive { 1.0 } else { 0.25 };
             draw_symbol(
-                cx + 26.0,
-                cy + 24.0,
-                9.0,
+                cx + 20.0,
+                cy + 23.0,
+                8.5,
                 p,
                 with_alpha(
                     if is_cur {
@@ -681,23 +693,28 @@ fn draw_player_cards(game: &Game, ui: &Ui, cy: f32, right_margin: f32) {
                     a,
                 ),
             );
-            if p == game.my_seat && game.recording {
-                let bw_ = ui.width("YOU", 10.0) + 10.0;
-                let (bx, by) = if game.teams.on {
-                    (cx + 4.0, cy + chip_h - 12.0)
-                } else {
-                    (cx - 4.0, cy - 8.0)
-                };
-                draw_round_rect(bx, by, bw_, 16.0, 8.0, BORDER());
-                ui.text_centered("YOU", bx + bw_ * 0.5, by + 12.0, 10.0, SRF());
-            }
+            let mine = p == game.my_seat && game.recording;
             if alive {
+                let ink = if is_cur { INK_ON_FILL } else { INK() };
+                ui.text(&game.count(p).to_string(), cx + 36.0, cy + 27.0, 21.0, ink);
                 ui.text(
-                    &format!("{}", game.count(p)),
-                    cx + 46.0,
-                    cy + 32.0,
-                    24.0,
-                    if is_cur { INK_ON_FILL } else { INK() },
+                    if mine { "you" } else { "lands" },
+                    cx + 37.0,
+                    cy + 40.0,
+                    10.0,
+                    with_alpha(ink, if mine { 0.95 } else { 0.6 }),
+                );
+                // share of the map, a quiet progress line along the card base
+                let share = game.count(p) as f32 / game.terrs.len().max(1) as f32;
+                let (bx, bw) = (cx + 10.0, chip_w - 20.0);
+                draw_round_rect(bx, cy + chip_h - 6.0, bw, 3.0, 1.5, with_alpha(ink, 0.12));
+                draw_round_rect(
+                    bx,
+                    cy + chip_h - 6.0,
+                    (bw * share).max(3.0),
+                    3.0,
+                    1.5,
+                    palette(p).dark,
                 );
                 if game.reserve[p] > 0 {
                     // Keep corner badges inside the shared team frame.

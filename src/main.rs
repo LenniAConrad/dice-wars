@@ -19,10 +19,13 @@ use crate::replay::Replay;
 use crate::settings::{load_settings, Settings};
 use crate::sound::{Snd, Sounds};
 use crate::theme::{
-    apply_local_colors, darken, mix, with_alpha, Palette, BG, COLORBLIND, DARK, PLAYER_BASE,
-    REDUCED_MOTION, SRF,
+    apply_local_colors, darken, mix, set_theme, with_alpha, Palette, BG, COLORBLIND, PLAYER_BASE,
+    REDUCED_MOTION, SRF, THEMES,
 };
-use crate::ui::{handle_icon_bar_click, mouse_virtual, r_icon, view_camera, Ui, WIN_H, WIN_W};
+use crate::ui::{
+    close_settings, draw_settings_panel, handle_toolbar_click, mouse_virtual, settings_open,
+    toolbar_shortcut, view_camera, Ui, WIN_H, WIN_W,
+};
 mod ai;
 mod board;
 mod clipboard;
@@ -146,7 +149,14 @@ impl App {
         let sounds = Sounds::load();
         let mut settings = load_settings();
         if let Ok(theme) = std::env::var("DW_THEME") {
-            settings.dark = theme == "dark";
+            settings.theme = match theme.as_str() {
+                "light" => 0,
+                "dark" => 1,
+                name => THEMES
+                    .iter()
+                    .position(|t| t.name.eq_ignore_ascii_case(name))
+                    .unwrap_or(0),
+            };
         }
         if std::env::var_os("DW_ACCESSIBLE").is_some() {
             settings.colorblind = true;
@@ -160,7 +170,7 @@ impl App {
 
         COLORBLIND.store(settings.colorblind, Ordering::Relaxed);
         apply_local_colors(settings.color);
-        DARK.store(settings.dark, Ordering::Relaxed);
+        set_theme(settings.theme);
         REDUCED_MOTION.store(settings.reduced_motion, Ordering::Relaxed);
         if std::env::var("DW_EXPORT_ICON").is_ok() {
             export_icon();
@@ -357,26 +367,18 @@ impl App {
         let text_editing = (matches!(self.screen, Screen::Menu) && self.menu.editing)
             || self.lobby_name_edit
             || (matches!(self.screen, Screen::JoinLobby) && self.guest.is_none());
-        let shortcut = if is_key_pressed(KeyCode::F10) {
-            Some(4)
-        } else if is_key_pressed(KeyCode::F9) {
-            Some(2)
-        } else if is_key_pressed(KeyCode::F8) {
-            Some(5)
-        } else if !text_editing && is_key_pressed(KeyCode::M) {
-            Some(0)
-        } else {
-            None
-        };
-        if let Some(i) = shortcut {
-            let r = r_icon(i);
-            handle_icon_bar_click(
-                &mut self.settings,
-                &mut self.snd_queue,
-                vec2(r.x + r.w * 0.5, r.y + r.h * 0.5),
-            );
-        } else if is_mouse_button_pressed(MouseButton::Left) && self.confirm.is_none() {
-            handle_icon_bar_click(&mut self.settings, &mut self.snd_queue, mouse_virtual());
+        toolbar_shortcut(&mut self.settings, &mut self.snd_queue, text_editing);
+        // The toolbar and its settings panel sit above every screen: clicks
+        // and Esc they use never reach the screen underneath.
+        if is_mouse_button_pressed(MouseButton::Left)
+            && self.confirm.is_none()
+            && handle_toolbar_click(&mut self.settings, &mut self.snd_queue, mouse_virtual())
+        {
+            engine::consume_click();
+        }
+        if settings_open() && is_key_pressed(KeyCode::Escape) {
+            close_settings();
+            engine::consume_key(KeyCode::Escape);
         }
 
         // Reuse a quiet frame while still polling input at 60 Hz. No redraw or blit is
@@ -446,6 +448,8 @@ impl App {
             Screen::JoinLobby => self.run_join_lobby(dt),
             Screen::Replay => self.run_replay(dt),
         }
+        set_camera(&view_camera());
+        draw_settings_panel(&self.settings, &self.ui, mouse_virtual());
 
         if self.screen_fade > 0.0 {
             set_default_camera();

@@ -121,6 +121,8 @@ pub(crate) fn gen_map(
 ) -> Game {
     engine::random::srand(seed.wrapping_add(0x9E37_79B9));
     let mut g = Game::new(players, humans.clamp(1, players), difficulty, teams);
+    // The seed only decides the map; play continues from fresh entropy.
+    engine::random::srand_from_entropy();
     // solo: picking a color means playing that dealt position — the map keeps
     // its look and you take over the territories (and dice) of that color
     g.seed = seed;
@@ -273,7 +275,13 @@ impl Game {
                     Territory {
                         owner: 0,
                         dice: 1,
-                        neighbors: neigh[t].iter().copied().collect(),
+                        // sorted: hash-set order differs per process, and
+                        // bots break ties by neighbor order
+                        neighbors: {
+                            let mut v: Vec<usize> = neigh[t].iter().copied().collect();
+                            v.sort_unstable();
+                            v
+                        },
                         anchor: cell_pos(anchor_cell),
                         seed: gen_range(0u32, 1_000_000u32),
                     }
@@ -373,6 +381,7 @@ impl Game {
                 net_guest: false,
                 my_seat: 0,
                 events: Vec::new(),
+                start: Vec::new(),
                 cell_terr,
                 fx: vec![TerrFx::default(); terrs.len()],
                 terrs,
@@ -387,12 +396,13 @@ impl Game {
                 over_t: 0.0,
                 battle: None,
                 floats: Vec::new(),
+                spectating: false,
                 banner: if first == HUMAN && humans == 1 {
                     "Your turn".to_string()
                 } else {
                     format!("{}'s turn", COLOR_NAMES[color_map(first)])
                 },
-                banner_t: 1.6,
+                banner_t: if first < humans { 1.6 } else { 0.0 },
                 time: 0.0,
                 snd: Vec::new(),
             };

@@ -494,7 +494,9 @@ impl HostNet {
                 let _ = s.shutdown(std::net::Shutdown::Both);
                 return;
             }
-            for ev in &g.events {
+            // Only events already broadcast: anything newer reaches this
+            // guest through the next flush_events, exactly once.
+            for ev in &g.events[..self.sent.min(g.events.len())] {
                 let line = match ev {
                     RepEvent::Attack {
                         a,
