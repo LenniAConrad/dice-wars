@@ -135,6 +135,18 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 unsafe extern "system" fn window_proc(w: Handle, k: u32, wp: usize, lp: isize) -> isize {
+    // WM_GETMINMAXINFO: keep the window large enough for a readable layout.
+    // MINMAXINFO.ptMinTrackSize sits after three POINTs; sizes include the
+    // frame, so add a typical border and caption to the 560x480 client area.
+    if k == 0x24 && lp != 0 {
+        // SAFETY: Windows passes a valid, writable MINMAXINFO for this message.
+        unsafe {
+            let min = (lp as *mut i32).add(6);
+            *min = 576;
+            *min.add(1) = 519;
+        }
+        return 0;
+    }
     unsafe { DefWindowProcW(w, k, wp, lp) }
 }
 pub(super) struct Window {

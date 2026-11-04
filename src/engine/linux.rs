@@ -141,6 +141,8 @@ extern "C" {
         height: c_uint,
     ) -> c_int;
     fn XSync(d: *mut Display, discard: c_int) -> c_int;
+    fn XSetWindowBackgroundPixmap(d: *mut Display, w: c_ulong, pixmap: c_ulong) -> c_int;
+    fn XSetWMNormalHints(d: *mut Display, w: c_ulong, hints: *mut SizeHints);
     fn XCreateFontCursor(d: *mut Display, shape: c_uint) -> c_ulong;
     fn XDefineCursor(d: *mut Display, w: c_ulong, cursor: c_ulong) -> c_int;
     fn XFreeCursor(d: *mut Display, cursor: c_ulong) -> c_int;
@@ -169,6 +171,31 @@ extern "C" {
 extern "C" {
     fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char;
 }
+// XSizeHints, for the minimum window size.
+#[repr(C)]
+#[derive(Default)]
+struct SizeHints {
+    flags: c_long,
+    x: c_int,
+    y: c_int,
+    width: c_int,
+    height: c_int,
+    min_width: c_int,
+    min_height: c_int,
+    max_width: c_int,
+    max_height: c_int,
+    width_inc: c_int,
+    height_inc: c_int,
+    min_aspect_x: c_int,
+    min_aspect_y: c_int,
+    max_aspect_x: c_int,
+    max_aspect_y: c_int,
+    base_width: c_int,
+    base_height: c_int,
+    win_gravity: c_int,
+}
+const MIN_SIZE: (c_int, c_int) = (560, 480);
+
 pub(super) struct Window {
     display: *mut Display,
     window: c_ulong,
@@ -179,6 +206,7 @@ pub(super) struct Window {
     depth: c_int,
     size: (usize, usize),
     pixels: Vec<u32>,
+    stale: bool, // the window was resized since the last full upload
     im: *mut c_void,
     ic: *mut c_void,
 }
@@ -210,6 +238,16 @@ impl Window {
                 0,
             );
             XStoreName(d, window, title.as_ptr());
+            // No server-side background: while the window is resized, the
+            // old frame stays visible instead of flashing a blank fill.
+            XSetWindowBackgroundPixmap(d, window, 0);
+            let mut hints = SizeHints {
+                flags: 16, // PMinSize
+                min_width: MIN_SIZE.0,
+                min_height: MIN_SIZE.1,
+                ..Default::default()
+            };
+            XSetWMNormalHints(d, window, &mut hints);
             XSelectInput(d, window, 1 | 2 | 4 | 8 | 64 | 32768 | 131072 | 2097152);
             let mut delete = XInternAtom(d, c"WM_DELETE_WINDOW".as_ptr(), 0);
             XSetWMProtocols(d, window, &mut delete, 1);
@@ -265,6 +303,7 @@ impl Window {
                 depth,
                 size: (width, height),
                 pixels: Vec::new(),
+                stale: true,
                 im,
                 ic,
             })
@@ -361,8 +400,13 @@ impl Window {
                     }
                     22 => {
                         let e = &*event.as_ptr().cast::<ConfigureEvent>();
-                        self.size = (e.width.max(1) as usize, e.height.max(1) as usize);
-                        input.size = self.size;
+                        let size = (e.width.max(1) as usize, e.height.max(1) as usize);
+                        if size != self.size {
+                            self.size = size;
+                            self.stale = true;
+                            input.size = size;
+                            input.repaint = true;
+                        }
                     }
                     33 => {
                         let e = &*event.as_ptr().cast::<ClientEvent>();
@@ -377,30 +421,24 @@ impl Window {
     }
     pub fn present(&mut self, surface: &Surface, damage: &[(usize, usize, usize, usize)]) {
         let (w, h) = (self.size.0.min(4096), self.size.1.min(4096));
+        if (w, h) != (surface.width, surface.height) {
+            // A frame rendered for the previous size would appear stretched;
+            // keep the old picture until the next frame matches the window.
+            return;
+        }
         self.pixels.resize(w * h, 0);
-        let fallback = [(0, 0, w, h)];
-        let damage = if (w, h) == (surface.width, surface.height) {
-            damage
+        let full = [(0, 0, w, h)];
+        let damage = if std::mem::take(&mut self.stale) {
+            &full
         } else {
-            &fallback
+            damage
         };
         for &(x0, y0, x1, y1) in damage {
             for y in y0..y1.min(h) {
-                if (w, h) == (surface.width, surface.height) {
-                    // Avoid integer scaling divisions on every native pixel.
-                    let src = &surface.pixels[(y * w + x0) * 4..(y * w + x1) * 4];
-                    let dst = &mut self.pixels[y * w + x0..y * w + x1];
-                    for (dst, rgba) in dst.iter_mut().zip(src.chunks_exact(4)) {
-                        *dst = (rgba[0] as u32) << 16 | (rgba[1] as u32) << 8 | rgba[2] as u32;
-                    }
-                } else {
-                    for x in x0..x1.min(w) {
-                        let p =
-                            (y * surface.height / h * surface.width + x * surface.width / w) * 4;
-                        self.pixels[y * w + x] = (surface.pixels[p] as u32) << 16
-                            | (surface.pixels[p + 1] as u32) << 8
-                            | surface.pixels[p + 2] as u32;
-                    }
+                let src = &surface.pixels[(y * w + x0) * 4..(y * w + x1) * 4];
+                let dst = &mut self.pixels[y * w + x0..y * w + x1];
+                for (dst, rgba) in dst.iter_mut().zip(src.chunks_exact(4)) {
+                    *dst = (rgba[0] as u32) << 16 | (rgba[1] as u32) << 8 | rgba[2] as u32;
                 }
             }
         }
