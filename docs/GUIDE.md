@@ -63,13 +63,36 @@ lobbies. On Ubuntu or Mint: `sudo ufw allow 7777/tcp` and
 `sudo ufw allow 7778/udp`. Guest Wi-Fi networks often block device-to-device
 traffic. Game traffic is not encrypted, so play over a trusted network or VPN
 rather than forwarding the port to the internet. To play over the internet
-without forwarding anything, use a relay server you trust; see
-[RELAY.md](RELAY.md).
+without forwarding anything, use a relay server you trust ([RELAY.md](RELAY.md)
+explains how to run one): the host types its address into **INTERNET** in the
+lobby (the dot turns green when the room is online), and guests type the same
+address into **INTERNET RELAY** on the join screen, leave the address empty,
+and enter the room code.
+
+## Your first game
+
+A few tips point at the next step during your first turn: pick a land, attack
+a neighbor, end your turn. They stop after your first ended turn, or at once
+with **SKIP TIPS**.
+
+## Continuing later
+
+A solo game is saved after every move. Leave it from the pause menu (or just
+close the window) and the start screen offers **CONTINUE** with the round,
+players and difficulty. Starting a new game or finishing this one replaces the
+save.
 
 ## Pausing
 
 **MENU** at the top left (or `Esc`) pauses with three choices: **LEAVE** to the
 menu, **NEW MAP**, or **KEEP PLAYING**. `R` asks for a new map directly.
+
+## After a game
+
+The game-over card shows how the map changed hands (every player's lands over
+the game) and four numbers: rounds played, battles fought and won, the
+luckiest win (the lowest odds anyone beat) and the biggest stack taken in one
+attack.
 
 ## Replays
 
@@ -97,11 +120,16 @@ The two buttons at the top right of every screen are a quick sound toggle and
   dice badge.
 - **Motion** (`F8`): *Less* removes shaking, bouncing, sliding and fades.
 
-The keyboard also works on the map: arrow keys move the focus, `Enter` selects
-and attacks.
+Everything works without a mouse. On menus and in lobbies, `Tab` and
+`Shift+Tab` move between controls, the arrow keys jump to the nearest one in
+that direction, and `Enter` activates it; dialogs keep the focus to
+themselves. On the map, the arrow keys move between lands and `Enter` selects
+and attacks. Game controllers work too: the D-pad or left stick moves, A
+activates, B goes back or pauses, X ends your turn and Y or the shoulder
+buttons step through controls.
 
 ## Your files
 
-Settings (including your record), saved maps and GIFs live in `~/.local/share/dice-wars` on
+Settings (including your record), saved maps, the saved game and GIFs live in `~/.local/share/dice-wars` on
 Linux, `~/Library/Application Support/dice-wars` on macOS and
 `%APPDATA%\dice-wars` on Windows.

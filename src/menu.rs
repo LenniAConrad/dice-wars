@@ -904,7 +904,11 @@ impl App {
                 self.snd_queue.push(Snd::Click);
             }
             MenuAction::Host => match HostNet::start(self.menu.players - 1) {
-                Ok(h) => {
+                Ok(mut h) => {
+                    // also reachable over the internet when a relay is set
+                    if !self.settings.relay.is_empty() {
+                        let _ = h.enable_relay(&self.settings.relay);
+                    }
                     self.host = Some(h);
                     self.lobby_picks = LobbyPicks::default();
                     self.lobby_sync_t = 0.0;

@@ -84,6 +84,7 @@ pub(crate) struct App {
     pub(crate) lobby_picks: LobbyPicks,
     pub(crate) lobby_sync_t: f32,
     pub(crate) lobby_name_edit: bool,
+    pub(crate) lobby_relay_edit: bool, // typing the relay address in the host lobby
     pub(crate) awaiting: HashMap<usize, f32>, // game seat -> grace timer
     pub(crate) copied_t: f32,
     pub(crate) confirm: Option<Confirm>,
@@ -372,6 +373,7 @@ impl App {
             lobby_picks,
             lobby_sync_t,
             lobby_name_edit,
+            lobby_relay_edit: false,
             awaiting,
             copied_t,
             confirm,
@@ -459,20 +461,23 @@ impl App {
         }
         let text_editing = (matches!(self.screen, Screen::Menu) && self.menu.editing)
             || self.lobby_name_edit
+            || self.lobby_relay_edit
             || (matches!(self.screen, Screen::JoinLobby) && self.guest.is_none());
         toolbar_shortcut(&mut self.settings, &mut self.snd_queue, text_editing);
         // Keyboard and gamepad navigation: everywhere except while typing,
         // and in play only for dialogs (the arrow keys move on the map there).
-        let nav =
-            if (matches!(self.screen, Screen::Menu) && self.menu.editing) || self.lobby_name_edit {
-                focus::Nav::Off
-            } else if matches!(self.screen, Screen::Play) {
-                focus::Nav::ModalOnly
-            } else if matches!(self.screen, Screen::JoinLobby) && self.guest.is_none() {
-                focus::Nav::AllButTab
-            } else {
-                focus::Nav::All
-            };
+        let nav = if (matches!(self.screen, Screen::Menu) && self.menu.editing)
+            || self.lobby_name_edit
+            || self.lobby_relay_edit
+        {
+            focus::Nav::Off
+        } else if matches!(self.screen, Screen::Play) {
+            focus::Nav::ModalOnly
+        } else if matches!(self.screen, Screen::JoinLobby) && self.guest.is_none() {
+            focus::Nav::AllButTab
+        } else {
+            focus::Nav::All
+        };
         focus::begin_frame(nav);
         // The toolbar and its settings panel sit above every screen: clicks
         // and Esc they use never reach the screen underneath.

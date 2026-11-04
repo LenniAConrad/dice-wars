@@ -13,19 +13,20 @@ use crate::lan::{LanScan, LAN_MAX_GAMES};
 use crate::menu::Menu;
 use crate::net::{
     lobby_layout, lobby_line, local_ip, net_port, parse_csv_usize, send_net_line,
-    spawn_guest_connect, GuestNet, HostMsg, HostNet, LobbyPicks, NET_MESSAGES_PER_FRAME,
-    NET_ROOM_CODE_LEN,
+    spawn_guest_connect, spawn_guest_connect_via_relay, GuestNet, HostMsg, HostNet, LobbyPicks,
+    RelayStatus, NET_MESSAGES_PER_FRAME, NET_ROOM_CODE_LEN,
 };
-use crate::settings::{clean_name, save_settings, Settings};
+use crate::settings::{clean_name, clean_relay_addr, save_settings, Settings};
 use crate::setup::{
     draw_color_row, draw_preview, draw_roster_row, draw_rule_rows, draw_seed_row, draw_team_block,
     draw_title, r_color, r_diff, r_mode, r_new, r_next, r_player, r_prev, r_primary, r_secondary,
-    r_team_bridge, r_team_count, r_team_ff, r_team_pick, BOTTOM_Y, RIGHT_W, RIGHT_X, TOP_Y,
+    r_team_bridge, r_team_count, r_team_ff, r_team_pick, BOTTOM_Y, CTRL_X, LEFT_X, RIGHT_W,
+    RIGHT_X, TOP_Y,
 };
 use crate::sound::Snd;
 use crate::theme::{
-    apply_colors, apply_local_colors, mix, palette, with_alpha, ACCENT, BG, CARD_EDGE, INK,
-    INK_ON_FILL, REDUCED_MOTION, SRF,
+    accent_ink, apply_colors, apply_local_colors, mix, palette, with_alpha, ACCENT, BG, CARD_EDGE,
+    INK, INK_ON_FILL, REDUCED_MOTION, SRF,
 };
 use crate::ui::{
     card, control_fill, control_fill_t, draw_icon_bar, draw_round_frame, draw_round_rect, hover_t,
@@ -72,6 +73,8 @@ fn apply_join_paste(join: &mut JoinUi, focus: usize, text: &str) {
             .filter(|c| c.is_ascii_digit())
             .take(NET_ROOM_CODE_LEN)
             .collect();
+    } else if focus == 3 {
+        // the relay field takes typed text only
     } else if focus == 0 {
         join.addr = text
             .trim()
@@ -226,6 +229,65 @@ fn r_name_field(teams: bool, row: usize) -> Rect {
     Rect::new(c.x + 68.0, roster_y(teams, row) - 19.0, c.w - 120.0, 26.0)
 }
 
+// the internet relay row under YOUR COLOR, where the menu shows CONTINUE
+fn r_host_relay() -> Rect {
+    Rect::new(CTRL_X, 654.0, 240.0, 36.0)
+}
+
+fn draw_relay_row(ui: &Ui, m: Vec2, addr: &str, editing: bool, status: &RelayStatus, time: f32) {
+    let r = r_host_relay();
+    label(ui, "INTERNET", LEFT_X, r.y + r.h * 0.5 + 4.0);
+    crate::focus::focusable(r);
+    let t = hover_t(r, r.contains(m) && !editing);
+    draw_round_frame(
+        r.x,
+        r.y,
+        r.w,
+        r.h,
+        12.0,
+        2.0,
+        control_fill_t(SRF(), t),
+        if editing {
+            ACCENT()
+        } else {
+            mix(CARD_EDGE(), ACCENT(), t)
+        },
+    );
+    let caret = if editing && (time * 2.5) as i32 % 2 == 0 {
+        "|"
+    } else {
+        ""
+    };
+    if addr.is_empty() && !editing {
+        ui.body(
+            "Relay address (optional)",
+            r.x + 12.0,
+            r.y + 23.0,
+            14.0,
+            with_alpha(INK(), 0.4),
+        );
+    } else {
+        ui.body_fitted(
+            &format!("{addr}{caret}"),
+            r.x + 12.0,
+            r.y + 23.0,
+            14.0,
+            r.w - 24.0,
+            INK(),
+        );
+    }
+    // a status dot and one word
+    let (dot, word) = match status {
+        RelayStatus::Off => (with_alpha(INK(), 0.3), "off"),
+        RelayStatus::Connecting => (palette(5).dark, "connecting"),
+        RelayStatus::Online => (palette(3).dark, "online"),
+        RelayStatus::Error(_) => (accent_ink(2), "no link"),
+    };
+    let (dx, dy) = (r.x + r.w + 16.0, r.y + r.h * 0.5);
+    draw_circle(dx, dy, 4.5, dot);
+    ui.body(word, dx + 11.0, dy + 4.5, 13.0, with_alpha(INK(), 0.75));
+}
+
 fn r_lobby_swatch(i: usize) -> Rect {
     r_color(i)
 }
@@ -265,12 +327,17 @@ fn r_join_code() -> Rect {
     Rect::new(JOIN_X + 340.0, 500.0, JOIN_W - 340.0, 44.0)
 }
 
+// used when the address is empty: join by room code through a relay
+fn r_join_relay() -> Rect {
+    Rect::new(JOIN_X, 582.0, JOIN_W, 40.0)
+}
+
 fn r_join_go() -> Rect {
-    Rect::new(JOIN_X, 580.0, JOIN_W * 0.5 - 6.0, 56.0)
+    Rect::new(JOIN_X, 646.0, JOIN_W * 0.5 - 6.0, 56.0)
 }
 
 fn r_join_back() -> Rect {
-    Rect::new(JOIN_X + JOIN_W * 0.5 + 6.0, 580.0, JOIN_W * 0.5 - 6.0, 56.0)
+    Rect::new(JOIN_X + JOIN_W * 0.5 + 6.0, 646.0, JOIN_W * 0.5 - 6.0, 56.0)
 }
 
 // the right-hand players card both lobbies share: team block, then roster
@@ -391,13 +458,14 @@ fn draw_host_lobby(
     settings: &Settings,
     picks: &LobbyPicks,
     ui: &Ui,
-    name_edit: bool,
+    (name_edit, relay_edit): (bool, bool),
     time: f32,
     copied_t: f32,
 ) {
     draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
     let m = mouse_virtual();
     draw_title(ui, "HOST GAME");
+    draw_relay_row(ui, m, &settings.relay, relay_edit, &h.relay_status(), time);
 
     // ---- left: the map and every game setting, exactly as in the menu
     draw_preview(ui, Some(&menu.preview), "");
@@ -744,6 +812,28 @@ fn draw_join_lobby(j: &JoinUi, lan: Option<&LanScan>, settings: &Settings, ui: &
         &format!("{}{}", j.code, caret(j.focus == 1)),
         19.0,
     );
+    // ---- internet relay: joins by room code when the address is empty
+    let rr = r_join_relay();
+    label(
+        "INTERNET RELAY (WHEN THE ADDRESS IS EMPTY)",
+        JOIN_X,
+        rr.y - 10.0,
+    );
+    field(
+        rr,
+        j.focus == 3,
+        &format!("{}{}", settings.relay, caret(j.focus == 3)),
+        16.0,
+    );
+    if settings.relay.is_empty() && j.focus != 3 {
+        ui.body(
+            "relay.example.org — for games outside your network",
+            rr.x + 16.0,
+            rr.y + 26.0,
+            15.0,
+            with_alpha(INK(), 0.35),
+        );
+    }
     let connecting = j.connect_rx.is_some();
     primary_button(
         ui,
@@ -759,7 +849,7 @@ fn draw_join_lobby(j: &JoinUi, lan: Option<&LanScan>, settings: &Settings, ui: &
     );
     secondary_button(ui, r_join_back(), "BACK", 16.0, m);
     if !j.status.is_empty() {
-        ui.body_centered(&j.status, WIN_W * 0.5, 672.0, 15.0, with_alpha(INK(), 0.75));
+        ui.body_centered(&j.status, WIN_W * 0.5, 738.0, 15.0, with_alpha(INK(), 0.75));
     }
     draw_icon_bar(settings, ui, m);
 }
@@ -771,7 +861,7 @@ impl App {
         let click2 = is_mouse_button_pressed(MouseButton::Left);
         let m2 = mouse_virtual();
         // Enter or Esc that closes the name field must not also start or cancel
-        let name_edit_at_start = self.lobby_name_edit;
+        let name_edit_at_start = self.lobby_name_edit || self.lobby_relay_edit;
         let mut cancel = is_key_pressed(KeyCode::Escape) && !name_edit_at_start;
         if click2 && r_lobby_cancel().contains(m2) {
             cancel = true;
@@ -859,10 +949,37 @@ impl App {
                 self.lobby_name_edit = false;
                 save_settings(&self.settings);
             }
+        } else if self.lobby_relay_edit {
+            while let Some(c) = get_char_pressed() {
+                if (c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '[' | ']'))
+                    && self.settings.relay.len() < 64
+                {
+                    self.settings.relay.push(c);
+                }
+            }
+            if is_key_pressed(KeyCode::Backspace) {
+                self.settings.relay.pop();
+            }
+            if is_key_pressed(KeyCode::Enter)
+                || is_key_pressed(KeyCode::Escape)
+                || (click2 && !r_host_relay().contains(m2))
+            {
+                // the new address takes effect at once
+                self.lobby_relay_edit = false;
+                self.settings.relay = clean_relay_addr(&self.settings.relay);
+                save_settings(&self.settings);
+                h.disable_relay();
+                if !self.settings.relay.is_empty() {
+                    let _ = h.enable_relay(&self.settings.relay);
+                }
+            }
         } else {
             while get_char_pressed().is_some() {}
         }
         if click2 {
+            if r_host_relay().contains(m2) && !self.lobby_relay_edit {
+                self.lobby_relay_edit = true;
+            }
             // Global toolbar was processed before this frame was painted.
             if r_lobby_copy().contains(m2) {
                 copy_to_clipboard(&format!("{}:{}", local_ip(), net_port()));
@@ -1061,13 +1178,14 @@ impl App {
             &self.settings,
             &self.lobby_picks,
             &self.ui,
-            self.lobby_name_edit,
+            (self.lobby_name_edit, self.lobby_relay_edit),
             self.menu_time,
             self.copied_t,
         );
         if cancel {
             self.host = None;
             self.lobby_name_edit = false;
+            self.lobby_relay_edit = false;
             self.menu.regen(); // back to the solo color layout
             self.screen = Screen::Menu;
         }
@@ -1338,6 +1456,12 @@ impl App {
                     {
                         self.settings.name.push(c);
                     }
+                } else if self.join.focus == 3 {
+                    if (c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '[' | ']'))
+                        && self.settings.relay.len() < 64
+                    {
+                        self.settings.relay.push(c);
+                    }
                 } else if (c.is_ascii_alphanumeric() || c == '.' || c == ':' || c == '-')
                     && self.join.addr.len() < 40
                 {
@@ -1352,13 +1476,16 @@ impl App {
                     2 => {
                         self.settings.name.pop();
                     }
+                    3 => {
+                        self.settings.relay.pop();
+                    }
                     _ => {
                         self.join.addr.pop();
                     }
                 }
             }
             if is_key_pressed(KeyCode::Tab) {
-                self.join.focus = (self.join.focus + 1) % 3;
+                self.join.focus = (self.join.focus + 1) % 4;
             }
             if click && r_join_addr().contains(m) {
                 self.join.focus = 0;
@@ -1368,6 +1495,9 @@ impl App {
             }
             if click && r_join_name().contains(m) {
                 self.join.focus = 2;
+            }
+            if click && r_join_relay().contains(m) {
+                self.join.focus = 3;
             }
             // One click on a LAN game fills in its address and code and connects.
             let picked = self.lan_scan.as_ref().and_then(|l| {
@@ -1389,12 +1519,23 @@ impl App {
             } else if self.join.connect_rx.is_none()
                 && ((click && r_join_go().contains(m)) || is_key_pressed(KeyCode::Enter))
             {
-                self.join.status = "Connecting...".to_string();
-                self.join.connect_rx = Some(spawn_guest_connect(
-                    self.join.addr.clone(),
-                    self.join.code.clone(),
-                    self.settings.name.clone(),
-                ));
+                self.settings.relay = clean_relay_addr(&self.settings.relay);
+                save_settings(&self.settings);
+                if self.join.addr.trim().is_empty() && !self.settings.relay.is_empty() {
+                    self.join.status = "Connecting through the relay...".to_string();
+                    self.join.connect_rx = Some(spawn_guest_connect_via_relay(
+                        self.settings.relay.clone(),
+                        self.join.code.clone(),
+                        self.settings.name.clone(),
+                    ));
+                } else {
+                    self.join.status = "Connecting...".to_string();
+                    self.join.connect_rx = Some(spawn_guest_connect(
+                        self.join.addr.clone(),
+                        self.join.code.clone(),
+                        self.settings.name.clone(),
+                    ));
+                }
             }
             if click && r_join_back().contains(m) {
                 back = true;
