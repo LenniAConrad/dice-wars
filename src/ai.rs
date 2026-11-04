@@ -38,9 +38,9 @@ pub(crate) fn win_chance_cached(a: u32, d: u32) -> f32 {
     static T: std::sync::OnceLock<[[f32; 9]; 9]> = std::sync::OnceLock::new();
     T.get_or_init(|| {
         let mut t = [[0.0f32; 9]; 9];
-        for a in 1..=8usize {
-            for d in 1..=8usize {
-                t[a][d] = win_chance(a as u32, d as u32);
+        for (a, row) in t.iter_mut().enumerate().skip(1) {
+            for (d, cell) in row.iter_mut().enumerate().skip(1) {
+                *cell = win_chance(a as u32, d as u32);
             }
         }
         t
@@ -192,7 +192,7 @@ impl Game {
                     }
                     Persona::Chaotic => score += gen_range(0.0f32, 18.0),
                 }
-                if best.map_or(true, |b| score > b.0) {
+                if best.is_none_or(|b| score > b.0) {
                     best = Some((score, a, d));
                 }
             }

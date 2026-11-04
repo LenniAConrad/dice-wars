@@ -179,7 +179,6 @@ impl App {
                         target: vec2(WIN_W * 0.5, WIN_H * 0.5),
                         zoom: vec2(2.0 / WIN_W, 2.0 / WIN_H),
                         render_target: Some(rt.clone()),
-                        ..Default::default()
                     });
                     clear_background(BG());
                     draw_board(&r.g, &self.ui, false);

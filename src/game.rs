@@ -72,9 +72,9 @@ pub(crate) fn fill_teams(
     let n = cfg.count.clamp(2, MAX_TEAMS);
     let mut team = vec![0usize; players];
     let mut size = vec![0usize; n];
-    for p in 0..humans.min(players) {
+    for (p, slot) in team.iter_mut().enumerate().take(humans.min(players)) {
         let t = picks.get(p).copied().flatten().unwrap_or(p + cfg.my_team) % n;
-        team[p] = t;
+        *slot = t;
         size[t] += 1;
     }
     for t in team.iter_mut().take(players).skip(humans) {
@@ -162,7 +162,7 @@ pub(crate) struct FloatText {
 
 pub(crate) struct Game {
     pub(crate) players: usize,
-    pub(crate) humans: usize, // players 0..humans are hotseat humans, the rest are AI
+    pub(crate) humans: usize, // players 0..humans are people (host, then guests), the rest are AI
     pub(crate) teams: TeamCfg,
     pub(crate) team: Vec<usize>, // per-player team id, from assign_teams
     pub(crate) names: Vec<String>, // lobby names for human seats; empty = P1/P2 labels
@@ -759,7 +759,7 @@ impl Game {
                 self.snd.push(s);
             }
         }
-        if self.battle.as_ref().map_or(false, |b| b.t >= T_BATTLE) {
+        if self.battle.as_ref().is_some_and(|b| b.t >= T_BATTLE) {
             let b = self.battle.take().unwrap();
             self.apply_battle(b);
         }

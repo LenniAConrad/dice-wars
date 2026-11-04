@@ -2,8 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use dicegame::engine;
-use dicegame::engine::prelude::*;
+use dicegame::engine::{self, prelude::*};
 
 use crate::ai::win_chance_cached;
 use crate::board::{cell_pos, neighbor_of, COLS, HEX, ROWS};
@@ -112,7 +111,7 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
             col = mix(map_fill(game.fx[t].from), col, ease_out(1.0 - f));
         }
         let selectable = terr.owner == game.current && terr.dice > 1;
-        let attackable = game.selected.map_or(false, |s| {
+        let attackable = game.selected.is_some_and(|s| {
             game.can_target(game.current, terr.owner) && game.terrs[s].neighbors.contains(&t)
         });
         if game.selected == Some(t) {
@@ -145,7 +144,7 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
                 if n.is_some_and(|n| game.cell_terr[n] == t) {
                     continue;
                 }
-                let coast = focused || n.map_or(true, |n| game.cell_terr[n] < 0);
+                let coast = focused || n.is_none_or(|n| game.cell_terr[n] < 0);
                 if coast != coast_pass {
                     continue;
                 }

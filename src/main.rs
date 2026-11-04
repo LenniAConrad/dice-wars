@@ -118,7 +118,6 @@ fn export_icon() -> ! {
         target: vec2(128.0, 128.0),
         zoom: vec2(2.0 / 256.0, 2.0 / 256.0),
         render_target: Some(rt.clone()),
-        ..Default::default()
     });
     clear_background(Color::new(0.0, 0.0, 0.0, 0.0));
     let base = PLAYER_BASE[0]; // always buttercup, whatever the user picked

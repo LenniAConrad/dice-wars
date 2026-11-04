@@ -285,7 +285,7 @@ impl HostNet {
                             let too_fast = sh
                                 .last_try
                                 .get(&ip)
-                                .map_or(false, |t| t.elapsed() < std::time::Duration::from_secs(1));
+                                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1));
                             let tracking_full = !sh.last_try.contains_key(&ip)
                                 && sh.last_try.len() >= NET_MAX_TRACKED_IPS;
                             if sh.banned.contains(&ip)
@@ -390,6 +390,7 @@ impl HostNet {
 
     // lock in whoever is connected, compact their seats, tell each guest
     // their game seat, and return the human count (host included)
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start_game(
         &mut self,
         seed: u64,

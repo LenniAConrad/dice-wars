@@ -92,7 +92,7 @@ pub(crate) fn pick_territory(game: &Game, p: Vec2) -> Option<usize> {
             continue;
         }
         let dist = cell_pos(i).distance(p);
-        if dist < HEX && best.map_or(true, |b| dist < b.0) {
+        if dist < HEX && best.is_none_or(|b| dist < b.0) {
             best = Some((dist, t as usize));
         }
     }
@@ -195,7 +195,7 @@ fn handle_input(game: &mut Game, mut net_out: Option<&mut Vec<String>>) {
                 if !game.can_target(game.current, owner) {
                     game.set_hint("That land belongs to a teammate — friendly fire is off.");
                 } else if game.terrs[sel].neighbors.contains(&t) {
-                    if let Some(out) = net_out.as_deref_mut() {
+                    if let Some(out) = net_out {
                         out.push(format!("ATTACK {} {}", sel, t));
                         game.selected = None;
                     } else {
@@ -694,16 +694,14 @@ fn guest_tick(gn: &mut GuestNet, g: &mut Game, do_ping: bool) {
                     g.push_log("Connection lost — reconnecting...".to_string());
                 }
             }
-            Some("OVER") | Some("BYE") => {
-                if g.over.is_none() {
-                    let rest: Vec<&str> = it.collect();
-                    g.over = Some(if rest.is_empty() {
-                        "Connection lost".to_string()
-                    } else {
-                        rest.join(" ")
-                    });
-                    g.banner_t = 0.0;
-                }
+            Some("OVER") | Some("BYE") if g.over.is_none() => {
+                let rest: Vec<&str> = it.collect();
+                g.over = Some(if rest.is_empty() {
+                    "Connection lost".to_string()
+                } else {
+                    rest.join(" ")
+                });
+                g.banner_t = 0.0;
             }
             _ => {}
         }

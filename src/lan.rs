@@ -49,7 +49,7 @@ fn parse_lan_beacon(line: &str, from: std::net::SocketAddr) -> Option<LanGame> {
         return None;
     }
     let mut it = line.split(' ');
-    if it.next()? != LAN_MAGIC || it.next()? != NET_PROTO.to_string() {
+    if it.next()? != LAN_MAGIC || it.next()? != NET_PROTO {
         return None;
     }
     let port: u16 = it.next()?.parse().ok().filter(|&p| p != 0)?;

@@ -1,7 +1,6 @@
 //! The main menu screen.
 
-use dicegame::engine;
-use dicegame::engine::prelude::*;
+use dicegame::engine::{self, prelude::*};
 
 use crate::board::{
     apply_position_swap, cell_pos, gen_map, gen_map_local, neighbor_of, random_seed, COLS, HEX,
@@ -502,7 +501,7 @@ fn draw_map_mini_live(game: &Game, area: Rect) {
         let (c, r) = (i % COLS, i / COLS);
         let pos = cell_pos(i);
         for d in 0..6 {
-            let same = neighbor_of(c, r, d).map_or(false, |n| game.cell_terr[n] == t);
+            let same = neighbor_of(c, r, d).is_some_and(|n| game.cell_terr[n] == t);
             if !same {
                 let a0 = (d as f32 * 60.0 - 30.0).to_radians();
                 let a1 = (d as f32 * 60.0 + 30.0).to_radians();

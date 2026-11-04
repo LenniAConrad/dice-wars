@@ -392,6 +392,7 @@ pub fn draw_rectangle(x: f32, y: f32, w: f32, h: f32, c: Color) {
         s.rect(a, b, c);
     });
 }
+#[allow(clippy::too_many_arguments)]
 pub fn rounded_frame(
     x: f32,
     y: f32,
@@ -714,8 +715,8 @@ pub fn next_frame() -> bool {
         let resolve_ms = resolve_started
             .map(|s| s.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
-        if (last || r.capture_frames.contains(&r.frames)) && r.capture.is_some() {
-            let path = r.capture.as_ref().unwrap();
+        let capture_now = last || r.capture_frames.contains(&r.frames);
+        if let Some(path) = r.capture.as_ref().filter(|_| capture_now) {
             let path = if last {
                 path.clone()
             } else {

@@ -31,9 +31,6 @@ static COLOR_SLOTS: [AtomicUsize; MAX_PLAYERS] = [
     AtomicUsize::new(8),
 ];
 
-// how many of the players are humans (hotseat); the rest are AI
-pub(crate) static HUMANS_N: AtomicUsize = AtomicUsize::new(1);
-
 pub(crate) fn color_map(p: usize) -> usize {
     COLOR_SLOTS[p % MAX_PLAYERS].load(Ordering::Relaxed)
 }

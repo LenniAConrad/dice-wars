@@ -180,7 +180,7 @@ fn r_lobby_count(k: usize) -> Rect {
     }
 }
 
-fn r_lobby_team(k: usize, _count: usize) -> Rect {
+fn r_lobby_team(k: usize) -> Rect {
     Rect::new(COL_L - 130.0 + k as f32 * 64.0, 548.0, 64.0, 38.0)
 }
 
@@ -299,13 +299,7 @@ fn draw_lobby_settings(
             if !cfg.hvb {
                 let count = cfg.count.clamp(2, MAX_TEAMS);
                 let row: Vec<(Rect, &str, bool)> = (0..count)
-                    .map(|k| {
-                        (
-                            r_lobby_team(k, count),
-                            team_letter(k),
-                            mine.min(count - 1) == k,
-                        )
-                    })
+                    .map(|k| (r_lobby_team(k), team_letter(k), mine.min(count - 1) == k))
                     .collect();
                 seg_row(ui, m, live, "YOUR TEAM", &row, 15.0);
             }
@@ -319,6 +313,7 @@ fn draw_lobby_settings(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_host_lobby(
     h: &HostNet,
     menu: &Menu,
@@ -1088,7 +1083,7 @@ impl App {
                 if !self.settings.team_hvb {
                     let count = self.settings.team_count.clamp(2, MAX_TEAMS);
                     for k in 0..count {
-                        if r_lobby_team(k, count).contains(m2) {
+                        if r_lobby_team(k).contains(m2) {
                             self.settings.team_mine = k;
                             save_settings(&self.settings);
                             dirty = true;

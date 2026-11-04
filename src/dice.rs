@@ -3,8 +3,7 @@
 use std::f32::consts::PI;
 use std::sync::atomic::Ordering;
 
-use dicegame::engine;
-use dicegame::engine::prelude::*;
+use dicegame::engine::{self, prelude::*};
 
 use crate::game::{TerrFx, Territory, MAX_PLAYERS};
 use crate::theme::{darken, lighten, palette, pip_color, with_alpha, Palette, REDUCED_MOTION};

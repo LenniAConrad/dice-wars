@@ -457,6 +457,8 @@ impl Surface {
                     xe = xs;
                 }
             }
+            // Written negated so that NaN spans are skipped too.
+            #[allow(clippy::neg_cmp_op_on_partial_ord)]
             if !(xs < xe) {
                 continue;
             }

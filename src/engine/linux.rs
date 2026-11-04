@@ -324,7 +324,7 @@ impl Window {
                             }
                         }
                     }
-                    4 | 5 | 6 => {
+                    4..=6 => {
                         let e = &*event.as_ptr().cast::<KeyEvent>();
                         input.mouse = (e.x as f32, e.y as f32);
                         if kind == 4 {

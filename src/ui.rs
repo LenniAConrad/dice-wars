@@ -6,8 +6,7 @@
 
 use std::sync::atomic::Ordering;
 
-use dicegame::engine;
-use dicegame::engine::prelude::*;
+use dicegame::engine::{self, prelude::*};
 
 use crate::dice::draw_ellipse_fan;
 use crate::game::HUMAN;
@@ -69,7 +68,6 @@ impl Ui {
                 font_size: (size * k).round().max(8.0) as u16,
                 font_scale: 1.0 / k,
                 color: col,
-                ..Default::default()
             },
         );
     }
@@ -185,6 +183,7 @@ pub(crate) fn soft_shadow(x: f32, y: f32, w: f32, h: f32, radius: f32, strength:
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_round_frame(
     x: f32,
     y: f32,

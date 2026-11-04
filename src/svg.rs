@@ -294,7 +294,7 @@ pub fn board(game: &Game) -> String {
             if n.is_some_and(|n| game.cell_terr[n] == t) {
                 continue;
             }
-            let is_coast = n.map_or(true, |n| game.cell_terr[n] < 0);
+            let is_coast = n.is_none_or(|n| game.cell_terr[n] < 0);
             // shared borders are listed by both sides; keep one copy
             if !is_coast && n.is_some_and(|n| n < i) {
                 continue;

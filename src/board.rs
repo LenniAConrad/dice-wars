@@ -3,17 +3,15 @@
 //! Pointy-top hexes, odd-r offset layout. Directions: 0=E 1=SE 2=SW 3=W 4=NW 5=NE.
 
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
 
-use dicegame::engine;
-use dicegame::engine::prelude::*;
 use dicegame::engine::random::gen_range;
+use dicegame::engine::{self, prelude::*};
 
 use crate::game::{
     assign_teams, Difficulty, Game, Persona, TeamCfg, TerrFx, Territory, HUMAN, MAX_DICE, SEED_MOD,
     TURN_SECS,
 };
-use crate::theme::{color_map, COLOR_NAMES, HUMANS_N};
+use crate::theme::{color_map, COLOR_NAMES};
 
 pub(crate) const COLS: usize = 30;
 
@@ -37,10 +35,10 @@ pub(crate) fn apply_position_swap(g: &mut Game, colors: &[usize]) {
     let n = g.players;
     let mut pos = vec![usize::MAX; n];
     let mut used = vec![false; n];
-    for p in 0..n {
+    for (p, slot) in pos.iter_mut().enumerate() {
         if let Some(&c) = colors.get(p) {
             if c < n && !used[c] {
-                pos[p] = c;
+                *slot = c;
                 used[c] = true;
             }
         }
@@ -51,10 +49,10 @@ pub(crate) fn apply_position_swap(g: &mut Game, colors: &[usize]) {
             used[p] = true;
         }
     }
-    for p in 0..n {
-        if pos[p] == usize::MAX {
+    for slot in pos.iter_mut() {
+        if *slot == usize::MAX {
             let q = (0..n).find(|&q| !used[q]).unwrap();
-            pos[p] = q;
+            *slot = q;
             used[q] = true;
         }
     }
@@ -122,7 +120,6 @@ pub(crate) fn gen_map(
     teams: TeamCfg,
 ) -> Game {
     engine::random::srand(seed.wrapping_add(0x9E37_79B9));
-    HUMANS_N.store(humans.clamp(1, players), Ordering::Relaxed);
     let mut g = Game::new(players, humans.clamp(1, players), difficulty, teams);
     // solo: picking a color means playing that dealt position — the map keeps
     // its look and you take over the territories (and dice) of that color
