@@ -859,12 +859,13 @@ fn draw_over(game: &Game, ui: &Ui) {
         3.0,
         with_alpha(palette(winner).mid, a),
     );
-    ui.text_fitted(
+    // the whole result always shows: long ones get a smaller size
+    let size = ui.fit_size(msg, 34.0, card.w - 64.0);
+    ui.text_centered(
         msg,
-        card.x + (card.w - ui.width(msg, 34.0).min(card.w - 60.0)) * 0.5,
+        card.x + card.w * 0.5,
         card.y + 72.0,
-        34.0,
-        card.w - 60.0,
+        size,
         with_alpha(INK(), a),
     );
     ui.text_centered(

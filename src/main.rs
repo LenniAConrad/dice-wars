@@ -274,7 +274,8 @@ impl App {
             }
             Ok("over") => {
                 if let Some(g) = &mut game {
-                    g.over = Some("Buttercup wins!".to_string());
+                    // the longest result text, so the audit shows it is never cut off
+                    g.over = Some("Buttercup conquered the whole map!".to_string());
                     g.over_t = 1.0;
                     g.banner_t = 0.0;
                 }

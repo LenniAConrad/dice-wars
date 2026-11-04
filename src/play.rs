@@ -39,7 +39,7 @@ pub(crate) fn r_btn_menu() -> Rect {
 // animation offset, so drawing and hit-testing can never drift apart.
 const OVER_W: f32 = 560.0;
 
-const OVER_H: f32 = 214.0;
+const OVER_H: f32 = 200.0;
 
 pub(crate) fn r_over_card(rise: f32) -> Rect {
     Rect::new(

@@ -85,6 +85,17 @@ impl Ui {
         self.text(s, cx - self.width(s, size) * 0.5, y, size, col);
     }
 
+    /// The largest size up to `size` at which `s` fits in `width`; headlines
+    /// shrink instead of being cut off.
+    pub(crate) fn fit_size(&self, s: &str, size: f32, width: f32) -> f32 {
+        let w = self.width(s, size);
+        if w <= width {
+            size
+        } else {
+            (size * width / w).floor().max(12.0)
+        }
+    }
+
     // Fit status copy into its lane without crossing adjacent controls.
     pub(crate) fn text_fitted(&self, s: &str, x: f32, y: f32, size: f32, width: f32, col: Color) {
         let mut text = s.to_string();
