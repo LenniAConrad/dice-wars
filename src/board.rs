@@ -474,4 +474,60 @@ mod tests {
             }
         }
     }
+
+    // FNV-1a over everything a seed decides: cell layout, owners, dice,
+    // adjacency, die-face seeds, anchors, personas and the first player
+    pub(crate) fn map_hash(g: &Game) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |v: u64| {
+            for b in v.to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        for &c in &g.cell_terr {
+            eat(c as u64);
+        }
+        for t in &g.terrs {
+            eat(t.owner as u64);
+            eat(t.dice as u64);
+            eat(t.seed as u64);
+            eat(t.anchor.x.to_bits() as u64);
+            eat(t.anchor.y.to_bits() as u64);
+            for &n in &t.neighbors {
+                eat(n as u64);
+            }
+            eat(u64::MAX);
+        }
+        for &p in &g.personas {
+            eat(p as u64);
+        }
+        eat(g.current as u64);
+        h
+    }
+
+    // Seeds are shared, bookmarked and sent to network peers: the default
+    // map for a seed must never change. These hashes were taken before any
+    // map option existed; if this fails, generation drifted.
+    #[test]
+    fn default_maps_are_pinned() {
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+        apply_local_colors(0);
+        for (seed, players, n_terr, hash) in [
+            (0u64, 2usize, 50usize, 0x1b3b_b95b_80e5_bfffu64),
+            (1, 4, 48, 0x9eab_a732_2dca_cd31),
+            (777, 6, 48, 0x1c25_ae6c_4c97_13b7),
+            (31337, 8, 48, 0x7d46_90c2_d838_8126),
+            (SEED_MOD - 1, 9, 45, 0x2116_cedc_5f15_6364),
+            (12345678, 3, 51, 0xee10_a713_3654_6ff4),
+            (42, 5, 50, 0x697e_d9ae_4f56_4d9e),
+            (99, 7, 49, 0x3f94_6a5d_49c5_7053),
+        ] {
+            for humans in [1, 2] {
+                let g = gen_map(seed, players, humans, Difficulty::Hard, TeamCfg::default());
+                assert_eq!(g.terrs.len(), n_terr, "seed {seed}, {players} players");
+                assert_eq!(map_hash(&g), hash, "seed {seed}, {players} players");
+            }
+        }
+    }
 }
