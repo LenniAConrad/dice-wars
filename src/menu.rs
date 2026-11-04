@@ -194,7 +194,7 @@ fn update_menu(
         if is_key_pressed(KeyCode::Enter) {
             return MenuAction::Start;
         }
-        if is_key_pressed(KeyCode::N) {
+        if is_key_pressed(KeyCode::N) && !modifier_down() {
             menu.seed = random_seed();
             menu.regen();
             snd.push(Snd::Click);

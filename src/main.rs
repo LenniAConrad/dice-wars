@@ -469,6 +469,13 @@ impl App {
             self.lan_beacon = None;
         }
 
+        // in a joined game the host's speed applies; the panel shows it
+        crate::ui::set_host_speed(
+            self.guest
+                .as_ref()
+                .filter(|_| matches!(self.screen, Screen::Play))
+                .map(|gn| gn.speed),
+        );
         set_default_camera();
         clear_background(BG());
         set_camera(&view_camera());

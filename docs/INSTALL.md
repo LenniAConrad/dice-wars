@@ -14,8 +14,8 @@ it is doing, ends with SUCCESS or FAILED, and is safe to run again.
 What each installer gets when it is missing:
 
 - **Linux**: a C compiler and linker, curl, and the X11 and PulseAudio client
-  libraries (`libX11.so.6`, `libpulse-simple.so.0`; PipeWire desktops use the
-  same library), through apt, dnf, yum, pacman or zypper with sudo. Then Rust
+  libraries (`libX11.so.6`, and `libpulse-simple.so.0` for sound, which
+  PipeWire desktops use too; without it the game runs silently), through apt, dnf, yum, pacman or zypper with sudo. Then Rust
   through rustup. Other distributions: install those yourself and pass
   `--skip-deps`. The game uses X11, so Wayland desktops need XWayland (the
   default on GNOME and KDE).

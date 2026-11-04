@@ -217,6 +217,21 @@ pub(crate) fn draw_round_frame(
 
 static SETTINGS_OPEN: AtomicBool = AtomicBool::new(false);
 
+// In someone else's network game the host's speed applies; 0 = none.
+static HOST_SPEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Tells the settings panel that a host sets the game speed (None: we do).
+pub(crate) fn set_host_speed(speed: Option<f32>) {
+    HOST_SPEED.store(speed.map_or(0, f32::to_bits), Ordering::Relaxed);
+}
+
+fn host_speed() -> Option<f32> {
+    match HOST_SPEED.load(Ordering::Relaxed) {
+        0 => None,
+        bits => Some(f32::from_bits(bits)),
+    }
+}
+
 pub(crate) fn r_sound() -> Rect {
     Rect::new(WIN_W - 176.0, 16.0, 40.0, 30.0)
 }
@@ -283,7 +298,7 @@ fn option_selected(settings: &Settings, row: usize) -> usize {
                 0
             }
         }
-        1 => match settings.speed {
+        1 => match host_speed().unwrap_or(settings.speed) {
             s if s > 3.0 => 2,
             s if s > 1.5 => 1,
             _ => 0,
@@ -361,7 +376,8 @@ pub(crate) fn handle_toolbar_click(settings: &mut Settings, snd: &mut Vec<Snd>, 
         if let Some(i) = theme {
             settings.theme = i;
             set_theme(i);
-        } else if let Some((row, k)) = option {
+        } else if let Some((row, k)) = option.filter(|&(row, _)| row != 1 || host_speed().is_none())
+        {
             set_option(settings, row, k);
         } else {
             return true; // inside the panel, between controls
@@ -525,14 +541,20 @@ pub(crate) fn draw_settings_panel(settings: &Settings, ui: &Ui, m: Vec2) {
     }
     for (row, (name, options)) in ROWS.iter().enumerate() {
         let y = ROW_Y + row as f32 * ROW_H;
-        label(ui, name, p.x + 20.0, y + 19.0);
+        let locked = row == 1 && host_speed().is_some();
+        label(
+            ui,
+            if locked { "SPEED (HOST)" } else { name },
+            p.x + 20.0,
+            y + 19.0,
+        );
         let sel = option_selected(settings, row);
         let items: Vec<(Rect, &str, bool)> = options
             .iter()
             .enumerate()
             .map(|(k, text)| (r_option(row, k), *text, k == sel))
             .collect();
-        seg_group(ui, m, true, &items, 12.0);
+        seg_group(ui, m, !locked, &items, 12.0);
     }
     ui.text_centered(
         "M sound · F8 motion · F9 color · F10 theme",

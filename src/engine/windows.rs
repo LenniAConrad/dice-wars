@@ -364,10 +364,29 @@ impl Window {
             }
         }
     }
-    pub fn present(&mut self, surface: &Surface, _damage: &[(usize, usize, usize, usize)]) {
-        self.pixels.resize(surface.width * surface.height, 0);
-        for (pixel, rgba) in self.pixels.iter_mut().zip(surface.pixels.chunks_exact(4)) {
-            *pixel = (rgba[0] as u32) << 16 | (rgba[1] as u32) << 8 | rgba[2] as u32;
+    pub fn present(&mut self, surface: &Surface, damage: &[(usize, usize, usize, usize)]) {
+        // Only damaged rectangles change; convert those (everything after a
+        // size change) and keep the rest of the last frame.
+        let (w, h) = (surface.width, surface.height);
+        let all = [(0, 0, w, h)];
+        let regions = if self.pixels.len() != w * h {
+            self.pixels.clear();
+            self.pixels.resize(w * h, 0);
+            &all[..]
+        } else {
+            damage
+        };
+        for &(x0, y0, x1, y1) in regions {
+            let (x1, y1) = (x1.min(w), y1.min(h));
+            for y in y0..y1 {
+                let src = &surface.pixels[(y * w + x0) * 4..(y * w + x1) * 4];
+                for (dst, p) in self.pixels[y * w + x0..y * w + x1]
+                    .iter_mut()
+                    .zip(src.chunks_exact(4))
+                {
+                    *dst = (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32;
+                }
+            }
         }
         let info = BitmapInfo {
             size: 40,

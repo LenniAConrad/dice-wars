@@ -291,6 +291,33 @@ pub(super) struct Window {
     size: (usize, usize),
     focused: bool,
     scroll: f64,
+    // the last frame in Core Graphics' pixel format; only damage is converted
+    converted: Vec<u32>,
+}
+/// Brings `out` (0x00RRGGBB words) up to date with `surface` in the damaged
+/// rectangles, or everywhere after a size change.
+fn convert_damage(out: &mut Vec<u32>, surface: &Surface, damage: &[(usize, usize, usize, usize)]) {
+    let (w, h) = (surface.width, surface.height);
+    let all = [(0, 0, w, h)];
+    let regions = if out.len() != w * h {
+        out.clear();
+        out.resize(w * h, 0);
+        &all[..]
+    } else {
+        damage
+    };
+    for &(x0, y0, x1, y1) in regions {
+        let (x1, y1) = (x1.min(w), y1.min(h));
+        for y in y0..y1 {
+            let src = &surface.pixels[(y * w + x0) * 4..(y * w + x1) * 4];
+            for (dst, p) in out[y * w + x0..y * w + x1]
+                .iter_mut()
+                .zip(src.chunks_exact(4))
+            {
+                *dst = (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32;
+            }
+        }
+    }
 }
 impl Window {
     pub fn new(title: &str, width: usize, height: usize) -> Result<Self, String> {
@@ -366,6 +393,7 @@ impl Window {
                 size: (0, 0),
                 focused: true,
                 scroll: 0.0,
+                converted: Vec::new(),
             })
         }
     }
@@ -522,20 +550,16 @@ impl Window {
             }
         }
     }
-    pub fn present(&mut self, surface: &Surface, _damage: &[(usize, usize, usize, usize)]) {
+    pub fn present(&mut self, surface: &Surface, damage: &[(usize, usize, usize, usize)]) {
         let (w, h) = (surface.width, surface.height);
         if w == 0 || h == 0 {
             return;
         }
+        convert_damage(&mut self.converted, surface, damage);
         // Core Animation keeps the image after this call returns, so each frame
-        // owns its buffer; the data provider frees it when the layer lets go.
-        let pixels: Box<Vec<u32>> = Box::new(
-            surface
-                .pixels
-                .chunks_exact(4)
-                .map(|p| (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32)
-                .collect(),
-        );
+        // owns its buffer (a plain copy); the data provider frees it when the
+        // layer lets go.
+        let pixels: Box<Vec<u32>> = Box::new(self.converted.clone());
         unsafe extern "C" fn release(info: *mut c_void, _: *const c_void, _: usize) {
             drop(unsafe { Box::from_raw(info.cast::<Vec<u32>>()) });
         }

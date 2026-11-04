@@ -146,26 +146,53 @@ mod native {
         minreq: u32,
         fragsize: u32,
     }
-    #[link(name = "libpulse-simple.so.0", kind = "dylib", modifiers = "+verbatim")]
+    type New = unsafe extern "C" fn(
+        *const c_char,
+        *const c_char,
+        c_int,
+        *const c_char,
+        *const c_char,
+        *const SampleSpec,
+        *const c_void,
+        *const BufferAttr,
+        *mut c_int,
+    ) -> *mut c_void;
+    type Write = unsafe extern "C" fn(*mut c_void, *const c_void, usize, *mut c_int) -> c_int;
+    type Free = unsafe extern "C" fn(*mut c_void);
     extern "C" {
-        fn pa_simple_new(
-            server: *const c_char,
-            name: *const c_char,
-            direction: c_int,
-            device: *const c_char,
-            stream: *const c_char,
-            spec: *const SampleSpec,
-            map: *const c_void,
-            attr: *const BufferAttr,
-            error: *mut c_int,
-        ) -> *mut c_void;
-        fn pa_simple_write(
-            device: *mut c_void,
-            data: *const c_void,
-            bytes: usize,
-            error: *mut c_int,
-        ) -> c_int;
-        fn pa_simple_free(device: *mut c_void);
+        fn dlopen(file: *const c_char, mode: c_int) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
+    }
+    struct Pulse {
+        new: New,
+        write: Write,
+        free: Free,
+    }
+    // PulseAudio is loaded when sound starts, not linked: a machine without
+    // it still runs the game, silently.
+    fn pulse() -> Option<&'static Pulse> {
+        static PULSE: std::sync::OnceLock<Option<Pulse>> = std::sync::OnceLock::new();
+        PULSE
+            .get_or_init(|| {
+                // SAFETY: the library stays loaded for the process lifetime and
+                // the symbols have exactly these C signatures.
+                unsafe {
+                    let lib = dlopen(c"libpulse-simple.so.0".as_ptr(), 2);
+                    if lib.is_null() {
+                        return None;
+                    }
+                    let sym = |name: &std::ffi::CStr| {
+                        let f = dlsym(lib, name.as_ptr());
+                        (!f.is_null()).then_some(f)
+                    };
+                    Some(Pulse {
+                        new: std::mem::transmute::<*mut c_void, New>(sym(c"pa_simple_new")?),
+                        write: std::mem::transmute::<*mut c_void, Write>(sym(c"pa_simple_write")?),
+                        free: std::mem::transmute::<*mut c_void, Free>(sym(c"pa_simple_free")?),
+                    })
+                }
+            })
+            .as_ref()
     }
     pub struct Device(*mut c_void);
     impl Device {
@@ -185,9 +212,10 @@ mod native {
                 minreq: 882,
                 fragsize: u32::MAX,
             };
+            let pulse = pulse()?;
             // SAFETY: structs match PulseAudio's ABI and the stream owns no borrowed pointers.
             let ptr = unsafe {
-                pa_simple_new(
+                (pulse.new)(
                     std::ptr::null(),
                     c"Dice Wars".as_ptr(),
                     1,
@@ -207,8 +235,9 @@ mod native {
         }
         pub fn write(&mut self, samples: &[i16]) -> bool {
             // SAFETY: samples remain valid for this synchronous write.
+            let Some(pulse) = pulse() else { return false };
             unsafe {
-                pa_simple_write(
+                (pulse.write)(
                     self.0,
                     samples.as_ptr().cast(),
                     samples.len() * 2,
@@ -219,8 +248,8 @@ mod native {
     }
     impl Drop for Device {
         fn drop(&mut self) {
-            unsafe {
-                pa_simple_free(self.0);
+            if let Some(pulse) = pulse() {
+                unsafe { (pulse.free)(self.0) }
             }
         }
     }
