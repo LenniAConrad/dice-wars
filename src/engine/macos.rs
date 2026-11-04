@@ -51,6 +51,7 @@ extern "C" {
 #[link(name = "AppKit", kind = "framework")]
 extern "C" {
     static NSPasteboardTypeString: Id;
+    static NSModalPanelRunLoopMode: Id;
 }
 #[link(name = "QuartzCore", kind = "framework")]
 extern "C" {
@@ -146,13 +147,43 @@ impl Drop for Pool {
 
 // Set by the delegate (close button, Cmd+Q, Dock "Quit", logout) and read by poll.
 static CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
+// AppKit is waiting for replyToApplicationShouldTerminate: (NSTerminateLater).
+static TERMINATE_PENDING: AtomicBool = AtomicBool::new(false);
 extern "C" fn window_should_close(_: Id, _: Sel, _: Id) -> i8 {
     CLOSE_REQUESTED.store(true, Ordering::Relaxed);
     0 // NO: the game loop ends and Drop closes the window.
 }
-extern "C" fn application_should_terminate(_: Id, _: Sel, _: Id) -> usize {
+/// Quit, logout and shutdown: the game loop ends first and Drop then lets
+/// AppKit terminate. Cancelling instead would abort a logout or shutdown.
+extern "C" fn application_should_terminate(this: Id, _: Sel, _: Id) -> usize {
     CLOSE_REQUESTED.store(true, Ordering::Relaxed);
-    0 // NSTerminateCancel: exit through the game loop so state is saved.
+    if !TERMINATE_PENDING.swap(true, Ordering::Relaxed) {
+        // If AppKit waits for the reply in a nested modal-panel run loop, the
+        // game loop cannot run until it returns; this timer only fires in
+        // that mode and answers right away. Settings are saved as they change.
+        // SAFETY: plain messages to Foundation objects on the main thread.
+        unsafe {
+            let modes: Id =
+                send!(class(c"NSArray"), c"arrayWithObject:", NSModalPanelRunLoopMode => Id; Id);
+            let _: () = send!(this, c"performSelector:withObject:afterDelay:inModes:",
+                sel(c"diceWarsReplyTerminate:") => Sel, ptr::null_mut::<c_void>() => Id,
+                0.0f64 => f64, modes => Id; ());
+        }
+    }
+    2 // NSTerminateLater
+}
+extern "C" fn reply_terminate(_: Id, _: Sel, _: Id) {
+    reply_to_terminate();
+}
+/// Let a pending quit/logout/shutdown proceed. AppKit then exits the process.
+fn reply_to_terminate() {
+    if TERMINATE_PENDING.swap(false, Ordering::Relaxed) {
+        // SAFETY: called on the main thread; NSApp exists while a reply is pending.
+        unsafe {
+            let app: Id = send!(class(c"NSApplication"), c"sharedApplication"; Id);
+            let _: () = send!(app, c"replyToApplicationShouldTerminate:", 1i8 => i8; ());
+        }
+    }
 }
 unsafe fn delegate_class() -> Id {
     let name = c"DiceWarsDelegate";
@@ -179,6 +210,12 @@ unsafe fn delegate_class() -> Id {
         sel(c"applicationShouldTerminate:"),
         application_should_terminate as *const c_void,
         c"Q@:@".as_ptr(),
+    );
+    class_addMethod(
+        cls,
+        sel(c"diceWarsReplyTerminate:"),
+        reply_terminate as *const c_void,
+        c"v@:@".as_ptr(),
     );
     objc_registerClassPair(cls);
     cls
@@ -240,6 +277,7 @@ unsafe fn install_icon(app: Id, space: *mut c_void) {
 
 const COMMAND: usize = 1 << 20;
 const CONTROL: usize = 1 << 18;
+const OPTION: usize = 1 << 19;
 
 pub(super) struct Window {
     app: Id,
@@ -260,6 +298,7 @@ impl Window {
         unsafe {
             let _pool = Pool::new();
             CLOSE_REQUESTED.store(false, Ordering::Relaxed);
+            TERMINATE_PENDING.store(false, Ordering::Relaxed);
             let app: Id = send!(class(c"NSApplication"), c"sharedApplication"; Id);
             if app.is_null() {
                 return Err("Could not start the Cocoa application.".into());
@@ -417,6 +456,7 @@ impl Window {
                         }
                         input.key(KeyCode::LeftControl, left);
                         input.key(KeyCode::RightControl, right);
+                        input.key(KeyCode::Alt, flags & OPTION != 0);
                         continue;
                     }
                     1 => {
@@ -557,6 +597,8 @@ impl Drop for Window {
                 CGColorSpaceRelease(self.space);
             }
         }
+        // Last: with a quit pending, AppKit exits the process here.
+        reply_to_terminate();
     }
 }
 /// Virtual key codes (Carbon `kVK_*`). Letters follow the active keyboard layout.

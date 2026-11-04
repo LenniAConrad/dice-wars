@@ -2,6 +2,7 @@
 use super::{raster::Surface, Input, KeyCode};
 use std::ffi::c_void;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 type Handle = *mut c_void;
 #[repr(C)]
 struct Point {
@@ -102,6 +103,7 @@ extern "system" {
     fn EmptyClipboard() -> i32;
     fn SetClipboardData(format: u32, data: Handle) -> Handle;
     fn GetClipboardData(format: u32) -> Handle;
+    fn MessageBoxW(window: Handle, text: *const u16, caption: *const u16, kind: u32) -> i32;
 }
 #[link(name = "gdi32")]
 extern "system" {
@@ -134,7 +136,36 @@ thread_local! {static HWND:std::cell::Cell<Handle>=const{std::cell::Cell::new(pt
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
+// Sent messages (close, focus) reach window_proc directly instead of the
+// PeekMessage loop; window_proc records them here and poll applies them.
+static CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
+static FOCUSED: AtomicBool = AtomicBool::new(false);
+static FOCUS_LOST: AtomicBool = AtomicBool::new(false);
 unsafe extern "system" fn window_proc(w: Handle, k: u32, wp: usize, lp: isize) -> isize {
+    match k {
+        // WM_CLOSE (close button, Alt+F4, taskbar): end the game loop, which
+        // then destroys the window in Drop. DefWindowProc would destroy it now.
+        0x10 => {
+            CLOSE_REQUESTED.store(true, Ordering::Relaxed);
+            return 0;
+        }
+        // WM_DESTROY: the window is gone, so the loop must end too.
+        0x02 => {
+            CLOSE_REQUESTED.store(true, Ordering::Relaxed);
+            return 0;
+        }
+        // WM_SETFOCUS / WM_KILLFOCUS
+        0x07 => FOCUSED.store(true, Ordering::Relaxed),
+        0x08 => {
+            FOCUSED.store(false, Ordering::Relaxed);
+            FOCUS_LOST.store(true, Ordering::Relaxed);
+        }
+        // WM_SYSCOMMAND SC_KEYMENU from the keyboard alone (F10 or a lone Alt):
+        // there is no menu bar, and the modal menu loop would freeze the game.
+        // Alt+Space (lparam = ' ') still opens the system menu.
+        0x112 if wp & 0xfff0 == 0xf100 && lp == 0 => return 0,
+        _ => {}
+    }
     // WM_GETMINMAXINFO: keep the window large enough for a readable layout.
     // MINMAXINFO.ptMinTrackSize sits after three POINTs; sizes include the
     // frame, so add a typical border and caption to the 560x480 client area.
@@ -171,7 +202,8 @@ impl Window {
             for y in 0..64 {
                 for x in 0..64 {
                     let p = (y * 4 * 256 + x * 4) * 4;
-                    let i = ((63 - y) * 64 + x) * 4;
+                    // CreateIcon builds device-dependent bitmaps: rows are top-down.
+                    let i = (y * 64 + x) * 4;
                     let a = raw[p + 3] as u16;
                     xor[i..i + 4].copy_from_slice(&[
                         (raw[p + 2] as u16 * a / 255) as u8,
@@ -180,7 +212,7 @@ impl Window {
                         a as u8,
                     ]);
                     if a == 0 {
-                        and[(63 - y) * 8 + x / 8] |= 0x80 >> (x % 8);
+                        and[y * 8 + x / 8] |= 0x80 >> (x % 8);
                     }
                 }
             }
@@ -211,6 +243,7 @@ impl Window {
                 bottom: height as i32,
             };
             AdjustWindowRect(&mut rect, style, 0);
+            FOCUSED.store(false, Ordering::Relaxed);
             let window = CreateWindowExW(
                 0,
                 class.as_ptr(),
@@ -233,6 +266,8 @@ impl Window {
                 return Err("Could not create game window".into());
             }
             HWND.with(|h| h.set(window));
+            CLOSE_REQUESTED.store(false, Ordering::Relaxed);
+            FOCUS_LOST.store(false, Ordering::Relaxed);
             ShowWindow(window, 5);
             Ok(Self {
                 window,
@@ -267,8 +302,6 @@ impl Window {
                         input.closed = true;
                         continue;
                     }
-                    7 => input.focused = true,
-                    8 => input.blur(),
                     0x0f => input.repaint = true,
                     0x100 | 0x104 | 0x101 | 0x105 => {
                         let down = m.kind == 0x100 || m.kind == 0x104;
@@ -278,6 +311,11 @@ impl Window {
                         if m.wparam == 0x11 {
                             input.key(KeyCode::LeftControl, GetKeyState(0xa2) < 0);
                             input.key(KeyCode::RightControl, GetKeyState(0xa3) < 0);
+                        }
+                        // F10 arrives as WM_SYSKEYDOWN/UP; DefWindowProc would open
+                        // the window menu. It is the game's "next theme" key.
+                        if m.wparam == 0x79 {
+                            continue;
                         }
                     }
                     0x102 => {
@@ -316,6 +354,13 @@ impl Window {
                 }
                 TranslateMessage(&m);
                 DispatchMessageW(&m);
+            }
+            if FOCUS_LOST.swap(false, Ordering::Relaxed) {
+                input.blur();
+            }
+            input.focused = FOCUSED.load(Ordering::Relaxed);
+            if CLOSE_REQUESTED.load(Ordering::Relaxed) {
+                input.closed = true;
             }
         }
     }
@@ -397,6 +442,8 @@ fn key_code(v: usize) -> Option<KeyCode> {
         0x77 => KeyCode::F8,
         0x78 => KeyCode::F9,
         0x79 => KeyCode::F10,
+        0x12 => KeyCode::Alt,
+        0x5b | 0x5c => KeyCode::Super,
         0x25 => KeyCode::Left,
         0x26 => KeyCode::Up,
         0x27 => KeyCode::Right,
@@ -446,5 +493,19 @@ pub(super) fn clipboard_get() -> Option<String> {
         }
         CloseClipboard();
         result
+    }
+}
+/// A blocking error dialog: release builds have no console for stderr.
+pub(super) fn show_error(title: &str, message: &str) {
+    let (title, message) = (wide(title), wide(message));
+    // SAFETY: both strings are NUL-terminated and outlive the call.
+    unsafe {
+        // MB_OK | MB_ICONERROR | MB_SETFOREGROUND
+        MessageBoxW(
+            ptr::null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            0x10 | 0x10000,
+        );
     }
 }

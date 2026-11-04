@@ -349,7 +349,6 @@ impl Sounds {
         play_sound(
             &sound,
             PlaySoundParams {
-                looped: false,
                 volume: volume * self.volume.get(),
             },
         );
