@@ -10,10 +10,13 @@ mod platform;
 #[cfg(windows)]
 #[path = "windows.rs"]
 mod platform;
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod platform;
 pub mod random;
 mod raster;
-#[cfg(not(any(target_os = "linux", windows)))]
-compile_error!("Dice Wars currently supports Linux and Windows.");
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+compile_error!("Dice Wars currently supports Linux, macOS and Windows.");
 
 pub use font::*;
 pub use image::*;
