@@ -40,6 +40,9 @@ mod lobby;
 mod menu;
 mod net;
 mod play;
+// shared with the relay server binary, which uses the parts the game does not
+#[allow(dead_code)]
+mod relay;
 mod replay;
 mod savegame;
 mod settings;

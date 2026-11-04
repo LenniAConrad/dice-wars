@@ -3,6 +3,15 @@ name = "dicegame"
 version = "1.7.0"
 edition = "2021"
 rust-version = "1.82"
+# `cargo run` starts the game; the relay server is the second binary
+default-run = "dicegame"
+
+# Internet relay for network games (docs/RELAY.md). Its module is shared with
+# the game, whose test run already covers it.
+[[bin]]
+name = "dice-wars-relay"
+path = "src/bin/dice-wars-relay.rs"
+test = false
 
 [profile.release]
 opt-level = 3

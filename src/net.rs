@@ -2,6 +2,11 @@
 //!
 //! Host-authoritative: guests send intents, the host validates, rolls, and
 //! broadcasts the resulting events (the same RepEvents replays use).
+//!
+//! Guests reach the host directly (TCP, `net_port`) or through an internet
+//! relay (`src/relay.rs`): the host registers its room code there and opens
+//! one connection per guest, which the relay splices to the guest, so both
+//! ends then run the very same protocol as on a direct connection.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,6 +18,7 @@ use crate::game::{
     diff_idx, fill_teams, Difficulty, Game, RepEvent, TeamCfg, MAX_DICE, MAX_PLAYERS, MAX_TEAMS,
 };
 use crate::menu::Menu;
+use crate::relay;
 use crate::settings::{clean_name, Settings};
 use crate::theme::{color_map, resolve_colors};
 
@@ -242,6 +248,32 @@ fn host_slot() -> std::sync::Arc<std::sync::Mutex<Option<HostSession>>> {
         .clone()
 }
 
+// Admission shared by the local listener and guests arriving through a
+// relay (whose real address the relay reports): bans, the connection cap and
+// a 1/sec per-IP rate limit. An admitted connection counts in `conns` until
+// its handler ends.
+fn admit_guest(shared: &std::sync::Mutex<HostShared>, ip: std::net::IpAddr) -> bool {
+    let mut sh = shared.lock().unwrap();
+    if sh.last_auth_cleanup.elapsed() >= std::time::Duration::from_secs(60) {
+        sh.last_try.retain(|_, t| t.elapsed() < NET_AUTH_STATE_TTL);
+        let live: HashSet<std::net::IpAddr> = sh.last_try.keys().copied().collect();
+        sh.attempts.retain(|addr, _| live.contains(addr));
+        sh.banned.retain(|addr| live.contains(addr));
+        sh.last_auth_cleanup = std::time::Instant::now();
+    }
+    let too_fast = sh
+        .last_try
+        .get(&ip)
+        .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1));
+    let tracking_full = !sh.last_try.contains_key(&ip) && sh.last_try.len() >= NET_MAX_TRACKED_IPS;
+    if sh.banned.contains(&ip) || sh.conns >= 10 || too_fast || tracking_full {
+        return false;
+    }
+    sh.last_try.insert(ip, std::time::Instant::now());
+    sh.conns += 1;
+    true
+}
+
 pub(crate) struct HostNet {
     pub(crate) rx: std::sync::mpsc::Receiver<HostMsg>,
     pub(crate) shared: std::sync::Arc<std::sync::Mutex<HostShared>>,
@@ -249,10 +281,13 @@ pub(crate) struct HostNet {
     pub(crate) remap: HashMap<usize, usize>, // lobby seat -> game seat, set at start
     pub(crate) sent: usize,                  // events broadcast so far
     pub(crate) speed: f32,                   // game speed last sent to the guests
+    relay: Option<RelayLink>,                // internet relay registration, if enabled
 }
 
 impl Drop for HostNet {
     fn drop(&mut self) {
+        // The relay thread closes the room on the relay (BYE) within a poll.
+        self.disable_relay();
         // Lobby gone; the listener stays. A newer lobby may already own the
         // slot (hosting again before this one was dropped): leave that alone.
         {
@@ -299,33 +334,8 @@ impl HostNet {
                             }
                         };
                         let (code, shared, tx) = session;
-                        {
-                            let mut sh = shared.lock().unwrap();
-                            if sh.last_auth_cleanup.elapsed() >= std::time::Duration::from_secs(60)
-                            {
-                                sh.last_try.retain(|_, t| t.elapsed() < NET_AUTH_STATE_TTL);
-                                let live: HashSet<std::net::IpAddr> =
-                                    sh.last_try.keys().copied().collect();
-                                sh.attempts.retain(|addr, _| live.contains(addr));
-                                sh.banned.retain(|addr| live.contains(addr));
-                                sh.last_auth_cleanup = std::time::Instant::now();
-                            }
-                            // bans, connection cap, 1/sec per-IP rate limit
-                            let too_fast = sh
-                                .last_try
-                                .get(&ip)
-                                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1));
-                            let tracking_full = !sh.last_try.contains_key(&ip)
-                                && sh.last_try.len() >= NET_MAX_TRACKED_IPS;
-                            if sh.banned.contains(&ip)
-                                || sh.conns >= 10
-                                || too_fast
-                                || tracking_full
-                            {
-                                continue;
-                            }
-                            sh.last_try.insert(ip, std::time::Instant::now());
-                            sh.conns += 1;
+                        if !admit_guest(&shared, ip) {
+                            continue;
                         }
                         let _ = stream.set_nonblocking(false);
                         std::thread::spawn(move || {
@@ -366,6 +376,7 @@ impl HostNet {
             remap: HashMap::new(),
             sent: 0,
             speed: 1.0,
+            relay: None,
         })
     }
 
@@ -589,6 +600,263 @@ impl HostNet {
             self.broadcast(&line);
         }
     }
+}
+
+// ---- internet relay (see src/relay.rs and docs/RELAY.md) ----
+
+/// Prefix that routes a guest's address through a relay: the rest is the
+/// relay's address. GuestNet keeps it, so reconnects take the same route.
+pub(crate) const RELAY_SCHEME: &str = "relay://";
+
+const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+// longer than the relay's own wait for the host to attach (10 s)
+const RELAY_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+const RELAY_PING_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+const RELAY_DEAD_AFTER: std::time::Duration = std::time::Duration::from_secs(45);
+
+const RELAY_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
+const RELAY_MAX_ATTACHING: usize = 8;
+
+/// The host's link to its relay, for the lobby to show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RelayStatus {
+    Off,
+    Connecting,
+    Online,
+    /// The last attempt failed (the text says why); it keeps retrying.
+    Error(String),
+}
+
+impl RelayStatus {
+    #[allow(dead_code)] // for the lobby UI
+    pub(crate) fn label(&self) -> String {
+        match self {
+            RelayStatus::Off => "Relay off".to_string(),
+            RelayStatus::Connecting => "Connecting to the relay...".to_string(),
+            RelayStatus::Online => "Online through the relay".to_string(),
+            RelayStatus::Error(e) => format!("Relay: {e} (retrying)"),
+        }
+    }
+}
+
+struct RelayLink {
+    addr: String,
+    stop: std::sync::Arc<AtomicBool>,
+    status: std::sync::Arc<std::sync::Mutex<RelayStatus>>,
+}
+
+// what the relay thread and its attach threads share
+struct RelayCtx {
+    addr: String,
+    code: String,
+    secret: String,
+    shared: std::sync::Arc<std::sync::Mutex<HostShared>>,
+    tx: std::sync::mpsc::SyncSender<HostMsg>,
+    stop: std::sync::Arc<AtomicBool>,
+    status: std::sync::Arc<std::sync::Mutex<RelayStatus>>,
+    attaching: std::sync::atomic::AtomicUsize,
+}
+
+impl RelayCtx {
+    fn set_status(&self, s: RelayStatus) {
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = s;
+    }
+}
+
+#[allow(dead_code)] // called by the lobby UI
+impl HostNet {
+    /// Also take guests through the relay at `addr` (`host` or `host:port`,
+    /// port 7780 by default). Returns at once; a background thread registers
+    /// this lobby's room code, keeps the link alive and reconnects with
+    /// backoff. Watch it with `relay_status`. Calling it again with the same
+    /// address does nothing; another address replaces the old link.
+    pub(crate) fn enable_relay(&mut self, addr: &str) -> Result<(), String> {
+        let addr = addr.trim();
+        if addr.is_empty() || addr.len() > 255 || addr.chars().any(char::is_whitespace) {
+            return Err("Enter a relay address, like relay.example.com:7780".to_string());
+        }
+        if self.relay.as_ref().is_some_and(|r| r.addr == addr) {
+            return Ok(());
+        }
+        self.disable_relay();
+        let tx = match host_slot().lock().unwrap().as_ref() {
+            Some(s) if std::sync::Arc::ptr_eq(&s.shared, &self.shared) => s.tx.clone(),
+            _ => return Err("This lobby is closed".to_string()),
+        };
+        let secret = new_reconnect_token().map_err(|e| e.to_string())?;
+        let link = RelayLink {
+            addr: addr.to_string(),
+            stop: std::sync::Arc::new(AtomicBool::new(false)),
+            status: std::sync::Arc::new(std::sync::Mutex::new(RelayStatus::Connecting)),
+        };
+        let ctx = std::sync::Arc::new(RelayCtx {
+            addr: addr.to_string(),
+            code: self.code.clone(),
+            secret,
+            shared: self.shared.clone(),
+            tx,
+            stop: link.stop.clone(),
+            status: link.status.clone(),
+            attaching: std::sync::atomic::AtomicUsize::new(0),
+        });
+        std::thread::spawn(move || relay_host_loop(ctx));
+        self.relay = Some(link);
+        Ok(())
+    }
+
+    /// Stop taking guests through the relay and close the room there.
+    /// Guests already connected through it stay connected.
+    pub(crate) fn disable_relay(&mut self) {
+        if let Some(link) = self.relay.take() {
+            link.stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn relay_status(&self) -> RelayStatus {
+        self.relay.as_ref().map_or(RelayStatus::Off, |r| {
+            r.status.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        })
+    }
+
+    /// The relay address guests should enter, while one is enabled.
+    pub(crate) fn relay_addr(&self) -> Option<&str> {
+        self.relay.as_ref().map(|r| r.addr.as_str())
+    }
+}
+
+fn relay_host_loop(ctx: std::sync::Arc<RelayCtx>) {
+    let mut backoff = std::time::Duration::from_secs(1);
+    while !ctx.stop.load(Ordering::Relaxed) {
+        match relay_register(&ctx) {
+            Ok(stream) => {
+                ctx.set_status(RelayStatus::Online);
+                backoff = std::time::Duration::from_secs(1);
+                let why = relay_control(&ctx, &stream);
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                if ctx.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                eprintln!("RELAY_LINK_LOST {why}");
+                ctx.set_status(RelayStatus::Error(format!("lost the relay ({why})")));
+            }
+            Err(e) => ctx.set_status(RelayStatus::Error(e)),
+        }
+        let until = std::time::Instant::now() + backoff;
+        while std::time::Instant::now() < until && !ctx.stop.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        backoff = (backoff * 2).min(RELAY_BACKOFF_MAX);
+    }
+    ctx.set_status(RelayStatus::Off);
+}
+
+fn relay_register(ctx: &RelayCtx) -> Result<std::net::TcpStream, String> {
+    let stream = relay::connect_any(&ctx.addr, relay::RELAY_PORT_DEFAULT, RELAY_CONNECT_TIMEOUT)
+        .map_err(|_| format!("could not reach {}", ctx.addr))?;
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+    relay::write_line(
+        &stream,
+        &format!("RELAY-HOST {} {} {}", NET_PROTO, ctx.code, ctx.secret),
+    )
+    .map_err(|_| "the relay closed the connection".to_string())?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let reply = relay::read_line_raw(&stream, relay::RELAY_MAX_LINE, deadline)
+        .map_err(|_| "the relay did not answer".to_string())?;
+    match reply.split_once(' ').unwrap_or((reply.as_str(), "")) {
+        ("RELAY-OK", _) => Ok(stream),
+        ("RELAY-ERR" | "BYE", why) if !why.is_empty() => Err(why.to_string()),
+        _ => Err("not a Dice Wars relay".to_string()),
+    }
+}
+
+// Serve one registered control connection until it fails or we stop.
+// Returns why it ended.
+fn relay_control(ctx: &std::sync::Arc<RelayCtx>, stream: &std::net::TcpStream) -> &'static str {
+    if stream
+        .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+        .is_err()
+    {
+        return "socket error";
+    }
+    let relay_ip = stream.peer_addr().ok().map(|a| a.ip());
+    let mut reader = relay::LineReader::default();
+    let mut last_rx = std::time::Instant::now();
+    let mut last_ping = std::time::Instant::now();
+    loop {
+        if ctx.stop.load(Ordering::Relaxed) {
+            let _ = relay::write_line(stream, "BYE");
+            return "stopped";
+        }
+        match reader.poll(stream, relay::RELAY_MAX_LINE) {
+            Ok(Some(line)) => {
+                last_rx = std::time::Instant::now();
+                let mut it = line.split_whitespace();
+                if it.next() == Some("CONN") {
+                    let id = it.next().filter(|id| relay::valid_id(id));
+                    // the guest's own address, so bans and rate limits apply
+                    // to the guest rather than to the relay
+                    let ip = it.next().and_then(|ip| ip.parse::<std::net::IpAddr>().ok());
+                    if let (Some(id), Some(ip)) = (id, ip.or(relay_ip)) {
+                        if ctx.attaching.fetch_add(1, Ordering::Relaxed) < RELAY_MAX_ATTACHING {
+                            let (ctx, id) = (ctx.clone(), id.to_string());
+                            std::thread::spawn(move || {
+                                relay_attach(&ctx, &id, ip);
+                                ctx.attaching.fetch_sub(1, Ordering::Relaxed);
+                            });
+                        } else {
+                            ctx.attaching.fetch_sub(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(_) => return "connection closed",
+        }
+        if last_rx.elapsed() >= RELAY_DEAD_AFTER {
+            return "no answer";
+        }
+        if last_ping.elapsed() >= RELAY_PING_EVERY {
+            if relay::write_line(stream, "PING").is_err() {
+                return "connection closed";
+            }
+            last_ping = std::time::Instant::now();
+        }
+    }
+}
+
+// A guest is waiting on the relay: open a fresh connection for it and serve
+// it exactly like a guest that connected directly.
+fn relay_attach(ctx: &RelayCtx, id: &str, ip: std::net::IpAddr) {
+    let Ok(stream) =
+        relay::connect_any(&ctx.addr, relay::RELAY_PORT_DEFAULT, RELAY_CONNECT_TIMEOUT)
+    else {
+        return;
+    };
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_write_timeout(Some(NET_WRITE_TIMEOUT));
+    if relay::write_line(&stream, &format!("RELAY-ATTACH {} {}", ctx.code, id)).is_err() {
+        return;
+    }
+    let deadline = std::time::Instant::now() + RELAY_JOIN_TIMEOUT;
+    match relay::read_line_raw(&stream, relay::RELAY_MAX_LINE, deadline) {
+        Ok(l) if l == "RELAY-OK" => {}
+        _ => return,
+    }
+    if ctx.stop.load(Ordering::Relaxed) || !admit_guest(&ctx.shared, ip) {
+        return;
+    }
+    host_handle_client(
+        stream,
+        ip,
+        ctx.code.clone(),
+        ctx.shared.clone(),
+        ctx.tx.clone(),
+    );
 }
 
 // everything a guest needs to render the lobby, broadcast by the host
@@ -925,19 +1193,16 @@ pub(crate) fn spawn_reconnect(
 ) -> std::sync::mpsc::Receiver<Result<NetParts, ReconnectError>> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let full = if addr.contains(':') {
-            addr.clone()
-        } else {
-            format!("{}:{}", addr, net_port())
-        };
         for _ in 0..10 {
             std::thread::sleep(std::time::Duration::from_secs(3));
-            let Ok(sock) = full.parse::<std::net::SocketAddr>() else {
-                break;
+            // A relay that turns us away (say, while the host re-registers
+            // after a network blip) is retried like an unreachable host:
+            // only the host's own BYE ends the attempts.
+            let stream = match dial(&addr, &code, std::time::Duration::from_secs(3)) {
+                Err(DialError::BadAddress) => break,
+                dialed => dialed.ok(),
             };
-            if let Ok(stream) =
-                std::net::TcpStream::connect_timeout(&sock, std::time::Duration::from_secs(3))
-            {
+            if let Some(stream) = stream {
                 let _ = stream.set_write_timeout(Some(NET_WRITE_TIMEOUT));
                 let mut w = match stream.try_clone() {
                     Ok(w) => w,
@@ -966,22 +1231,91 @@ pub(crate) fn spawn_reconnect(
     rx
 }
 
-pub(crate) fn guest_connect(addr: &str, code: &str, name: &str) -> Result<GuestNet, String> {
-    let addr_owned = addr.to_string();
-    let code_owned = code.to_string();
+enum DialError {
+    BadAddress,
+    Unreachable(String), // worth trying again
+    Rejected(String),    // a final answer (BYE) from the relay
+}
+
+/// The address guests use to join through the relay at `relay`.
+pub(crate) fn relay_join_addr(relay: &str) -> String {
+    format!("{RELAY_SCHEME}{}", relay.trim())
+}
+
+// Open a connection to the host: directly, or through the relay named by a
+// `relay://` address. Either way the result speaks the game protocol.
+fn dial(
+    addr: &str,
+    code: &str,
+    timeout: std::time::Duration,
+) -> Result<std::net::TcpStream, DialError> {
+    if let Some(relay_addr) = addr.strip_prefix(RELAY_SCHEME) {
+        return dial_relay(relay_addr, code, timeout);
+    }
     let full = if addr.contains(':') {
         addr.to_string()
     } else {
         format!("{}:{}", addr, net_port())
     };
-    let sock: std::net::SocketAddr = full.parse().map_err(|_| "Bad address".to_string())?;
-    let stream = std::net::TcpStream::connect_timeout(&sock, std::time::Duration::from_secs(5))
-        .map_err(|_| {
-            format!(
-                "Could not connect — wrong address, or firewall blocking port {}",
-                sock.port()
-            )
-        })?;
+    let sock: std::net::SocketAddr = full.parse().map_err(|_| DialError::BadAddress)?;
+    std::net::TcpStream::connect_timeout(&sock, timeout).map_err(|_| {
+        DialError::Unreachable(format!(
+            "Could not connect — wrong address, or firewall blocking port {}",
+            sock.port()
+        ))
+    })
+}
+
+fn dial_relay(
+    relay_addr: &str,
+    code: &str,
+    timeout: std::time::Duration,
+) -> Result<std::net::TcpStream, DialError> {
+    if relay_addr.trim().is_empty() {
+        return Err(DialError::BadAddress);
+    }
+    if !relay::valid_code(code) {
+        return Err(DialError::Rejected("wrong code".to_string()));
+    }
+    let stream = relay::connect_any(relay_addr, relay::RELAY_PORT_DEFAULT, timeout)
+        .map_err(|_| DialError::Unreachable(format!("Could not reach the relay {relay_addr}")))?;
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_write_timeout(Some(NET_WRITE_TIMEOUT));
+    relay::write_line(&stream, &format!("RELAY-JOIN {NET_PROTO} {code}"))
+        .map_err(|_| DialError::Unreachable("The relay closed the connection".to_string()))?;
+    let deadline = std::time::Instant::now() + RELAY_JOIN_TIMEOUT;
+    let reply = relay::read_line_raw(&stream, NET_MAX_HOST_LINE, deadline)
+        .map_err(|_| DialError::Unreachable("The relay did not answer".to_string()))?;
+    match reply.split_once(' ').unwrap_or((reply.as_str(), "")) {
+        ("RELAY-OK", _) => Ok(stream),
+        ("BYE", why) => Err(DialError::Rejected(why.to_string())),
+        ("RELAY-WAIT", why) if !why.is_empty() => {
+            Err(DialError::Unreachable(format!("Host unreachable: {why}")))
+        }
+        _ => Err(DialError::Unreachable(
+            "The relay sent an unexpected reply".to_string(),
+        )),
+    }
+}
+
+/// Join a game. `addr` is the host's address, or `relay://<relay address>`
+/// to go through an internet relay (see `relay_join_addr`).
+pub(crate) fn guest_connect(addr: &str, code: &str, name: &str) -> Result<GuestNet, String> {
+    let addr_owned = addr.to_string();
+    let code_owned = code.to_string();
+    let stream = dial(addr, code, std::time::Duration::from_secs(5)).map_err(|e| match e {
+        DialError::BadAddress => "Bad address".to_string(),
+        DialError::Unreachable(why) => why,
+        DialError::Rejected(why) => format!("Rejected: {why}"),
+    })?;
+    let unreachable = if addr.starts_with(RELAY_SCHEME) {
+        "Host unreachable — the host did not answer through the relay".to_string()
+    } else {
+        format!(
+            "Host unreachable — check the code, and the host's firewall (port {})",
+            stream.peer_addr().map_or(0, |a| a.port())
+        )
+    };
     let _ = stream.set_write_timeout(Some(NET_WRITE_TIMEOUT));
     let mut w = stream.try_clone().map_err(|_| "Socket error".to_string())?;
     write_net_line(
@@ -996,12 +1330,7 @@ pub(crate) fn guest_connect(addr: &str, code: &str, name: &str) -> Result<GuestN
         NET_MAX_HOST_LINE,
         std::time::Duration::from_secs(8),
     )
-    .ok_or_else(|| {
-        format!(
-            "Host unreachable — check the code, and the host's firewall (port {})",
-            sock.port()
-        )
-    })?;
+    .ok_or(unreachable)?;
     let mut it = hello.split_whitespace();
     match it.next() {
         Some("WELCOME") => {}
@@ -1051,6 +1380,17 @@ pub(crate) fn spawn_guest_connect(
         let _ = tx.send(guest_connect(&addr, &code, &name));
     });
     rx
+}
+
+/// `spawn_guest_connect` through the internet relay at `relay_addr`
+/// (`host` or `host:port`). Reconnects go through the same relay.
+#[allow(dead_code)] // called by the join UI
+pub(crate) fn spawn_guest_connect_via_relay(
+    relay_addr: String,
+    code: String,
+    name: String,
+) -> std::sync::mpsc::Receiver<Result<GuestNet, String>> {
+    spawn_guest_connect(relay_join_addr(&relay_addr), code, name)
 }
 
 // figure out the LAN address to show in the host lobby; cached because it
@@ -1364,6 +1704,126 @@ mod tests {
             .unwrap();
         assert_eq!(parse_speed(start.split_whitespace().nth(14)), 4.0);
         let _ = stale.shutdown(std::net::Shutdown::Both);
+    }
+
+    fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ok() {
+            assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn next_line(rx: &std::sync::mpsc::Receiver<String>, prefix: &str) -> String {
+        (0..8)
+            .filter_map(|_| rx.recv_timeout(std::time::Duration::from_secs(5)).ok())
+            .find(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no {prefix} line"))
+    }
+
+    #[test]
+    fn guests_play_and_rejoin_through_a_relay() {
+        let _g = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+        test_port();
+        let wait = std::time::Duration::from_secs(10);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay = relay::Relay::start(
+            listener,
+            relay::Config {
+                log: false,
+                ..relay::Config::default()
+            },
+        )
+        .unwrap();
+        let relay_addr = relay.local_addr().to_string();
+        // the guests all come from 127.0.0.1: lift the host's 1/sec per-IP limit
+        let unthrottle = |h: &HostNet| h.shared.lock().unwrap().last_try.clear();
+
+        let mut host = HostNet::start(2).unwrap();
+        assert_eq!(host.relay_status(), RelayStatus::Off);
+        assert!(host.enable_relay(" ").is_err());
+        host.enable_relay(&relay_addr).unwrap();
+        assert_eq!(host.relay_addr(), Some(relay_addr.as_str()));
+        wait_for("relay online", || {
+            host.relay_status() == RelayStatus::Online
+        });
+
+        // two guests join through the relay with the real handshake
+        let alice = guest_connect(&relay_join_addr(&relay_addr), &host.code, "Alice").unwrap();
+        assert_eq!(alice.seat, 1);
+        assert_eq!(alice.addr, format!("relay://{relay_addr}"));
+        match host.rx.recv_timeout(wait) {
+            Ok(HostMsg::Joined(1, name)) => assert_eq!(name, "Alice"),
+            _ => panic!("host did not see Alice join"),
+        }
+        unthrottle(&host);
+        let mut bob =
+            spawn_guest_connect_via_relay(relay_addr.clone(), host.code.clone(), "Bob".into())
+                .recv_timeout(wait)
+                .unwrap()
+                .unwrap();
+        assert_eq!(bob.seat, 2);
+        assert!(matches!(
+            host.rx.recv_timeout(wait),
+            Ok(HostMsg::Joined(2, _))
+        ));
+
+        // lobby lines reach both, intents reach the host tagged with the seat
+        host.broadcast("LOBBY 7 4 1 0 0 2 1 0 1,2 0,1,0,1 0,1,2,3 Host,Alice,Bob,-");
+        assert!(next_line(&alice.rx, "LOBBY").ends_with("Host,Alice,Bob,-"));
+        assert!(next_line(&bob.rx, "LOBBY").starts_with("LOBBY 7 4"));
+        send_net_line(&mut bob.stream, "COLOR 3");
+        match host.rx.recv_timeout(wait) {
+            Ok(HostMsg::Intent(2, line)) => assert_eq!(line, "COLOR 3"),
+            _ => panic!("host did not get Bob's intent"),
+        }
+
+        // a wrong code gets a clear answer from the relay
+        let wrong = if host.code == "000000" {
+            "000001"
+        } else {
+            "000000"
+        };
+        match guest_connect(&relay_join_addr(&relay_addr), wrong, "Eve") {
+            Err(e) => assert_eq!(e, "Rejected: no game with that code on this relay"),
+            Ok(_) => panic!("joined with a wrong code"),
+        }
+
+        // Alice's link drops; she reclaims her seat through the relay
+        let _ = alice.stream.shutdown(std::net::Shutdown::Both);
+        assert!(matches!(host.rx.recv_timeout(wait), Ok(HostMsg::Left(1))));
+        unthrottle(&host);
+        let rec = spawn_reconnect(alice.addr.clone(), alice.code.clone(), alice.token.clone());
+        let (_w, lines) = match rec.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(parts)) => parts,
+            _ => panic!("reconnect through the relay failed"),
+        };
+        assert!(lines
+            .recv_timeout(wait)
+            .unwrap()
+            .starts_with("RECONNECTED 1 "));
+        assert!(matches!(
+            host.rx.recv_timeout(wait),
+            Ok(HostMsg::Rejoined(1))
+        ));
+
+        // The host's control link drops: it re-registers the same room and
+        // keeps admitting guests, while connected guests carry on.
+        relay.drop_controls();
+        wait_for("relay link lost", || {
+            host.relay_status() != RelayStatus::Online
+        });
+        wait_for("relay back online", || {
+            host.relay_status() == RelayStatus::Online
+        });
+        host.broadcast("PING");
+        assert_eq!(next_line(&bob.rx, "PING"), "PING");
+        assert_eq!(relay.rooms(), 1);
+
+        // the host leaving tells relayed guests and closes the room
+        drop(host);
+        assert_eq!(next_line(&bob.rx, "BYE"), "BYE The host left the game");
+        wait_for("room closed", || relay.rooms() == 0);
     }
 
     #[test]

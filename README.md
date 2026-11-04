@@ -76,6 +76,15 @@ the same network, ready to join with one click, the way LAN worlds work in
 many games. Hosts can also share their address and 6-digit room code for VPN
 play. Details and firewall tips are in the [player guide](docs/GUIDE.md#playing-together).
 
+### Over the internet, without port forwarding
+
+`dice-wars-relay` is a small relay server anyone can run on a cheap VPS: host
+and guests both connect out to it, so nobody forwards a port. Build it with
+`cargo build --release --bin dice-wars-relay` and open TCP port 7780. Game
+traffic is not encrypted and the relay sees room codes and moves, so run your
+own or use one you trust. Setup, a systemd unit and limits are in
+[docs/RELAY.md](docs/RELAY.md).
+
 ## Guides
 
 - [Player guide](docs/GUIDE.md): rules, teams, difficulty, multiplayer, replays and accessibility.
