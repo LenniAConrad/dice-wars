@@ -24,6 +24,8 @@ one module per concern. Unit tests sit next to the code they test.
 | `src/lobby.rs` | host, guest and join lobby screens |
 | `src/net.rs` | network play: protocol, host and guest sessions, authentication |
 | `src/lan.rs` | LAN lobby discovery (UDP beacon on the game port + 1) |
+| `src/relay.rs` | internet relay: protocol, client helpers and the server, shared by the game and the relay binary |
+| `src/bin/dice-wars-relay.rs` | the relay server program (`cargo build --release --bin dice-wars-relay`, see [RELAY.md](RELAY.md)) |
 | `src/replay.rs` | watching a finished match again |
 | `src/gif.rs` | animated GIF export of replays |
 | `src/settings.rs` | settings and seed bookmarks in the per-user data directory |
@@ -91,7 +93,7 @@ All hooks are environment variables read at startup.
 | `DW_PORT=n` | game port (LAN discovery uses n + 1) |
 | `DW_DICE_SEED=n` | pin the dice and bot choices (headless runs only) |
 | `DW_FULL_LAYERS=1` | repaint cached layers in full instead of by region |
-| `DW_TEST_HOST`, `DW_TEST_JOIN="addr code"` | open a host lobby or join one at startup (network tests) |
+| `DW_TEST_HOST`, `DW_TEST_JOIN="addr code"` | open a host lobby or join one at startup (network tests); `addr` may be `relay://host:port` |
 
 See `scripts/audit-ui.py` for examples, and look at the PNGs you produce:
 

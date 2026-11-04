@@ -62,7 +62,9 @@ cause. The game uses TCP port 7777 for play and UDP port 7778 for finding
 lobbies. On Ubuntu or Mint: `sudo ufw allow 7777/tcp` and
 `sudo ufw allow 7778/udp`. Guest Wi-Fi networks often block device-to-device
 traffic. Game traffic is not encrypted, so play over a trusted network or VPN
-rather than forwarding the port to the internet.
+rather than forwarding the port to the internet. To play over the internet
+without forwarding anything, use a relay server you trust; see
+[RELAY.md](RELAY.md).
 
 ## Pausing
 

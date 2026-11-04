@@ -92,10 +92,20 @@ pub(crate) struct Settings {
     pub(crate) team_ff: bool,     // teammates may attack each other
     pub(crate) name: String,      // display name in multiplayer lobbies
     pub(crate) last_addr: String, // last host address joined, prefilled next time
+    pub(crate) relay: String,     // internet relay address (host[:port]); empty = none
     pub(crate) players: usize,    // last chosen player count
     pub(crate) difficulty: usize, // last chosen difficulty index
     pub(crate) played: [u32; 3],  // finished solo games per difficulty
     pub(crate) won: [u32; 3],     // of those, the ones you won
+}
+
+// a relay address: host name or IP, optional port, nothing else
+pub(crate) fn clean_relay_addr(s: &str) -> String {
+    s.trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '[' | ']'))
+        .take(64)
+        .collect()
 }
 
 // lobby names travel in space/comma-separated messages: keep them plain
@@ -149,6 +159,7 @@ fn parse_settings(txt: &str) -> Settings {
         team_ff: true,
         name: String::new(),
         last_addr: String::new(),
+        relay: String::new(),
         players: 6,
         difficulty: 1,
         played: [0; 3],
@@ -186,6 +197,7 @@ fn parse_settings(txt: &str) -> Settings {
             (Some("teamff"), Some(v)) => s.team_ff = v != "0",
             (Some("name"), Some(v)) => s.name = clean_name(v),
             (Some("lastaddr"), Some(v)) => s.last_addr = v.chars().take(40).collect(),
+            (Some("relay"), Some(v)) => s.relay = clean_relay_addr(v),
             (Some("players"), Some(v)) => {
                 s.players = v.parse::<usize>().unwrap_or(6).clamp(2, MAX_PLAYERS)
             }
@@ -211,7 +223,7 @@ pub(crate) fn save_settings(s: &Settings) {
     let _ = write_atomic(
         &data_file(SETTINGS_FILE),
         &format!(
-            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\nplayers {}\ndifficulty {}\nreducedmotion {}\nquiet {}\ntheme {}\nrecord {} {} {} {} {} {}\n",
+            "chances {}\nmuted {}\ncolorblind {}\ncolor {}\nspeed {}\ndark {}\nteams {}\nteamcount {}\nteamhvb {}\nteammine {}\nteambridge {}\nteamff {}\nname {}\nlastaddr {}\nrelay {}\nplayers {}\ndifficulty {}\nreducedmotion {}\nquiet {}\ntheme {}\nrecord {} {} {} {} {} {}\n",
             s.chances as u8,
             s.muted as u8,
             s.colorblind as u8,
@@ -226,6 +238,7 @@ pub(crate) fn save_settings(s: &Settings) {
             s.team_ff as u8,
             s.name,
             s.last_addr,
+            s.relay,
             s.players,
             s.difficulty,
             s.reduced_motion as u8,
@@ -291,6 +304,7 @@ mod tests {
         s.team_ff = false;
         s.name = "Ada_9".into();
         s.last_addr = "192.168.1.20:7777".into();
+        s.relay = "relay.example.org:7780".into();
         s.players = 5;
         s.difficulty = 2;
         s.played = [3, 7, 1];
@@ -349,6 +363,9 @@ mod tests {
             (l.name.as_str(), l.last_addr.as_str()),
             ("Ada_9", "192.168.1.20:7777")
         );
+        assert_eq!(l.relay, "relay.example.org:7780");
+        assert_eq!(parse_settings("").relay, "");
+        assert_eq!(parse_settings("relay [::1]:7780/x\n").relay, "[::1]:7780x");
         assert_eq!((l.players, l.difficulty), (5, 2));
     }
 }
