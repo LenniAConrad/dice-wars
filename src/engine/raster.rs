@@ -442,7 +442,53 @@ impl Surface {
                 cross(edges[1], point - starts[1]),
                 cross(edges[2], point - starts[2]),
             ];
-            for x in x0..x1 {
+            // Each edge function is linear along the row, so solve for the
+            // covered span and test only that (plus a one-pixel margin) rather
+            // than the whole bounding box. The exact per-pixel test below keeps
+            // the fill rule unchanged.
+            let (mut xs, mut xe) = (x0 as f32, x1 as f32);
+            for i in 0..3 {
+                let ey = edges[i].y;
+                if ey > 0.0 {
+                    xe = xe.min(x0 as f32 + (weights[i] / ey).floor() + 2.0);
+                } else if ey < 0.0 {
+                    xs = xs.max(x0 as f32 + (weights[i] / ey).floor() - 1.0);
+                } else if !(weights[i] > 0.0 || (weights[i] == 0.0 && top_left[i])) {
+                    xe = xs;
+                }
+            }
+            if !(xs < xe) {
+                continue;
+            }
+            let (xs, xe) = (xs.max(x0 as f32) as usize, (xe.min(x1 as f32)).max(0.0) as usize);
+            if xs >= xe {
+                continue;
+            }
+            for i in 0..3 {
+                weights[i] -= edges[i].y * (xs - x0) as f32;
+            }
+            if solid && bytes[0][3] == 255 {
+                // Opaque flat fills: a triangle row is one contiguous run, so
+                // find its exact ends with the same test and copy the run.
+                let inside = |w: [f32; 3]| (0..3).all(|i| w[i] > 0.0 || (w[i] == 0.0 && top_left[i]));
+                let at = |x: usize| -> [f32; 3] {
+                    std::array::from_fn(|i| weights[i] - edges[i].y * (x - xs) as f32)
+                };
+                let mut a = xs;
+                while a < xe && !inside(at(a)) {
+                    a += 1;
+                }
+                let mut b = xe;
+                while b > a && !inside(at(b - 1)) {
+                    b -= 1;
+                }
+                let row = y * self.width;
+                for px in self.pixels[(row + a) * 4..(row + b) * 4].chunks_exact_mut(4) {
+                    px.copy_from_slice(&bytes[0]);
+                }
+                continue;
+            }
+            for x in xs..xe {
                 if (0..3).all(|i| weights[i] > 0.0 || (weights[i] == 0.0 && top_left[i])) {
                     let c = if solid {
                         bytes[0]

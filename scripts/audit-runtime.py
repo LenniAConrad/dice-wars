@@ -24,15 +24,19 @@ with tempfile.TemporaryDirectory(prefix="dice-wars-runtime-") as data:
         ("selection", "930x820", {"DW_AUTOSTART": "1", "DW_SCENE": "selection"}),
         *[("battle", size, {"DW_AUTOSTART": "1", "DW_BATTLE": "1"})
           for size in ["930x820", "1920x1080", "2560x1600", "3840x2160"]],
+        # Bots play most of a real match; this is where the game spends its time.
+        ("bot-turns", "930x820", {"DW_AUTOSTART": "1", "DW_TEST_AUTOEND": "1", "DW_FRAME_LIMIT": "600"}),
+        ("bot-turns", "2560x1600", {"DW_AUTOSTART": "1", "DW_TEST_AUTOEND": "1", "DW_FRAME_LIMIT": "600"}),
     ]
     for name, size, switches in cases:
-        env = dict(base, DW_FRAME_LIMIT="120", **switches)
+        env = dict(base, DW_FRAME_LIMIT="120")
+        env.update(switches)
         if size:
             env.update(DW_HEADLESS="1", DW_SIZE=size)
         before = resource.getrusage(resource.RUSAGE_CHILDREN)
         started = time.monotonic()
         result = subprocess.run([str(args.binary.resolve())], cwd=root, env=env,
-                                capture_output=True, text=True, timeout=15, check=True)
+                                capture_output=True, text=True, timeout=60, check=True)
         wall = time.monotonic() - started
         after = resource.getrusage(resource.RUSAGE_CHILDREN)
         cpu = after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime

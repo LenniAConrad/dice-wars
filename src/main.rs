@@ -283,29 +283,30 @@ fn th(light: Color, dark: Color) -> Color {
 #[allow(non_snake_case)]
 fn BG() -> Color {
     th(
-        Color::new(0.905, 0.930, 0.960, 1.0),
-        Color::new(0.055, 0.065, 0.10, 1.0),
+        Color::new(0.945, 0.953, 0.972, 1.0),
+        Color::new(0.070, 0.078, 0.115, 1.0),
     )
 }
 #[allow(non_snake_case)]
 fn BORDER() -> Color {
     th(
-        Color::new(0.24, 0.25, 0.42, 1.0),
+        Color::new(0.38, 0.41, 0.60, 1.0),
         Color::new(0.56, 0.60, 0.80, 1.0),
     )
 }
+// Focus and hover outlines use one calm indigo accent in both themes.
 #[allow(non_snake_case)]
-fn PANEL_SHADOW() -> Color {
+fn ACCENT() -> Color {
     th(
-        Color::new(0.815, 0.850, 0.895, 1.0),
-        Color::new(0.04, 0.045, 0.075, 1.0),
+        Color::new(0.33, 0.40, 0.86, 1.0),
+        Color::new(0.58, 0.65, 1.0, 1.0),
     )
 }
 #[allow(non_snake_case)]
 fn CARD_EDGE() -> Color {
     th(
-        Color::new(0.835, 0.860, 0.895, 1.0),
-        Color::new(0.24, 0.26, 0.36, 1.0),
+        Color::new(0.865, 0.880, 0.910, 1.0),
+        Color::new(0.22, 0.24, 0.33, 1.0),
     )
 }
 #[allow(non_snake_case)]
@@ -631,6 +632,56 @@ fn ease_out(t: f32) -> f32 {
 fn draw_round_rect(x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color) {
     engine::rounded_frame(x, y, w, h, radius, 0.0, color, color);
 }
+
+// Outline weight is a theme token: call sites state relative emphasis and the
+// modern style renders it as a light hairline rather than a heavy cartoon stroke.
+const STROKE_SCALE: f32 = 0.6;
+
+// A diffuse drop shadow built from a few translucent layers instead of a hard
+// offset slab, so cards appear to float slightly above the surface.
+fn soft_shadow(x: f32, y: f32, w: f32, h: f32, radius: f32, strength: f32) {
+    use std::hash::{Hash, Hasher};
+    // Quantized so animated strengths reuse a handful of cached sprites.
+    let strength = (strength.clamp(0.0, 4.0) * 10.0).round() / 10.0;
+    if strength <= 0.0 {
+        return;
+    }
+    let (c, k) = if dark_mode() {
+        (Color::new(0.0, 0.0, 0.02, 1.0), 2.6)
+    } else {
+        (Color::new(0.10, 0.14, 0.32, 1.0), 1.0)
+    };
+    let layers = move || {
+        for (grow, dy, a) in [(7.0, 6.0, 0.030), (3.5, 3.5, 0.045), (1.0, 1.5, 0.060)] {
+            draw_round_rect(
+                x - grow,
+                y - grow + dy,
+                w + grow * 2.0,
+                h + grow * 2.0,
+                radius + grow,
+                with_alpha(c, (a * k * strength).min(1.0)),
+            );
+        }
+    };
+    // Shadows depend only on size and theme, so each shape is rasterized once
+    // and blitted afterwards; translucent layers are the costly part.
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    (
+        "shadow",
+        w.to_bits(),
+        h.to_bits(),
+        radius.to_bits(),
+        (strength * 10.0) as u32,
+        dark_mode(),
+    )
+        .hash(&mut hash);
+    engine::cached_sprite(
+        hash.finish(),
+        Rect::new(x - 8.0, y - 2.0, w + 16.0, h + 16.0),
+        layers,
+    );
+}
+
 fn draw_round_frame(
     x: f32,
     y: f32,
@@ -641,7 +692,12 @@ fn draw_round_frame(
     fill: Color,
     border: Color,
 ) {
-    engine::rounded_frame(x, y, w, h, radius, border_width, fill, border);
+    let stroke = if border_width > 0.0 {
+        (border_width * STROKE_SCALE).max(1.0)
+    } else {
+        0.0
+    };
+    engine::rounded_frame(x, y, w, h, radius, stroke, fill, border);
 }
 
 // ---------------------------------------------------------------- sound
@@ -897,6 +953,7 @@ struct TerrFx {
     shake: f32,
     bounce: f32,
     flash: f32,
+    from: usize, // previous owner while a capture cross-fades its land color
 }
 
 #[derive(Clone)]
@@ -1463,6 +1520,7 @@ impl Game {
         let atk = self.terrs[b.a].owner;
         let def = self.terrs[b.d].owner;
         if b.captured {
+            self.fx[b.d].from = def;
             self.terrs[b.d].owner = atk;
             self.terrs[b.d].dice = self.terrs[b.a].dice - 1;
             self.fx[b.d].flash = 1.0;
@@ -2282,17 +2340,41 @@ fn r_btn_menu() -> Rect {
 fn r_btn_new() -> Rect {
     Rect::new(WIN_W - 122.0, 694.0, 78.0, 30.0)
 }
+// The game-over card and its buttons share one layout; `rise` is the entry
+// animation offset, so drawing and hit-testing can never drift apart.
+const OVER_W: f32 = 560.0;
+const OVER_H: f32 = 214.0;
+fn r_over_card(rise: f32) -> Rect {
+    Rect::new(
+        (WIN_W - OVER_W) * 0.5,
+        (WIN_H - OVER_H) * 0.5 - 40.0 + rise,
+        OVER_W,
+        OVER_H,
+    )
+}
+fn r_over_button(i: usize, rise: f32) -> Rect {
+    let card = r_over_card(rise);
+    let (w, gap) = (120.0, 10.0);
+    let x0 = card.x + (card.w - (w * 4.0 + gap * 3.0)) * 0.5;
+    Rect::new(x0 + i as f32 * (w + gap), card.y + 128.0, w, 46.0)
+}
 fn r_over_replay() -> Rect {
-    Rect::new(WIN_W * 0.5 - 195.0, 392.0, 185.0, 46.0)
+    r_over_button(0, 0.0)
 }
 fn r_over_gif() -> Rect {
-    Rect::new(WIN_W * 0.5 + 10.0, 392.0, 185.0, 46.0)
+    r_over_button(1, 0.0)
+}
+fn r_over_new() -> Rect {
+    r_over_button(2, 0.0)
+}
+fn r_over_menu() -> Rect {
+    r_over_button(3, 0.0)
 }
 fn r_confirm_yes() -> Rect {
-    Rect::new(WIN_W * 0.5 - 128.0, 398.0, 120.0, 44.0)
+    Rect::new(WIN_W * 0.5 - 158.0, 398.0, 150.0, 44.0)
 }
 fn r_confirm_no() -> Rect {
-    Rect::new(WIN_W * 0.5 + 8.0, 398.0, 120.0, 44.0)
+    Rect::new(WIN_W * 0.5 + 8.0, 398.0, 150.0, 44.0)
 }
 
 fn pick_territory(game: &Game, p: Vec2) -> Option<usize> {
@@ -2477,6 +2559,7 @@ fn draw_board(game: &Game, ui: &Ui, chances: bool) {
     }
     for t in 0..game.terrs.len() {
         stack_is_moving(game, t).hash(&mut hash);
+        capture_fade(game, t).map(|f| (f * 24.0) as u8).hash(&mut hash);
     }
     game.battle.as_ref().map(|b| (b.a, b.d)).hash(&mut hash);
     engine::cached_layer(0, hash.finish(), || draw_board_live(game, ui, chances));
@@ -2484,8 +2567,8 @@ fn draw_board(game: &Game, ui: &Ui, chances: bool) {
 }
 
 fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
-    // the whole canvas is the play surface
-    clear_background(BG());
+    // The whole window is the play surface, so letterbox bars never show a seam.
+    clear_background(SRF());
     draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
 
     let hover = board_hover(game);
@@ -2510,6 +2593,10 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
         let t = t as usize;
         let terr = &game.terrs[t];
         let mut col = map_fill(terr.owner);
+        if let Some(f) = capture_fade(game, t) {
+            // Captured land sweeps from the loser's color into the winner's.
+            col = mix(map_fill(game.fx[t].from), col, ease_out(1.0 - f));
+        }
         let selectable = terr.owner == game.current && terr.dice > 1;
         let attackable = game.selected.map_or(false, |s| {
             game.can_target(game.current, terr.owner) && game.terrs[s].neighbors.contains(&t)
@@ -2526,40 +2613,71 @@ fn draw_board_live(game: &Game, ui: &Ui, chances: bool) {
         fill_hex(cell_pos(i), HEX + 0.6, col);
     }
 
-    // territory borders: every hex edge whose neighbor belongs to a different territory
-    for i in 0..COLS * ROWS {
-        let t = game.cell_terr[i];
-        if t < 0 {
-            continue;
-        }
-        let (c, r) = (i % COLS, i / COLS);
-        let pos = cell_pos(i);
-        for d in 0..6 {
-            let same = neighbor_of(c, r, d).map_or(false, |n| game.cell_terr[n] == t);
-            if !same {
+    // Territory borders: shared edges between lands are a soft slate hairline;
+    // coastlines and the keyboard focus keep the strong outline. Coasts draw in
+    // a second pass so they always win at the joints.
+    let soft_edge = mix(MAP_EDGE, WHITE, 0.38);
+    for coast_pass in [false, true] {
+        for i in 0..COLS * ROWS {
+            let t = game.cell_terr[i];
+            if t < 0 {
+                continue;
+            }
+            let (c, r) = (i % COLS, i / COLS);
+            let pos = cell_pos(i);
+            let focused = game.keyboard_hover == Some(t as usize);
+            for d in 0..6 {
+                let n = neighbor_of(c, r, d);
+                if n.is_some_and(|n| game.cell_terr[n] == t) {
+                    continue;
+                }
+                let coast = focused || n.map_or(true, |n| game.cell_terr[n] < 0);
+                if coast != coast_pass {
+                    continue;
+                }
                 let a0 = (d as f32 * 60.0 - 30.0).to_radians();
                 let a1 = (d as f32 * 60.0 + 30.0).to_radians();
                 let p0 = pos + HEX * vec2(a0.cos(), a0.sin());
                 let p1 = pos + HEX * vec2(a1.cos(), a1.sin());
+                let (width, col) = if focused {
+                    (3.4, INK_ON_FILL)
+                } else if coast {
+                    (2.4, MAP_EDGE)
+                } else {
+                    (1.6, soft_edge)
+                };
                 // round caps at the corners keep the border joints clean
-                draw_line(
-                    p0.x,
-                    p0.y,
-                    p1.x,
-                    p1.y,
-                    if game.keyboard_hover == Some(t as usize) {
-                        3.4
-                    } else {
-                        2.4
-                    },
-                    if game.keyboard_hover == Some(t as usize) {
-                        INK_ON_FILL
-                    } else {
-                        MAP_EDGE
-                    },
-                );
-                draw_circle(p0.x, p0.y, 1.2, MAP_EDGE);
-                draw_circle(p1.x, p1.y, 1.2, MAP_EDGE);
+                draw_line(p0.x, p0.y, p1.x, p1.y, width, col);
+                draw_circle(p0.x, p0.y, width * 0.5, col);
+                draw_circle(p1.x, p1.y, width * 0.5, col);
+            }
+        }
+    }
+
+    // During a battle both lands carry their owner's outline, so the fight is
+    // readable on the map itself and not only in the status panel.
+    if let Some(b) = &game.battle {
+        for t in [b.a, b.d] {
+            let col = palette(game.terrs[t].owner).dark;
+            for i in 0..COLS * ROWS {
+                if game.cell_terr[i] != t as i32 {
+                    continue;
+                }
+                let pos = cell_pos(i);
+                for d in 0..6 {
+                    if neighbor_of(i % COLS, i / COLS, d)
+                        .is_some_and(|n| game.cell_terr[n] == t as i32)
+                    {
+                        continue;
+                    }
+                    let a0 = (d as f32 * 60.0 - 30.0).to_radians();
+                    let a1 = (d as f32 * 60.0 + 30.0).to_radians();
+                    let p0 = pos + (HEX - 1.6) * vec2(a0.cos(), a0.sin());
+                    let p1 = pos + (HEX - 1.6) * vec2(a1.cos(), a1.sin());
+                    draw_line(p0.x, p0.y, p1.x, p1.y, 3.6, col);
+                    draw_circle(p0.x, p0.y, 1.8, col);
+                    draw_circle(p1.x, p1.y, 1.8, col);
+                }
             }
         }
     }
@@ -2628,6 +2746,13 @@ fn draw_stack_badge(t: &Territory, ui: &Ui) {
     }
 }
 
+// Remaining capture cross-fade (1 → 0), or None when the land shows its owner.
+fn capture_fade(game: &Game, t: usize) -> Option<f32> {
+    let fx = &game.fx[t];
+    (fx.flash > 0.0 && fx.from != game.terrs[t].owner && !REDUCED_MOTION.load(Ordering::Relaxed))
+        .then_some(fx.flash)
+}
+
 fn stack_is_moving(game: &Game, t: usize) -> bool {
     !REDUCED_MOTION.load(Ordering::Relaxed) && (game.fx[t].shake > 0.0 || game.fx[t].bounce > 0.0)
 }
@@ -2641,9 +2766,20 @@ fn draw_board_effects(game: &Game, ui: &Ui) {
         let start = from + dir * 26.0;
         let end = to - dir * 30.0;
         let col = palette(game.terrs[b.a].owner).dark;
-        draw_line(start.x, start.y, end.x, end.y, 3.0, col);
         let perp = vec2(-dir.y, dir.x);
-        draw_triangle(end + dir * 10.0, end + perp * 6.0, end - perp * 6.0, col);
+        // A light halo keeps the arrow legible over stacks and both themes.
+        let halo = with_alpha(WHITE, 0.9);
+        draw_line(start.x, start.y, end.x, end.y, 8.0, halo);
+        draw_circle(start.x, start.y, 4.0, halo);
+        draw_triangle(
+            end + dir * 15.0,
+            end + perp * 10.0 - dir * 2.0,
+            end - perp * 10.0 - dir * 2.0,
+            halo,
+        );
+        draw_line(start.x, start.y, end.x, end.y, 4.5, col);
+        draw_circle(start.x, start.y, 2.25, col);
+        draw_triangle(end + dir * 11.0, end + perp * 7.0, end - perp * 7.0, col);
     }
 
     // with a land selected, point out every attack option
@@ -2894,7 +3030,7 @@ fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
     let pressed = hovered && is_mouse_button_down(MouseButton::Left);
     let off = if pressed { 2.0 } else { 0.0 };
     if !pressed {
-        draw_round_rect(b.x + 2.0, b.y + 4.0, b.w, b.h, 22.0, PANEL_SHADOW());
+        soft_shadow(b.x, b.y, b.w, b.h, 22.0, 1.0);
     }
     let fill = control_fill(SRF(), hovered);
     let edge = if active {
@@ -2933,7 +3069,7 @@ fn draw_panel_live(game: &Game, ui: &Ui, settings: &Settings) {
             10.0,
             2.0,
             f,
-            if h { BORDER() } else { CARD_EDGE() },
+            if h { ACCENT() } else { CARD_EDGE() },
         );
         ui.text_centered(label, r.x + r.w * 0.5, r.y + 21.0, 13.0, INK());
     }
@@ -3000,7 +3136,17 @@ fn draw_player_cards(game: &Game, ui: &Ui, cy: f32, right_margin: f32) {
             let alive = game.count(p) > 0;
             let is_cur = p == game.current && game.over.is_none();
             if is_cur {
-                draw_round_frame(cx, cy, chip_w, chip_h, 14.0, 3.0, palette(p).fill, BORDER());
+                soft_shadow(cx, cy, chip_w, chip_h, 14.0, 1.4);
+                draw_round_frame(
+                    cx,
+                    cy,
+                    chip_w,
+                    chip_h,
+                    14.0,
+                    3.0,
+                    palette(p).fill,
+                    darken(palette(p).fill, 0.7),
+                );
             } else {
                 draw_round_frame(cx, cy, chip_w, chip_h, 14.0, 2.0, SRF(), CARD_EDGE());
             }
@@ -3019,7 +3165,7 @@ fn draw_player_cards(game: &Game, ui: &Ui, cy: f32, right_margin: f32) {
                     a,
                 ),
             );
-            if game.humans > 1 && p == game.my_seat {
+            if p == game.my_seat && game.recording {
                 let bw_ = ui.width("YOU", 10.0) + 10.0;
                 let (bx, by) = if game.teams.on {
                     (cx + 4.0, cy + chip_h - 12.0)
@@ -3116,7 +3262,7 @@ fn draw_icon_bar(settings: &Settings, ui: &Ui, mp: Vec2) {
             8.0,
             1.5,
             control_fill(SRF(), hov),
-            if hov { BORDER() } else { CARD_EDGE() },
+            if hov { ACCENT() } else { CARD_EDGE() },
         );
         let (cx, cy) = (r.x + r.w * 0.5, r.y + r.h * 0.5);
         match i {
@@ -3236,8 +3382,11 @@ fn draw_icon_bar(settings: &Settings, ui: &Ui, mp: Vec2) {
                 }
             };
             let width = ui.width(tip, 12.0) + 20.0;
-            let x = (cx - width * 0.5).clamp(20.0, WIN_W - width - 20.0);
-            draw_round_frame(x, 54.0, width, 26.0, 7.0, 1.0, SRF(), BORDER());
+            // Right-aligned under the toolbar, so tips never cover the title.
+            let _ = cx;
+            let x = r_icon(5).x + r_icon(5).w - width;
+            soft_shadow(x, 54.0, width, 26.0, 8.0, 1.0);
+            draw_round_frame(x, 54.0, width, 26.0, 8.0, 1.0, SRF(), CARD_EDGE());
             ui.text(tip, x + 10.0, 72.0, 12.0, INK());
         }
     }
@@ -3267,33 +3416,48 @@ fn draw_panel_replay(game: &Game, ui: &Ui) {
     draw_player_cards(game, ui, player_cards_y(game), 0.0);
 }
 
+// Turn changes appear as a short toast that drops in at the top of the board.
 fn draw_banner(game: &Game, ui: &Ui) {
     if game.banner_t <= 0.0 || game.over.is_some() {
         return;
     }
-    let alpha = (game.banner_t / 0.35).min(1.0) * ((1.6 - game.banner_t) / 0.2).min(1.0);
-    let alpha = alpha.clamp(0.0, 1.0);
-    let w = (ui.width(&game.banner, 26.0) + 48.0).min(570.0);
-    let h = 48.0;
-    let x = 30.0;
-    let y = 16.0;
-    let fill = palette(game.current).fill;
+    // 1.6 s life: 0.2 s in, hold, 0.35 s out.
+    let t_in = ((1.6 - game.banner_t) / 0.2).clamp(0.0, 1.0);
+    let t_out = (game.banner_t / 0.35).clamp(0.0, 1.0);
+    let alpha = ease_out(t_in) * ease_out(t_out);
+    if alpha <= 0.01 {
+        return;
+    }
+    let size = 20.0;
+    let text_w = ui.width(&game.banner, size).min(420.0);
+    let w = text_w + 72.0;
+    let h = 42.0;
+    let x = (WIN_W - w) * 0.5 - 60.0;
+    let drop = if REDUCED_MOTION.load(Ordering::Relaxed) {
+        0.0
+    } else {
+        -14.0 * (1.0 - ease_out(t_in))
+    };
+    let y = 14.0 + drop;
+    let pal = palette(game.current);
+    soft_shadow(x, y, w, h, 21.0, 1.6 * alpha);
     draw_round_frame(
         x,
         y,
         w,
         h,
-        14.0,
-        3.0,
-        with_alpha(fill, alpha),
-        with_alpha(BORDER(), alpha),
+        21.0,
+        2.0,
+        with_alpha(pal.fill, alpha),
+        with_alpha(darken(pal.fill, 0.78), alpha),
     );
+    draw_symbol(x + 26.0, y + h * 0.5, 8.0, game.current, with_alpha(pal.dark, alpha));
     ui.text_fitted(
         &game.banner,
-        x + 24.0,
-        y + 33.0,
-        26.0,
-        w - 48.0,
+        x + 44.0,
+        y + 28.5,
+        size,
+        text_w,
         with_alpha(INK_ON_FILL, alpha),
     );
 }
@@ -3301,54 +3465,84 @@ fn draw_banner(game: &Game, ui: &Ui) {
 fn draw_over(game: &Game, ui: &Ui) {
     let Some(msg) = &game.over else { return };
     let a = ease_out(game.over_t);
-    draw_rectangle(0.0, 0.0, WIN_W, WIN_H, with_alpha(SRF(), 0.75 * a));
-
-    // size the card to fit the message
-    let w = (ui.width(msg, 36.0) + 100.0).max(480.0).min(WIN_W - 40.0);
-    let h = 216.0;
-    let x = (WIN_W - w) * 0.5;
-    let y = (WIN_H - h) * 0.5 - 40.0 + 24.0 * (1.0 - a);
+    // A light scrim keeps the final map readable behind the result card.
+    draw_rectangle(0.0, 0.0, WIN_W, WIN_H, with_alpha(SRF(), 0.55 * a));
+    let rise = if REDUCED_MOTION.load(Ordering::Relaxed) {
+        0.0
+    } else {
+        24.0 * (1.0 - a)
+    };
+    let card = r_over_card(rise);
+    soft_shadow(card.x, card.y, card.w, card.h, 24.0, 2.2 * a);
     draw_round_frame(
-        x,
-        y,
-        w,
-        h,
-        22.0,
-        4.0,
+        card.x,
+        card.y,
+        card.w,
+        card.h,
+        24.0,
+        2.0,
         with_alpha(SRF(), a),
-        with_alpha(BORDER(), a),
+        with_alpha(CARD_EDGE(), a),
     );
-    ui.text_centered(msg, WIN_W * 0.5, y + 70.0, 36.0, with_alpha(INK(), a));
+    // A thin accent bar in the winner's color carries the result at a glance.
+    let winner = (0..game.players).find(|&p| game.count(p) > 0).unwrap_or(0);
+    draw_round_rect(
+        card.x + card.w * 0.5 - 36.0,
+        card.y + 18.0,
+        72.0,
+        6.0,
+        3.0,
+        with_alpha(palette(winner).mid, a),
+    );
+    ui.text_fitted(
+        msg,
+        card.x + (card.w - ui.width(msg, 34.0).min(card.w - 60.0)) * 0.5,
+        card.y + 72.0,
+        34.0,
+        card.w - 60.0,
+        with_alpha(INK(), a),
+    );
     ui.text_centered(
-        "Click anywhere else to return to the menu",
+        "R  new map    ·    ESC  menu",
         WIN_W * 0.5,
-        y + 104.0,
-        15.0,
+        card.y + 104.0,
+        13.0,
         with_alpha(INK(), 0.55 * a),
     );
-    for (rct, label) in [
-        (r_over_replay(), "WATCH REPLAY"),
-        (r_over_gif(), "SAVE GIF"),
-    ] {
-        let hovered = rct.contains(mouse_virtual());
-        let fill = control_fill(palette(HUMAN).fill, hovered);
-        let by = y + 130.0;
+    let m = mouse_virtual();
+    for (i, label) in ["REPLAY", "SAVE GIF", "NEW MAP", "MENU"].into_iter().enumerate() {
+        let r = r_over_button(i, rise);
+        let enabled = i != 2 || !game.net_guest;
+        let hovered = enabled && r_over_button(i, 0.0).contains(m);
+        let primary = i == 2 && enabled;
+        let base = if primary { palette(HUMAN).fill } else { SRF() };
+        let fill = control_fill(base, hovered);
         draw_round_frame(
-            rct.x,
-            by,
-            rct.w,
-            rct.h,
-            16.0,
-            2.5,
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            14.0,
+            2.0,
             with_alpha(fill, a),
-            with_alpha(BORDER(), a),
+            with_alpha(
+                if hovered {
+                    ACCENT()
+                } else if primary {
+                    darken(palette(HUMAN).fill, 0.8)
+                } else {
+                    CARD_EDGE()
+                },
+                a,
+            ),
         );
+        let ink = if primary { INK_ON_FILL } else { INK() };
         ui.text_centered(
             label,
-            rct.x + rct.w * 0.5,
-            by + 30.0,
-            18.0,
-            with_alpha(INK_ON_FILL, a),
+            r.x + r.w * 0.5,
+            r.y + 29.0,
+            15.0,
+            with_alpha(ink, if enabled { a } else { 0.35 * a }),
         );
     }
 }
@@ -3359,10 +3553,11 @@ fn draw_confirm(kind: Confirm, ui: &Ui) {
     let h = 202.0;
     let x = (WIN_W - w) * 0.5;
     let y = 280.0;
-    draw_round_frame(x, y, w, h, 20.0, 3.5, SRF(), BORDER());
-    let title = match kind {
-        Confirm::NewMap => "Start a new map?",
-        Confirm::Menu => "Return to the menu?",
+    soft_shadow(x, y, w, h, 22.0, 2.4);
+    draw_round_frame(x, y, w, h, 22.0, 2.0, SRF(), CARD_EDGE());
+    let (title, action) = match kind {
+        Confirm::NewMap => ("Start a new map?", "NEW MAP"),
+        Confirm::Menu => ("Return to the menu?", "LEAVE"),
     };
     ui.text_centered(title, WIN_W * 0.5, y + 56.0, 28.0, INK());
     ui.text_centered(
@@ -3375,25 +3570,28 @@ fn draw_confirm(kind: Confirm, ui: &Ui) {
     let m = mouse_virtual();
     let yes = r_confirm_yes();
     let no = r_confirm_no();
-    let yf = control_fill(palette(HUMAN).fill, yes.contains(m));
-    draw_round_frame(yes.x, yes.y, yes.w, yes.h, 14.0, 2.5, yf, BORDER());
-    ui.text_centered("YES", yes.x + yes.w * 0.5, yes.y + 29.0, 20.0, INK_ON_FILL);
-    let nf = control_fill(SRF(), no.contains(m));
+    // The destructive action is the quiet outline button; keeping the game is
+    // the filled default, matching Enter and ESC.
+    let warn = accent_ink(2);
+    let yf = control_fill(SRF(), yes.contains(m));
+    draw_round_frame(yes.x, yes.y, yes.w, yes.h, 14.0, 2.5, yf, warn);
+    ui.text_centered(action, yes.x + yes.w * 0.5, yes.y + 29.0, 18.0, warn);
+    let nf = control_fill(palette(HUMAN).fill, no.contains(m));
     draw_round_frame(
         no.x,
         no.y,
         no.w,
         no.h,
         14.0,
-        2.0,
+        2.5,
         nf,
         if no.contains(m) {
-            BORDER()
+            ACCENT()
         } else {
-            CARD_EDGE()
+            darken(palette(HUMAN).fill, 0.8)
         },
     );
-    ui.text_centered("CANCEL", no.x + no.w * 0.5, no.y + 29.0, 20.0, INK());
+    ui.text_centered("KEEP PLAYING", no.x + no.w * 0.5, no.y + 29.0, 16.0, INK_ON_FILL);
     ui.text_centered(
         "Enter or ESC: keep playing",
         WIN_W * 0.5,
@@ -3525,6 +3723,148 @@ fn net_port() -> u16 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(NET_PORT_DEFAULT)
+}
+
+// ---------------------------------------------------------------- LAN discovery
+// An open host lobby announces itself once a second with a UDP broadcast on
+// the game port + 1 (7778 by default). The join screen lists every lobby it
+// hears, so players on the same network can join with one click. The beacon
+// carries the room code: anyone on the local network may join an open lobby.
+
+const LAN_MAGIC: &str = "DICEWARS-LAN";
+const LAN_TTL: f32 = 3.5; // seconds without a beacon before a game disappears
+const LAN_MAX_GAMES: usize = 4;
+
+fn lan_port() -> u16 {
+    net_port().wrapping_add(1)
+}
+
+fn lan_beacon_line(port: u16, code: &str, humans: usize, players: usize, name: &str) -> String {
+    format!(
+        "{LAN_MAGIC} {NET_PROTO} {port} {code} {humans} {players} {}",
+        clean_name(name)
+    )
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct LanGame {
+    addr: String,
+    code: String,
+    name: String,
+    humans: usize,
+    players: usize,
+    age: f32,
+}
+
+// Strict parser: anything malformed, oversized, or from another protocol
+// version is ignored rather than shown.
+fn parse_lan_beacon(line: &str, from: std::net::SocketAddr) -> Option<LanGame> {
+    if line.len() > 96 {
+        return None;
+    }
+    let mut it = line.split(' ');
+    if it.next()? != LAN_MAGIC || it.next()? != NET_PROTO.to_string() {
+        return None;
+    }
+    let port: u16 = it.next()?.parse().ok().filter(|&p| p != 0)?;
+    let code = it.next()?;
+    if code.len() != NET_ROOM_CODE_LEN || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let humans: usize = it.next()?.parse().ok()?;
+    let players: usize = it.next()?.parse().ok()?;
+    if !(1..=MAX_PLAYERS).contains(&players) || humans == 0 || humans > players {
+        return None;
+    }
+    let name = clean_name(it.next().unwrap_or(""));
+    if it.next().is_some() {
+        return None;
+    }
+    let ip = match from.ip() {
+        std::net::IpAddr::V4(v4) => v4,
+        std::net::IpAddr::V6(_) => return None,
+    };
+    Some(LanGame {
+        addr: format!("{ip}:{port}"),
+        code: code.to_string(),
+        name: if name.is_empty() { "Host".to_string() } else { name },
+        humans,
+        players,
+        age: 0.0,
+    })
+}
+
+struct LanBeacon {
+    socket: Option<std::net::UdpSocket>,
+    t: f32,
+}
+
+impl LanBeacon {
+    fn new() -> LanBeacon {
+        let socket = std::net::UdpSocket::bind(("0.0.0.0", 0))
+            .ok()
+            .filter(|s| s.set_broadcast(true).is_ok() && s.set_nonblocking(true).is_ok());
+        LanBeacon { socket, t: 1.0 }
+    }
+    fn tick(&mut self, dt: f32, line: impl FnOnce() -> String) {
+        self.t += dt;
+        if self.t < 1.0 {
+            return;
+        }
+        self.t = 0.0;
+        if let Some(s) = &self.socket {
+            let line = line();
+            // Broadcast to the network, and to this machine for a second copy
+            // of the game running locally.
+            let _ = s.send_to(line.as_bytes(), (std::net::Ipv4Addr::BROADCAST, lan_port()));
+            let _ = s.send_to(line.as_bytes(), (std::net::Ipv4Addr::LOCALHOST, lan_port()));
+        }
+    }
+}
+
+struct LanScan {
+    socket: Option<std::net::UdpSocket>,
+    games: Vec<LanGame>,
+}
+
+impl LanScan {
+    fn new() -> LanScan {
+        let socket = std::net::UdpSocket::bind(("0.0.0.0", lan_port()))
+            .ok()
+            .filter(|s| s.set_nonblocking(true).is_ok());
+        LanScan {
+            socket,
+            games: Vec::new(),
+        }
+    }
+    fn listening(&self) -> bool {
+        self.socket.is_some()
+    }
+    fn tick(&mut self, dt: f32) {
+        for g in &mut self.games {
+            g.age += dt;
+        }
+        self.games.retain(|g| g.age < LAN_TTL);
+        let Some(socket) = &self.socket else { return };
+        let mut buf = [0u8; 128];
+        // Bounded per frame so a flood cannot stall rendering.
+        for _ in 0..32 {
+            let Ok((n, from)) = socket.recv_from(&mut buf) else {
+                break;
+            };
+            let Some(game) = std::str::from_utf8(&buf[..n])
+                .ok()
+                .and_then(|line| parse_lan_beacon(line.trim_end(), from))
+            else {
+                continue;
+            };
+            if let Some(known) = self.games.iter_mut().find(|g| g.addr == game.addr) {
+                *known = game;
+            } else if self.games.len() < LAN_MAX_GAMES {
+                self.games.push(game);
+            }
+        }
+    }
 }
 const NET_MAX_LINE: usize = 200; // guest -> host intents are tiny
 const NET_MAX_HOST_LINE: usize = 4096; // host -> guest events can be long (REINF lists)
@@ -4551,6 +4891,7 @@ impl Replay {
         match ev {
             RepEvent::Attack { a, d, captured, .. } => {
                 if captured {
+                    self.g.fx[d].from = self.g.terrs[d].owner;
                     self.g.terrs[d].owner = self.g.terrs[a].owner;
                     self.g.terrs[d].dice = self.g.terrs[a].dice - 1;
                     self.g.fx[d].flash = 1.0;
@@ -5689,7 +6030,7 @@ fn control_fill(fill: Color, hovered: bool) -> Color {
 
 fn menu_button(r: Rect, fill: Color, edge: Color, hovered: bool) {
     let f = control_fill(fill, hovered);
-    draw_round_rect(r.x + 2.0, r.y + 4.0, r.w, r.h, 14.0, PANEL_SHADOW());
+    soft_shadow(r.x, r.y, r.w, r.h, 14.0, 1.0);
     draw_round_frame(
         r.x,
         r.y,
@@ -5698,7 +6039,7 @@ fn menu_button(r: Rect, fill: Color, edge: Color, hovered: bool) {
         14.0,
         2.5,
         f,
-        if hovered { BORDER() } else { edge },
+        if hovered { ACCENT() } else { edge },
     );
 }
 
@@ -5807,7 +6148,7 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
         180.0,
         INK(),
     );
-    let seed_edge = if menu.editing { BORDER() } else { CARD_EDGE() };
+    let seed_edge = if menu.editing { ACCENT() } else { CARD_EDGE() };
     menu_button(rs, SRF(), seed_edge, rs.contains(m));
     let seed_str = if menu.editing {
         let caret = if (time * 2.5) as i32 % 2 == 0 {
@@ -5850,7 +6191,7 @@ fn draw_menu(menu: &Menu, settings: &Settings, ui: &Ui, time: f32) {
         8.0,
         1.5,
         control_fill(SRF(), hovs),
-        if hovs { BORDER() } else { CARD_EDGE() },
+        if hovs { ACCENT() } else { CARD_EDGE() },
     );
     let scol = if marked {
         accent_ink(HUMAN)
@@ -6255,28 +6596,29 @@ fn r_lobby_start() -> Rect {
 fn r_lobby_cancel() -> Rect {
     Rect::new(WIN_W * 0.5 - 70.0, 772.0, 140.0, 36.0)
 }
-fn r_join_addr() -> Rect {
-    Rect::new(WIN_W * 0.5 - 170.0, 310.0, 340.0, 48.0)
-}
-fn r_join_code() -> Rect {
-    Rect::new(WIN_W * 0.5 - 170.0, 404.0, 340.0, 48.0)
-}
+// Join screen: name on top, LAN games in the middle, a direct address below.
+const JOIN_X: f32 = WIN_W * 0.5 - 250.0;
+const JOIN_W: f32 = 500.0;
 fn r_join_name() -> Rect {
-    Rect::new(WIN_W * 0.5 - 170.0, 498.0, 340.0, 48.0)
+    Rect::new(WIN_W * 0.5 - 150.0, 212.0, 300.0, 44.0)
+}
+fn r_join_lan_row(i: usize) -> Rect {
+    Rect::new(JOIN_X, 312.0 + i as f32 * 52.0, JOIN_W, 46.0)
+}
+fn r_join_addr() -> Rect {
+    Rect::new(JOIN_X, 560.0, 250.0, 44.0)
 }
 fn r_join_paste() -> Rect {
-    Rect::new(WIN_W * 0.5 + 178.0, 310.0, 76.0, 48.0)
+    Rect::new(JOIN_X + 258.0, 560.0, 74.0, 44.0)
+}
+fn r_join_code() -> Rect {
+    Rect::new(JOIN_X + 340.0, 560.0, JOIN_W - 340.0, 44.0)
 }
 fn r_join_go() -> Rect {
-    Rect::new(WIN_W * 0.5 - 170.0, 578.0, 160.0, 48.0)
+    Rect::new(JOIN_X, 626.0, JOIN_W * 0.5 - 6.0, 48.0)
 }
 fn r_join_back() -> Rect {
-    Rect::new(WIN_W * 0.5 + 10.0, 578.0, 160.0, 48.0)
-}
-
-fn draw_lobby_card(ui: &Ui, title: &str) {
-    draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
-    ui.text_centered(title, WIN_W * 0.5, 160.0, 44.0, INK());
+    Rect::new(JOIN_X + JOIN_W * 0.5 + 6.0, 626.0, JOIN_W * 0.5 - 6.0, 48.0)
 }
 
 // one segmented control: label left, options in a single pill container
@@ -6526,19 +6868,20 @@ fn draw_host_lobby(
     );
 
     let joined = occ.len();
-    let dots = ".".repeat(1 + (time * 2.0) as usize % 3);
-    ui.text_centered(
-        &format!(
-            "{} player{} here — start whenever you like{}",
-            joined + 1,
-            if joined == 0 { "" } else { "s" },
-            dots
-        ),
-        WIN_W * 0.5,
-        688.0,
-        16.0,
-        with_alpha(INK(), 0.72),
+    // The lobby is announced on the local network; a live dot says so.
+    let status = format!(
+        "{} player{} here  ·  open to your local network",
+        joined + 1,
+        if joined == 0 { "" } else { "s" },
     );
+    let sw = ui.width(&status, 15.0);
+    let (dx, dy) = (WIN_W * 0.5 - sw * 0.5 - 14.0, 683.0);
+    if !REDUCED_MOTION.load(Ordering::Relaxed) {
+        let p = (time * 0.8).fract();
+        draw_circle(dx, dy, 4.0 + 9.0 * p, with_alpha(palette(3).dark, 0.3 * (1.0 - p)));
+    }
+    draw_circle(dx, dy, 4.0, palette(3).dark);
+    ui.text_centered(&status, WIN_W * 0.5 + 7.0, 688.0, 15.0, with_alpha(INK(), 0.72));
     let rst = r_lobby_start();
     menu_button(rst, palette(HUMAN).mid, BORDER(), rst.contains(m));
     ui.text_centered(
@@ -6575,7 +6918,7 @@ fn draw_toggle(r: Rect, label: &str, on: bool, ui: &Ui, m: Vec2) {
         6.0,
         2.0,
         control_fill(if on { palette(HUMAN).mid } else { SRF() }, hov),
-        if hov { BORDER() } else { CARD_EDGE() },
+        if hov { ACCENT() } else { CARD_EDGE() },
     );
     if on {
         // round caps at the elbow and tips keep the check seamless
@@ -6636,7 +6979,7 @@ fn draw_lobby_shared(
     menu_button(
         rn,
         SRF(),
-        if name_edit { BORDER() } else { CARD_EDGE() },
+        if name_edit { ACCENT() } else { CARD_EDGE() },
         rn.contains(m),
     );
     let caret = if name_edit && (time * 2.5) as i32 % 2 == 0 {
@@ -6870,8 +7213,9 @@ fn draw_guest_lobby(
     ui.text_centered("LEAVE", rc.x + rc.w * 0.5, rc.y + 24.0, 15.0, INK());
 }
 
-fn draw_join_lobby(j: &JoinUi, settings: &Settings, ui: &Ui, time: f32) {
-    draw_lobby_card(ui, "JOIN GAME");
+fn draw_join_lobby(j: &JoinUi, lan: Option<&LanScan>, settings: &Settings, ui: &Ui, time: f32) {
+    draw_rectangle(0.0, 0.0, WIN_W, WIN_H, SRF());
+    ui.text_centered("JOIN GAME", WIN_W * 0.5, 150.0, 40.0, INK());
     draw_icon_bar(settings, ui, mouse_virtual());
     let m = mouse_virtual();
     let caret = |on: bool| {
@@ -6881,80 +7225,118 @@ fn draw_join_lobby(j: &JoinUi, settings: &Settings, ui: &Ui, time: f32) {
             ""
         }
     };
-    ui.text_centered(
-        "HOST ADDRESS",
-        WIN_W * 0.5,
-        296.0,
-        14.0,
-        with_alpha(INK(), 0.72),
+    let label = |text: &str, x: f32, y: f32| ui.text(text, x, y, 12.0, with_alpha(INK(), 0.62));
+    let field = |r: Rect, focused: bool, text: &str, size: f32| {
+        let hovered = r.contains(m);
+        draw_round_frame(
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            12.0,
+            2.0,
+            control_fill(SRF(), hovered && !focused),
+            if focused { ACCENT() } else { CARD_EDGE() },
+        );
+        ui.text_fitted(text, r.x + 16.0, r.y + r.h * 0.5 + size * 0.36, size, r.w - 28.0, INK());
+    };
+
+    // ---- who you are
+    let rn = r_join_name();
+    label("YOUR NAME", rn.x, rn.y - 10.0);
+    field(rn, j.focus == 2, &format!("{}{}", settings.name, caret(j.focus == 2)), 18.0);
+
+    // ---- games found on the local network
+    label("GAMES ON YOUR NETWORK", JOIN_X, 298.0);
+    let games = lan.map_or(&[][..], |l| &l.games[..]);
+    let list = Rect::new(JOIN_X, 306.0, JOIN_W, LAN_MAX_GAMES as f32 * 52.0 + 6.0);
+    draw_round_frame(
+        list.x,
+        list.y,
+        list.w,
+        list.h,
+        16.0,
+        1.5,
+        mix(SRF(), BG(), 0.6),
+        CARD_EDGE(),
     );
+    if games.is_empty() {
+        let dots = ".".repeat(1 + (time * 2.0) as usize % 3);
+        let (title, hint) = if lan.is_some_and(LanScan::listening) {
+            (
+                format!("Looking for games{dots}"),
+                "Games appear here when someone on your network hosts one.",
+            )
+        } else {
+            (
+                "LAN search unavailable".to_string(),
+                "Another copy is already listening. Enter an address below.",
+            )
+        };
+        // A slow pulse ring signals the search is live.
+        let (cx, cy) = (WIN_W * 0.5, list.y + 62.0);
+        if !REDUCED_MOTION.load(Ordering::Relaxed) {
+            let p = (time * 0.8).fract();
+            draw_circle(cx, cy, 8.0 + 18.0 * p, with_alpha(ACCENT(), 0.22 * (1.0 - p)));
+        }
+        draw_circle(cx, cy, 6.0, with_alpha(ACCENT(), 0.85));
+        ui.text_centered(&title, WIN_W * 0.5, list.y + 112.0, 17.0, INK());
+        ui.text_centered(hint, WIN_W * 0.5, list.y + 138.0, 12.5, with_alpha(INK(), 0.6));
+    }
+    for (i, g) in games.iter().enumerate() {
+        let r = r_join_lan_row(i);
+        let hovered = r.contains(m) && j.connect_rx.is_none();
+        draw_round_frame(
+            r.x + 6.0,
+            r.y,
+            r.w - 12.0,
+            r.h,
+            12.0,
+            1.5,
+            control_fill(SRF(), hovered),
+            if hovered { ACCENT() } else { CARD_EDGE() },
+        );
+        draw_circle(r.x + 30.0, r.y + r.h * 0.5, 5.0, palette(3).dark);
+        ui.text_fitted(&format!("{}'s game", g.name), r.x + 46.0, r.y + 21.0, 16.0, 330.0, INK());
+        ui.text_fitted(
+            &format!("{} of {} seats taken  ·  {}", g.humans, g.players, g.addr),
+            r.x + 46.0,
+            r.y + 38.0,
+            11.5,
+            330.0,
+            with_alpha(INK(), 0.62),
+        );
+        let jb = Rect::new(r.x + r.w - 84.0, r.y + 8.0, 66.0, 30.0);
+        draw_round_rect(jb.x, jb.y, jb.w, jb.h, 10.0, control_fill(palette(HUMAN).fill, hovered));
+        ui.text_centered("JOIN", jb.x + jb.w * 0.5, jb.y + 20.0, 13.0, INK_ON_FILL);
+    }
+
+    // ---- direct connection
     let ra = r_join_addr();
-    menu_button(
-        ra,
-        SRF(),
-        if j.focus == 0 { BORDER() } else { CARD_EDGE() },
-        ra.contains(m),
-    );
-    ui.text_centered(
-        &format!("{}{}", j.addr, caret(j.focus == 0)),
-        ra.x + ra.w * 0.5,
-        ra.y + 31.0,
-        20.0,
-        INK(),
-    );
+    label("OR ENTER AN ADDRESS", JOIN_X, ra.y - 10.0);
+    let rc = r_join_code();
+    label("ROOM CODE", rc.x, rc.y - 10.0);
+    let addr_text = if j.addr.is_empty() && j.focus != 0 {
+        String::new()
+    } else {
+        format!("{}{}", j.addr, caret(j.focus == 0))
+    };
+    field(ra, j.focus == 0, &addr_text, 17.0);
+    if j.addr.is_empty() && j.focus != 0 {
+        ui.text("192.168.1.20", ra.x + 16.0, ra.y + 28.0, 16.0, with_alpha(INK(), 0.3));
+    }
     let rpst = r_join_paste();
     menu_button(rpst, SRF(), CARD_EDGE(), rpst.contains(m));
-    ui.text_centered("PASTE", rpst.x + rpst.w * 0.5, rpst.y + 30.0, 14.0, INK());
-    ui.text_centered(
-        "ROOM CODE",
-        WIN_W * 0.5,
-        390.0,
-        14.0,
-        with_alpha(INK(), 0.72),
-    );
-    let rc = r_join_code();
-    menu_button(
-        rc,
-        SRF(),
-        if j.focus == 1 { BORDER() } else { CARD_EDGE() },
-        rc.contains(m),
-    );
-    ui.text_centered(
-        &format!("{}{}", j.code, caret(j.focus == 1)),
-        rc.x + rc.w * 0.5,
-        rc.y + 31.0,
-        22.0,
-        INK(),
-    );
-    ui.text_centered(
-        "YOUR NAME",
-        WIN_W * 0.5,
-        484.0,
-        14.0,
-        with_alpha(INK(), 0.72),
-    );
-    let rn = r_join_name();
-    menu_button(
-        rn,
-        SRF(),
-        if j.focus == 2 { BORDER() } else { CARD_EDGE() },
-        rn.contains(m),
-    );
-    ui.text_centered(
-        &format!("{}{}", settings.name, caret(j.focus == 2)),
-        rn.x + rn.w * 0.5,
-        rn.y + 31.0,
-        20.0,
-        INK(),
-    );
+    ui.text_centered("PASTE", rpst.x + rpst.w * 0.5, rpst.y + 27.0, 13.0, INK());
+    field(rc, j.focus == 1, &format!("{}{}", j.code, caret(j.focus == 1)), 19.0);
     let rg = r_join_go();
-    menu_button(rg, palette(HUMAN).fill, BORDER(), rg.contains(m));
-    ui.text_centered("CONNECT", rg.x + rg.w * 0.5, rg.y + 31.0, 18.0, INK_ON_FILL);
+    menu_button(rg, palette(HUMAN).fill, darken(palette(HUMAN).fill, 0.8), rg.contains(m));
+    ui.text_centered("CONNECT", rg.x + rg.w * 0.5, rg.y + 31.0, 17.0, INK_ON_FILL);
     let rb = r_join_back();
     menu_button(rb, SRF(), CARD_EDGE(), rb.contains(m));
-    ui.text_centered("BACK", rb.x + rb.w * 0.5, rb.y + 31.0, 18.0, INK());
+    ui.text_centered("BACK", rb.x + rb.w * 0.5, rb.y + 31.0, 17.0, INK());
     if !j.status.is_empty() {
-        ui.text_centered(&j.status, WIN_W * 0.5, 670.0, 17.0, with_alpha(INK(), 0.75));
+        ui.text_centered(&j.status, WIN_W * 0.5, 712.0, 15.0, with_alpha(INK(), 0.75));
     }
 }
 
@@ -7168,9 +7550,18 @@ fn main() {
         }
     }
 
+    let mut lan_scan: Option<LanScan> = None;
+    let mut lan_beacon: Option<LanBeacon> = None;
     let mut previous_screen = None;
+    // Screen changes fade in from the surface color instead of cutting hard.
+    let mut screen_fade = 0.0f32;
     loop {
         let dt = get_frame_time().min(0.05);
+        if previous_screen.is_some_and(|p| p != screen)
+            && !REDUCED_MOTION.load(Ordering::Relaxed)
+        {
+            screen_fade = 1.0;
+        }
         let text_editing = (matches!(screen, Screen::Menu) && menu.editing)
             || lobby_name_edit
             || (matches!(screen, Screen::JoinLobby) && guest.is_none());
@@ -7222,7 +7613,7 @@ fn main() {
                         .iter()
                         .all(|f| f.shake <= 0.0 && f.bounce <= 0.0 && f.flash <= 0.0)
             });
-        if (quiet_menu || quiet_play) && !engine::input_changed() {
+        if (quiet_menu || quiet_play) && screen_fade <= 0.0 && !engine::input_changed() {
             if quiet_menu {
                 menu_time += dt;
             }
@@ -7237,6 +7628,22 @@ fn main() {
             continue;
         }
         previous_screen = Some(screen);
+
+        if matches!(screen, Screen::JoinLobby) && guest.is_none() {
+            lan_scan.get_or_insert_with(LanScan::new).tick(dt);
+        } else {
+            lan_scan = None;
+        }
+        if matches!(screen, Screen::HostLobby) && host.is_some() {
+            let beacon = lan_beacon.get_or_insert_with(LanBeacon::new);
+            if let Some(h) = &host {
+                let (code, humans) = (h.code.clone(), h.joined() + 1);
+                let (players, name) = (menu.players, settings.name.clone());
+                beacon.tick(dt, || lan_beacon_line(net_port(), &code, humans, players, &name));
+            }
+        } else {
+            lan_beacon = None;
+        }
 
         set_default_camera();
         clear_background(BG());
@@ -7720,7 +8127,20 @@ fn main() {
                         } else if r_over_gif().contains(m) {
                             replay = Some(Replay::new(g, true));
                             screen = Screen::Replay;
-                        } else {
+                        } else if r_over_new().contains(m) && guest.is_none() {
+                            if host.is_none() {
+                                menu.seed = random_seed();
+                                *g = gen_map_local(
+                                    menu.seed,
+                                    menu.players,
+                                    1,
+                                    menu.difficulty,
+                                    settings.team_cfg(),
+                                );
+                            } else {
+                                confirm = Some(Confirm::NewMap);
+                            }
+                        } else if r_over_menu().contains(m) {
                             go_menu = true;
                         }
                     }
@@ -8368,7 +8788,24 @@ fn main() {
                     if click && r_join_name().contains(m) {
                         join.focus = 2;
                     }
-                    if join.connect_rx.is_none()
+                    // One click on a LAN game fills in its address and code and connects.
+                    let picked = lan_scan.as_ref().and_then(|l| {
+                        l.games
+                            .iter()
+                            .enumerate()
+                            .find(|(i, _)| click && r_join_lan_row(*i).contains(m))
+                            .map(|(_, g)| g.clone())
+                    });
+                    if let Some(g) = picked.filter(|_| join.connect_rx.is_none()) {
+                        join.addr = g.addr;
+                        join.code = g.code;
+                        join.status = format!("Joining {}'s game...", g.name);
+                        join.connect_rx = Some(spawn_guest_connect(
+                            join.addr.clone(),
+                            join.code.clone(),
+                            settings.name.clone(),
+                        ));
+                    } else if join.connect_rx.is_none()
                         && ((click && r_join_go().contains(m)) || is_key_pressed(KeyCode::Enter))
                     {
                         join.status = "Connecting...".to_string();
@@ -8389,7 +8826,7 @@ fn main() {
                 if let Some(gn) = &guest {
                     draw_guest_lobby(&join, gn.seat, &settings, &ui, lobby_name_edit, menu_time);
                 } else {
-                    draw_join_lobby(&join, &settings, &ui, menu_time);
+                    draw_join_lobby(&join, lan_scan.as_ref(), &settings, &ui, menu_time);
                 }
                 if back {
                     guest = None;
@@ -8468,6 +8905,19 @@ fn main() {
                     menu.regen();
                 }
             }
+        }
+
+        if screen_fade > 0.0 {
+            set_default_camera();
+            let veil = SRF();
+            draw_rectangle(
+                0.0,
+                0.0,
+                screen_width(),
+                screen_height(),
+                with_alpha(veil, 0.85 * screen_fade * screen_fade),
+            );
+            screen_fade = (screen_fade - dt / 0.22).max(0.0);
         }
 
         if let Some(s) = &sounds {
@@ -9157,6 +9607,32 @@ mod tests {
         let _ = replay.shutdown(std::net::Shutdown::Both);
         drop(host);
         std::env::remove_var("DW_PORT");
+    }
+
+    #[test]
+    fn lan_beacons_round_trip_and_reject_malformed_input() {
+        let from: std::net::SocketAddr = "192.168.1.20:50000".parse().unwrap();
+        let line = lan_beacon_line(7777, "123456", 2, 6, "Lenni");
+        let game = parse_lan_beacon(&line, from).expect("valid beacon");
+        assert_eq!(game.addr, "192.168.1.20:7777");
+        assert_eq!((game.code.as_str(), game.humans, game.players), ("123456", 2, 6));
+        assert_eq!(game.name, "Lenni");
+        for bad in [
+            "",
+            "DICEWARS-LAN",
+            &line.replace("123456", "12345"),
+            &line.replace("123456", "12345x"),
+            &line.replace(" 2 6 ", " 7 6 "),
+            &line.replace(" 2 6 ", " 2 99 "),
+            &line.replace(" 7777 ", " 0 "),
+            &format!("{line} extra"),
+            &line.replace(&format!(" {NET_PROTO} "), " 0 "),
+            &"x".repeat(200),
+        ] {
+            assert!(parse_lan_beacon(bad, from).is_none(), "accepted {bad:?}");
+        }
+        let v6: std::net::SocketAddr = "[::1]:50000".parse().unwrap();
+        assert!(parse_lan_beacon(&line, v6).is_none());
     }
 
     #[test]

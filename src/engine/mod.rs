@@ -793,9 +793,11 @@ pub fn shutdown() {
                 let means: [f64; 4] = std::array::from_fn(|i| samples.iter().map(|s| s[i]).sum::<f64>() / samples.len() as f64);
                 let mean = means[0];
                 samples.sort_by(|a, b| a[0].total_cmp(&b[0]));
+                let slow = samples.iter().filter(|s| s[0] > 1000.0 / 60.0).count();
                 eprintln!(
-                    "Frame work: mean {mean:.2} ms, p95 {:.2} ms ({} frames)",
+                    "Frame work: mean {mean:.2} ms, p95 {:.2} ms, max {:.2} ms, {slow} over 16.7 ms ({} frames)",
                     samples[(samples.len() * 95 / 100).min(samples.len() - 1)][0],
+                    samples[samples.len() - 1][0],
                     samples.len()
                 );
                 eprintln!("Frame stages: update/draw {:.2} ms (layer copies {:.2}), resolve {:.2} ms, present/capture {:.2} ms", means[1], means[3], means[2], (means[0] - means[1] - means[2]).max(0.0));
